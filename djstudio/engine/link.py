@@ -101,11 +101,12 @@ class SimLink(Link):
     """
 
     def __init__(self, library: list[dict[str, Any]], speed: float = 1.0, mapping: Path | None = None,
-                 extra_args: list[str] | None = None) -> None:
+                 extra_args: list[str] | None = None, cmd: list[str] | None = None,
+                 env: dict[str, str] | None = None) -> None:
         mapping = mapping or Path(__file__).parent / "mapping" / "DJStudio.js"
-        args = ["node", str(SIM_SCRIPT), "--mapping", str(mapping), "--speed", str(speed)] + (extra_args or [])
+        args = cmd or ["node", str(SIM_SCRIPT), "--mapping", str(mapping), "--speed", str(speed)] + (extra_args or [])
         self._p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, bufsize=1)
+                                   text=True, bufsize=1, env=env)
         self._lock = threading.Lock()
         self._sim_replies: list[dict[str, Any]] = []
         self._sim_cv = threading.Condition()
@@ -126,8 +127,13 @@ class SimLink(Link):
                     self._sim_replies.append(json.loads(line[1:]))
                     self._sim_cv.notify_all()
                 continue
+            try:
+                raw = bytes.fromhex(line)
+            except ValueError:
+                self.stderr_lines.append(line)  # 不是协议行（测试框架 / 日志输出）
+                continue
             if self.on_raw:
-                self.on_raw(list(bytes.fromhex(line)))
+                self.on_raw(list(raw))
 
     def _read_err(self) -> None:
         assert self._p.stderr
@@ -169,3 +175,21 @@ class SimLink(Link):
     @property
     def name(self) -> str:
         return "sim"
+
+
+class HarnessLink(SimLink):
+    """真 Mixxx 测试台（tools/mixxx-harness）：同一套行协议，背后是 Mixxx 2.5.6 的真 MidiController、
+    脚本引擎、deck 与效果。library 里每首歌给 path（音频文件）、bpm、first_beat。"""
+
+    def __init__(self, binary: Path, library: list[dict[str, Any]], speed: float = 1.0,
+                 mapping_xml: Path | None = None) -> None:
+        import os
+
+        mapping_xml = mapping_xml or Path(__file__).parent / "mapping" / "DJStudio.midi.xml"
+        env = {**os.environ, "DJSTUDIO_MAPPING": str(mapping_xml), "DJSTUDIO_SPEED": str(speed),
+               "QT_QPA_PLATFORM": "offscreen", "QT_LOGGING_RULES": "*.debug=false"}
+        super().__init__(library, speed, cmd=[str(binary), "--gtest_filter=DJStudioHarness.Run"], env=env)
+
+    @property
+    def name(self) -> str:
+        return "mixxx-2.5.6-harness"
