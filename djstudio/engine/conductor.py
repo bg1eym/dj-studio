@@ -156,10 +156,13 @@ class Conductor:
                 self.c.send({"t": "eject", "deck": d})
         self._wait(lambda: not any(self.c.deck(d).loaded for d in (1, 2)), 5.0, "清空 deck")  # type: ignore[union-attr]
 
-        # 开场
-        self._load(0)
         op = self.compiled.opening
         assert op is not None
+        for d in (1, 2):
+            self.c.send({"t": "set", "g": f"[Channel{d}]", "k": "keylock", "v": 1 if op.get("keylock") else 0})
+
+        # 开场
+        self._load(0)
         info = self.tracks[0]
         assert info is not None
         d0 = op["deck"]

@@ -197,10 +197,13 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None]) -> 
     if not c.ok:
         return c
 
+    if s.keylock:
+        warn("set", "开了 keylock：变速的 deck 在 Mixxx 里会比另一边晚约 20–30ms，两个 kick 叠在一起时会有双击感")
     tinfo: list[TrackInfo] = infos  # type: ignore[assignment]
     first = s.tracks[0]
     c.opening = {
         "t": "opening",
+        "keylock": s.keylock,
         "deck": deck_for(0),
         "beat": round(tinfo[0].grid.bar_beat(first.start), 4),
         "bpm": play_bpm(first, tinfo[0]),

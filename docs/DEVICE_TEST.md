@@ -23,14 +23,14 @@
 ## 2. 映射 + 真机探测
 
 1. 「同步」或「准备」会把 `DJStudio.js` / `DJStudio.midi.xml` 部署到 Mixxx 的 controllers 目录。
-2. 准备时会自动把 mixxx.cfg 里 IAC 总线的映射换成 DJ Studio（沿用原来 AgentMCP 用的设备）。若日志提示找不到 IAC 设备，就在 Mixxx → 偏好设置 → 控制器 → IAC 总线：映射选 **DJ Studio**，勾「启用」。右上角应显示「引擎在线 0.2.0」。
+2. 准备时会自动把 mixxx.cfg 里 IAC 总线的映射换成 DJ Studio（沿用原来 AgentMCP 用的设备）。若日志提示找不到 IAC 设备，就在 Mixxx → 偏好设置 → 控制器 → IAC 总线：映射选 **DJ Studio**，勾「启用」。右上角应显示「引擎在线 0.3.0」。
 3. 往 deck1 拖一首已分析的歌（不播放），把播放位置拖到曲中，然后在「体检」页点**真机探测**（或 `djstudio probe`）。
 
 Mixxx 的行为已经按 2.5.6 源码逐条核对过（见 [MIXXX_NOTES.md](MIXXX_NOTES.md)），探测在真机上再确认一遍：
 
 | 检查 | 不通过时 |
 |---|---|
-| SysEx 双向（Python→引擎 需要 XML 里的 0xF0 绑定） | 映射没换成 DJ Studio / 不是 0.2.0；准备时会自动改 mixxx.cfg |
+| SysEx 双向（Python→引擎 需要 XML 里的 0xF0 绑定） | 映射没换成 DJ Studio / 不是 0.3.0；准备时会自动改 mixxx.cfg |
 | CC 备用传输 | 仅备用 |
 | EQ / 滤波 / 效果单元控件能写能读 | 效果单元里没放效果，或 Mixxx 版本不同 |
 | `bpm` 控件可写 | 版本不同 |

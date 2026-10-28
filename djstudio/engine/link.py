@@ -186,7 +186,10 @@ class HarnessLink(SimLink):
         import os
 
         mapping_xml = mapping_xml or Path(__file__).parent / "mapping" / "DJStudio.midi.xml"
+        # mixxx-src/build/mixxx-test → mixxx-src/res/controllers（common-controller-scripts.js 所在）
+        system = Path(binary).resolve().parents[1] / "res" / "controllers"
         env = {**os.environ, "DJSTUDIO_MAPPING": str(mapping_xml), "DJSTUDIO_SPEED": str(speed),
+               "DJSTUDIO_SYSTEM_MAPPINGS": str(system),
                "QT_QPA_PLATFORM": "offscreen", "QT_LOGGING_RULES": "*.debug=false"}
         super().__init__(library, speed, cmd=[str(binary), "--gtest_filter=DJStudioHarness.Run"], env=env)
 

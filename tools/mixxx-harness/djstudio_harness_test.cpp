@@ -5,7 +5,8 @@
 // 协议与 sim/fake_mixxx.mjs 相同：十六进制 = 原始 MIDI；'#' 开头 = 控制命令 / 回复（JSON）。
 // 其他输出（gtest、qDebug）走 stderr 或被 Python 忽略。
 //
-// 环境变量：DJSTUDIO_MAPPING = DJStudio.midi.xml 路径；DJSTUDIO_SPEED = 引擎相对墙钟的倍速（默认 1）。
+// 环境变量：DJSTUDIO_MAPPING = DJStudio.midi.xml 路径；DJSTUDIO_SYSTEM_MAPPINGS = Mixxx 的 res/controllers
+// （放 common-controller-scripts.js 的目录）；DJSTUDIO_SPEED = 引擎相对墙钟的倍速（默认 1）。
 //
 // 不是 Mixxx 的地方（明确列出）：
 // - [AutoDJ],enabled / skip_next 由本文件里移植的 AutoDJProcessor 逻辑处理（toggleAutoDJ / P1LOADED /
@@ -469,7 +470,7 @@ class DJStudioHarness : public BaseSignalPathTest {
             r["ok"] = true;
         } else {
             r["ok"] = false;
-            r["err"] = "unknown command " + cmd;
+            r["err"] = QString(QStringLiteral("unknown command ") + cmd);
         }
         emitLine("#" + QJsonDocument(r).toJson(QJsonDocument::Compact).toStdString());
     }
@@ -509,8 +510,11 @@ TEST_F(DJStudioHarness, Run) {
     gOut = fdopen(dup(fileno(stdout)), "w");
     dup2(fileno(stderr), fileno(stdout));
 
+    // Mixxx 总会先加载系统映射目录里的 common-controller-scripts.js
+    // （legacycontrollermappingfilehandler.cpp:233 REQUIRED_SCRIPT_FILE）
+    const QDir systemMappings(qEnvironmentVariable("DJSTUDIO_SYSTEM_MAPPINGS"));
     auto pMapping = LegacyControllerMappingFileHandler::loadMapping(
-            QFileInfo(QString::fromLocal8Bit(mappingPath)), QDir());
+            QFileInfo(QString::fromLocal8Bit(mappingPath)), systemMappings);
     ASSERT_TRUE(pMapping) << "映射加载失败";
     m_ctrl = std::make_unique<HarnessController>();
     m_ctrl->setMapping(pMapping);

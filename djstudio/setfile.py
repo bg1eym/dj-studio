@@ -120,6 +120,8 @@ class SetFile(_Model):
     created: str = ""
     source: str = ""  # 编排方案出处
     note: str = ""
+    # 变速时保持音高。默认关：Mixxx 的时间拉伸会让非原速的 deck 晚 17–29ms，叠 kick 时听得出（见 MIXXX_NOTES）
+    keylock: bool = False
     tracks: list[SetTrack]
     transitions: list[Transition]
     ending: Ending = Field(default_factory=Ending)

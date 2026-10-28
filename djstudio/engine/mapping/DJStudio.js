@@ -19,10 +19,11 @@
 //   getBeatMatchPosition，就近 ±0.5 拍）。所以 B 停在 b_in 的整拍上，到点只按 play，相位由 Mixxx 采样级对齐。
 // - 暂停时 seek 不做相位调整（processSeek: !paused && SEEK_PHASE），cue 到的就是精确位置。
 // - 空 deck 上 eject 会重新装回上一首被弹出的歌（basetrackplayer.cpp slotEjectTrack）→ 只对已装载的 deck eject。
+// - keylock 开着时时间拉伸有未补偿的延迟（真引擎测试台实测，见 docs/MIXXX_NOTES.md）→ 默认关。
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.2.0";
+DJStudio.VERSION = "0.3.0";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -68,7 +69,9 @@ DJStudio.init = function (id, debugging) {
     DJStudio.reset();
     for (var d = 1; d <= 2; d++) {
         DJStudio.set(DJStudio.ch(d), "quantize", 1);
-        DJStudio.set(DJStudio.ch(d), "keylock", 1);
+        // keylock 默认关：在真 Mixxx 2.5.6 上实测，keylock 开着且 deck 不在原速时，时间拉伸器（SoundTouch /
+        // RubberBand 都一样）让声音比报告的位置晚 17–29ms，两个 kick 叠出明显的「双击」。set 可以显式打开。
+        DJStudio.set(DJStudio.ch(d), "keylock", 0);
     }
     // 两 deck 分在推子两侧（AutoDJ 的前提），推子归中；混音只用通道音量。
     DJStudio.set("[Channel1]", "orientation", 0);

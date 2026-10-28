@@ -74,6 +74,16 @@
 | ✅ | `key_id` = ChromaticKey 枚举（1–12 大调 C…B，13–24 小调 C…B）。 | `proto/keys.proto:13-39` |
 | ✅ | `[Library] RescanOnStartup` 为真时启动扫描曲库目录。 | `library/library_prefs.cpp:16-19`；`coreservices.cpp:612-617` |
 
+## 真引擎测试台实测（tools/mixxx-harness）
+
+这些不是读源码得出的，是把 DJStudio.js 装进 Mixxx 2.5.6 真正的 MidiController / 引擎、录下主输出后测出来的。
+
+| | 结论 | 测法 |
+|---|---|---|
+| ✅ | 整套 set（长交接 + 瞬时切换 + 终曲淡出）在真引擎里按谱面跑完；过渡中两边时间线拍位差 < 0.05 拍。冷启动时 AutoDJ 抢先预载 deck2 的竞态真实出现，身份核对正确处理。 | `tests/test_mixxx_harness.py` |
+| ✅ | 映射加载时 Mixxx 总会先加载系统目录里的 `common-controller-scripts.js`（真机上在 app 资源里，不用我们管）。 | `legacycontrollermappingfilehandler.cpp:233` |
+| ❌ | **keylock 开着、deck 不在原速时，听到的声音比引擎报告的位置晚 17–29ms**（SoundTouch、RubberBand Faster、RubberBand Finer 都一样；keylock 关时完全对齐）。两个 kick 叠在一起会听出「双击」。引擎现在默认关 keylock（0.3.0 起），set 可以用 `"keylock": true` 打开，校验会提示。 | 两首合成曲，B 以非原速起播，录主输出后检测 kick 起音间隔：keylock 开时成对起音相隔 17–29ms，关时 0 |
+
 ## 平台差异（仍需真机确认）
 
 - macOS 版 Mixxx 用 CoreAudio 解码 MP3/AAC（`COREAUDIO` 选项），我们的分析用 ffmpeg。两者对编码器延迟的处理可能差几十毫秒，

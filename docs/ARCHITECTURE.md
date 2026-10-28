@@ -57,4 +57,8 @@ Mixxx + DJStudio.js（控制器映射）
 - `tests/test_studio.py`：导入合成音频 → 分析（BPM / 首拍 / 小节相位 / 段落）→ 假 mixxxdb → 准备 → 播完。
 - `tests/test_web.py`：API 冒烟、路径限制。
 
-模拟器按我们对 Mixxx 的理解写成，**不能替代真机**。真机上需要验证的假设见 [DEVICE_TEST.md](DEVICE_TEST.md)。
+- `tests/test_mixxx_harness.py`：同样的 conductor 驱动**真 Mixxx 2.5.6 的代码**（`tools/mixxx-harness`，编进 Mixxx 自己的测试程序：
+  真 MidiController、脚本引擎、deck、EQ / 滤波、同步），并录下主输出，在**音频**上检查过渡中两个 kick 没有双击。需要先构建 Mixxx，否则跳过。
+
+Node 模拟器按 Mixxx 源码的行为写成（docs/MIXXX_NOTES.md）；真引擎测试台跑的是 Mixxx 本身的代码，但没有 CoreMIDI / IAC、
+PlayerManager 和真 AutoDJProcessor。两者都**不能替代 Mac 上的真机**，真机要验证的见 [DEVICE_TEST.md](DEVICE_TEST.md)。

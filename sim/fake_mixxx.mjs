@@ -6,6 +6,7 @@
 // 虚拟时钟按 speed 倍速推进；脚本里的 Date.now() 与定时器都走虚拟时钟。
 //
 // 每条被模拟的行为都对应 Mixxx 2.5.6 的具体源码（行号见注释与 docs/MIXXX_NOTES.md）。
+// 不模拟 keylock 时间拉伸的延迟（那是在真引擎测试台上实测出来的，见 tools/mixxx-harness）。
 // 它仍然只是模型：真机验证见 `djstudio probe`。
 
 import fs from "node:fs";

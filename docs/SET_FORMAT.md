@@ -19,6 +19,7 @@
   "created": "2026-10-28",
   "source": "CDW 技法实战 set 打碟谱 v1",  // 编排方案出处
   "note": "",
+  "keylock": false,                     // 变速保持音高；默认关（Mixxx 时间拉伸会让变速的 deck 晚 20–30ms，叠 kick 有双击感）
   "tracks": [
     {
       "id": "3f2a9c0d1e4b",             // 曲库 id（网页曲库 / API 里看）；或用 "file": "子文件夹/文件名.mp3"
