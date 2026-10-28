@@ -1,0 +1,31 @@
+[project]
+name = "djstudio"
+version = "0.1.0"
+description = "Mixxx 驱动的自动打碟 Web App：本地导入音频、按编排方案生成 set、由 Mixxx 执行混音"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "pydantic>=2.6",
+  "numpy>=1.26",
+  "python-rtmidi>=1.5; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+djstudio = "djstudio.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["djstudio*"]
+
+[tool.setuptools.package-data]
+djstudio = ["engine/mapping/*", "web/static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
