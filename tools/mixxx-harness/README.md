@@ -39,3 +39,5 @@ link = HarnessLink(Path("mixxx-src/build/mixxx-test"),
 
 `speed` 是音频引擎相对墙钟的倍速（脚本定时器按墙钟走，所以不宜超过 4）。
 `link.sim({"cmd": "record", "path": "/abs/out.wav"})` 开始录主输出，`record_stop` 结束。
+`link.sim({"cmd": "analyze", "ids": ["a"]})` 用 Mixxx 自己的 AnalyzerBeats / AnalyzerKey 分析（与 Mixxx 分析线程同样的流程），
+返回 BPM、首拍、调性和序列化后的网格 blob。

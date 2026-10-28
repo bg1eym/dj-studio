@@ -32,13 +32,19 @@
 #include <string>
 #include <thread>
 
+#include "analyzer/analyzerbeats.h"
+#include "analyzer/analyzerkey.h"
+#include "analyzer/analyzertrack.h"
+#include "analyzer/constants.h"
 #include "control/controlobject.h"
 #include "control/controlpushbutton.h"
 #include "controllers/legacycontrollermappingfilehandler.h"
 #include "controllers/midi/legacymidicontrollermapping.h"
 #include "controllers/midi/midicontroller.h"
 #include "effects/effectsmanager.h"
+#include "sources/audiosourcestereoproxy.h"
 #include "sources/soundsourceproxy.h"
+#include "util/samplebuffer.h"
 #include "test/signalpathtest.h"
 #include "track/beats.h"
 #include "track/track.h"
@@ -312,6 +318,73 @@ class DJStudioHarness : public BaseSignalPathTest {
         return r;
     }
 
+    // ------------------------------------------------------------ Mixxx 分析器（analyzerthread.cpp 的流程）
+
+    QJsonObject analyzeTrack(const QString& id) {
+        QJsonObject r;
+        r["id"] = id;
+        auto it = m_lib.find(id);
+        if (it == m_lib.end()) {
+            r["error"] = QStringLiteral("unknown id");
+            return r;
+        }
+        TrackPointer pTrack = it->second.track;
+        mixxx::AudioSource::OpenParams openParams;
+        openParams.setChannelCount(mixxx::kAnalysisChannels);
+        const auto audioSource = SoundSourceProxy(pTrack).openAudioSource(openParams);
+        if (!audioSource) {
+            r["error"] = QStringLiteral("open failed");
+            return r;
+        }
+        AnalyzerTrack at(pTrack);
+        AnalyzerBeats beats(config(), true);
+        AnalyzerKey key(config());
+        const auto sr = audioSource->getSignalInfo().getSampleRate();
+        const bool doBeats = beats.initialize(at, sr, audioSource->frameLength());
+        const bool doKey = key.initialize(at, sr, audioSource->frameLength());
+        mixxx::AudioSourceStereoProxy proxy(audioSource, mixxx::kAnalysisFramesPerChunk);
+        mixxx::SampleBuffer buffer(mixxx::kAnalysisSamplesPerChunk);
+        mixxx::IndexRange remaining = audioSource->frameIndexRange();
+        while (!remaining.empty()) {
+            auto chunk = remaining.splitAndShrinkFront(
+                    std::min(mixxx::kAnalysisFramesPerChunk, remaining.length()));
+            const auto readable = proxy.readSampleFrames(mixxx::WritableSampleFrames(
+                    chunk, mixxx::SampleBuffer::WritableSlice(buffer)));
+            remaining = intersect(remaining, proxy.frameIndexRange());
+            if (!readable.frameIndexRange().empty()) {
+                if (doBeats) {
+                    beats.processSamples(readable.readableData(), readable.readableLength());
+                }
+                if (doKey) {
+                    key.processSamples(readable.readableData(), readable.readableLength());
+                }
+            }
+        }
+        if (doBeats) {
+            beats.storeResults(pTrack);
+            beats.cleanup();
+        }
+        if (doKey) {
+            key.storeResults(pTrack);
+            key.cleanup();
+        }
+        auto pBeats = pTrack->getBeats();
+        r["analyzed_beats"] = doBeats;
+        r["samplerate"] = static_cast<int>(sr.value());
+        r["duration"] = pTrack->getDuration();
+        r["bpm"] = pTrack->getBpm();
+        r["key_id"] = static_cast<int>(pTrack->getKey());
+        r["key"] = pTrack->getKeyText();
+        if (pBeats) {
+            r["first_beat"] = pBeats->firstBeat().value() / sr.toDouble();
+            r["beats_version"] = pBeats->getVersion();
+            r["beats_sub_version"] = pBeats->getSubVersion();
+            // 与数据库里存的一样的 blob（Python 用它验证我们的解码）
+            r["beats_blob"] = QString::fromLatin1(pBeats->toByteArray().toHex());
+        }
+        return r;
+    }
+
     // ------------------------------------------------------------ 录音
 
     void startRecord(const QString& path) {
@@ -431,6 +504,13 @@ class DJStudioHarness : public BaseSignalPathTest {
             QJsonArray out;
             for (const auto& v : c["tracks"].toArray()) {
                 out.append(addTrack(v.toObject()));
+            }
+            r["ok"] = true;
+            r["tracks"] = out;
+        } else if (cmd == "analyze") {
+            QJsonArray out;
+            for (const auto& v : c["ids"].toArray()) {
+                out.append(analyzeTrack(v.toString()));
             }
             r["ok"] = true;
             r["tracks"] = out;

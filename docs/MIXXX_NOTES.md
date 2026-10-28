@@ -82,6 +82,8 @@
 |---|---|---|
 | ✅ | 整套 set（长交接 + 瞬时切换 + 终曲淡出）在真引擎里按谱面跑完；过渡中两边时间线拍位差 < 0.05 拍。冷启动时 AutoDJ 抢先预载 deck2 的竞态真实出现，身份核对正确处理。 | `tests/test_mixxx_harness.py` |
 | ✅ | 映射加载时 Mixxx 总会先加载系统目录里的 `common-controller-scripts.js`（真机上在 app 资源里，不用我们管）。 | `legacycontrollermappingfilehandler.cpp:233` |
+| ✅ | 用 Mixxx 自己的 `AnalyzerBeats` 分析后序列化出的 blob，我们的解码器读出的 BPM / 首拍与 Mixxx 完全一致（帧单位再次确认）。分析器的 sub_version 形如 `rounding=V4|vamp_plugin_id=qm-tempotracker:0`。 | 测试台 `analyze` 命令 |
+| ⚠️ | Mixxx 的节拍分析（qm-tempotracker）在我们的合成曲上把网格放到了**反拍**（偏半拍左右）；我们的自估网格对准了 kick。合成曲的反拍 bass / hat 很突出，真曲未必如此——但这说明「网格核对」必须看：Mixxx 网格偏半拍时同步会把两个 kick 错开半拍。 | 同上，三首合成曲 |
 | ❌ | **keylock 开着、deck 不在原速时，听到的声音比引擎报告的位置晚 17–29ms**（SoundTouch、RubberBand Faster、RubberBand Finer 都一样；keylock 关时完全对齐）。两个 kick 叠在一起会听出「双击」。引擎现在默认关 keylock（0.3.0 起），set 可以用 `"keylock": true` 打开，校验会提示。 | 两首合成曲，B 以非原速起播，录主输出后检测 kick 起音间隔：keylock 开时成对起音相隔 17–29ms，关时 0 |
 
 ## 平台差异（仍需真机确认）
