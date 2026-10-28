@@ -45,6 +45,8 @@ class Config:
     library: Path = field(default_factory=lambda: _env_path("DJSTUDIO_LIBRARY", "~/Music/DJStudio"))
     mixxx_dir: Path = field(default_factory=find_mixxx_dir)
     midi_port: str = field(default_factory=lambda: os.environ.get("DJSTUDIO_MIDI_PORT", "IAC"))
+    # 网页里允许浏览 / 导入的根目录（防止网页读到任意路径）
+    browse_roots: list[Path] = field(default_factory=lambda: [Path.home(), Path("/Volumes")])
     host: str = "127.0.0.1"
     port: int = int(os.environ.get("DJSTUDIO_PORT", "8430"))
 

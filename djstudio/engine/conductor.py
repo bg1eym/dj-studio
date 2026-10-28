@@ -6,7 +6,7 @@ conductor 只做「慢」的事：装载下一首并核对身份、提前下发�
 硬规则（来自旧系统的教训）：
 - 所有等待都有上限；
 - 引擎状态帧 >1.5s 没来 = 失联：立刻报警、停发一切命令；超过 lost_timeout 仍未恢复则放弃；
-- 装载后用时长核对身份（±0.5s），对不上宁可停也不错放；
+- 装载后用时长（±1s）+ 网格 BPM 核对身份，对不上宁可停也不错放；
 - Mixxx 重载了映射（收到 boot hello）= 引擎状态丢失，停止。
 """
 from __future__ import annotations
@@ -21,7 +21,8 @@ from typing import Any, Callable
 from ..compiler import Compiled, deck_for
 from .client import EngineClient, EngineError
 
-DUR_TOL_MS = 500
+DUR_TOL_MS = 1000  # Mixxx 库里的时长可能被取整；再加 BPM 指纹一起核对
+BPM_TOL = 0.1
 
 
 class StopRequested(Exception):
@@ -230,7 +231,8 @@ class Conductor:
         assert info is not None
         want = info.grid.duration * 1000
         ds = self.c.deck(d)
-        if ds and ds.loaded and not ds.playing and abs(ds.dur_ms - want) <= DUR_TOL_MS:
+        if (ds and ds.loaded and not ds.playing and abs(ds.dur_ms - want) <= DUR_TOL_MS
+                and (ds.file_bpm <= 0 or abs(ds.file_bpm - info.bpm) <= BPM_TOL)):
             self.log(f"deck{d} 已装好 {self._title(k)}")
             return
         if ds and ds.playing:
@@ -253,6 +255,10 @@ class Conductor:
             raise ConductorError(
                 f"装错曲：deck{d} 期望 {self._title(k)}（{want / 1000:.1f}s），实际装上 {got['dur'] / 1000:.1f}s"
                 "——AutoDJ 队列和 set 不一致，请重新准备")
+        fbpm = float(got.get("fbpm") or 0)
+        if fbpm > 0 and abs(fbpm - info.bpm) > BPM_TOL:
+            raise ConductorError(
+                f"装错曲或网格变了：deck{d} 期望 {self._title(k)}（{info.bpm:g} BPM），实际 {fbpm:g} BPM")
         self.log(f"载入 {self._title(k)} → deck{d}（{got['dur'] / 1000:.1f}s，{got.get('fbpm')} BPM）✓")
 
     # ------------------------------------------------------------ 程序

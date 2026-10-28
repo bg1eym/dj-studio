@@ -424,7 +424,10 @@ DJStudio.startLoad = function (d) {
     if (DJStudio.playing(other) && DJStudio.prog && DJStudio.prog.st === "running" && DJStudio.prog.p.b &&
         DJStudio.prog.p.b.deck === d) { return "deck in use by running program"; }
     DJStudio.set(DJStudio.ch(d), "volume", 0);
-    DJStudio.loader = { deck: d, st: "eject", t: DJStudio.now(), otherVol: DJStudio.get(DJStudio.ch(other), "volume") };
+    var otherVol = DJStudio.get(DJStudio.ch(other), "volume");
+    // 两边都没在播时，AutoDJ 可能把歌装进另一边并起播：另一边也先静音
+    if (!DJStudio.playing(other)) { DJStudio.set(DJStudio.ch(other), "volume", 0); }
+    DJStudio.loader = { deck: d, st: "eject", t: DJStudio.now(), otherVol: otherVol, otherWasPlaying: DJStudio.playing(other) };
     if (DJStudio.loaded(d)) { DJStudio.set(DJStudio.ch(d), "eject", 1); }
     return "";
 };
@@ -453,6 +456,7 @@ DJStudio.runLoader = function () {
         DJStudio.set(g, "play", 0);
         DJStudio.set(g, "volume", 0);
         DJStudio.set("[Master]", "crossfader", 0); // AutoDJ 会甩推子
+        if (!L.otherWasPlaying && DJStudio.playing(other)) { DJStudio.set(DJStudio.ch(other), "play", 0); }
         DJStudio.set(DJStudio.ch(other), "volume", L.otherVol);
         DJStudio.neutral(d);
         DJStudio.loader = null;
