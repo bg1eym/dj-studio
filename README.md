@@ -83,4 +83,4 @@ cd ~/dj-studio && python3 -m venv ~/.venvs/djstudio && ~/.venvs/djstudio/bin/pip
 ~/.venvs/djstudio/bin/pytest
 ```
 
-测试需要 `node`（运行模拟器）和 `ffmpeg`。文档：[架构](docs/ARCHITECTURE.md) · [set 格式](docs/SET_FORMAT.md) · [引擎协议](docs/ENGINE.md) · [上机测试](docs/DEVICE_TEST.md)。
+测试需要 `node`（运行模拟器）和 `ffmpeg`。文档：[架构](docs/ARCHITECTURE.md) · [set 格式](docs/SET_FORMAT.md) · [引擎协议](docs/ENGINE.md) · [Mixxx 源码核对](docs/MIXXX_NOTES.md) · [上机测试](docs/DEVICE_TEST.md)。

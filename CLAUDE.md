@@ -8,7 +8,7 @@
 
 - 测试：`pytest`（需要 node 和 ffmpeg）。改了引擎脚本、协议、conductor 后必须跑 `tests/test_sim_e2e.py`。
 - 改 `DJStudio.js` 时同步改 `protocol.py` / `sim/fake_mixxx.mjs`，并把 `DJStudio.VERSION` 加一。脚本只用 ES5。
-- 涉及平台行为（进程名、MIDI 口名、Mixxx 控件、mixxxdb 结构）的判断**必须真机验证**：模拟器是按我们的理解写的，测过不代表 Mixxx 真这样。不确定的地方写进 docs/DEVICE_TEST.md 的假设表。
+- 涉及 Mixxx 行为的判断**先查 Mixxx 源码**（docs/MIXXX_NOTES.md 记录了已核对的结论和行号），不能凭印象；平台行为（进程名、MIDI 口名、CoreMIDI）还**必须真机验证**：模拟器是按我们的理解写的，测过不代表 Mixxx 真这样。不确定的地方写进 docs/DEVICE_TEST.md 的假设表。
 - 演示模式 `djstudio demo` 可以在没有 Mixxx 的环境里跑完整流程（含网页）。
 
 ## 把编排方案转成 set 文件

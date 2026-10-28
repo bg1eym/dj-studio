@@ -1,0 +1,81 @@
+# Mixxx 行为核对记录（按 2.5.6 源码）
+
+引擎脚本、数据库读写、AutoDJ 用法都依赖 Mixxx 的具体行为。这里逐条记录**从 Mixxx 2.5.6 源码核对**的结论
+（tag `2.5.6`，commit `3ebac44`），附文件和行号。改相关代码前先看这里；Mixxx 升级后要重新核对。
+
+标记：✅ 原来的理解正确　❌ 原来理解错了，已修正　⚠️ 需要注意的行为
+
+## 控制器脚本与 MIDI
+
+| | 结论 | 源码 |
+|---|---|---|
+| ❌ | **SysEx 不会自动交给脚本**。`MidiController::receive(QByteArray)` 按 (status=0xF0, control=0xFF) 查 XML 输入映射，只有存在带 `<script-binding/>` 的 0xF0 映射时才调用 `handleIncomingData`。原来的 XML 没有这条，Python 发的命令会被静默丢弃（引擎状态照样能回传，看起来"在线"）。已在 `DJStudio.midi.xml` 加上。 | `src/controllers/midi/midicontroller.cpp:577-616`；`midimessage.cpp:17`（非两字节消息的 control 记为 0xFF） |
+| ✅ | `incomingData(data, length)` 收到的是 `Uint8Array`，包含首尾的 F0 / F7；同一映射里所有前缀的 `incomingData` 都会被调用。 | `controllerscriptenginelegacy.cpp:126-165, 199-215` |
+| ✅ | PortMidi 收 SysEx 的缓冲是 1024 字节（我们的分片 ≤ 208 字节）。 | `portmidicontroller.h:33-36`，`portmidicontroller.cpp:118-190` |
+| ✅ | `midi.sendSysexMsg(list, length)`：length 被忽略，数据必须以 F7 结尾。 | `midicontroller.h:69`，`portmidicontroller.cpp:225` |
+| ✅ | `engine.beginTimer(ms, function, oneShot)`；传字符串会报错；最短 20ms。 | `controllerscriptinterfacelegacy.cpp:483-511` |
+| ✅ | `engine.makeConnection(group, key, cb)`，回调参数 `(value, group, key)`。 | `controllerscriptinterfacelegacy.cpp` |
+| ⚠️ | 脚本文件被 Mixxx 监视，改动会**热重载**映射（引擎状态清空，重新 `init`）。只在 Mixxx 退出时部署。 | `controllerscriptenginelegacy.cpp:226-235` |
+| ✅ | 设备名 = PortMidi 设备名；`mixxx.cfg` 里 `[ControllerPreset] <设备名>` = 映射文件绝对路径，`[Controller] <设备名>` = 1 才启用；设备名里的空格、`/`、`\` 换成 `_`。准备时自动改写（沿用原来 AgentMCP 用的那个设备键）。 | `controllermanager.cpp:47-49, 240-275, 415-440` |
+| ✅ | `mixxx.cfg` 格式：`[组]` 行，其后每行 `键 值`；读取时值会 trim。 | `preferences/configobject.cpp:190-230, 260-275` |
+
+## 播放位置与时间精度
+
+| | 结论 | 源码 |
+|---|---|---|
+| ❌ | **`playposition` 每秒只更新 15 次**（约 67ms 一次）。原来用它每 20ms 算拍位，最多滞后 0.14 拍（128 BPM）。 | `engine/enginebuffer.cpp:53, 1475-1481` |
+| ✅ | `beat_distance` 在每个音频 buffer 的 `postProcess` 里更新。现在拍位 = `playposition` 估出的整数拍 + `beat_distance` 小数部分。 | `enginebuffer.cpp:1389-1399`；`controls/bpmcontrol.cpp:1244` |
+| ✅ | 写 `playposition` = 按比例 seek。**暂停时 seek 不做相位调整**（`processSeek` 里 `!paused && SEEK_PHASE`），所以 B 能停在 `b_in` 的精确整拍上。 | `enginebuffer.cpp:158-162, 698, 1305-1370` |
+| ✅ | **quantize 开着时按 play 会请求相位同步**：引擎把这一 deck 对齐到另一个正在播的 deck（`getBeatMatchPosition`，就近 ±0.5 拍；对方已过拍点 7/8 以上时对齐上一拍）。B 起播因此是采样级对齐，不再由脚本自己 seek 补偿。 | `enginebuffer.cpp:776-791`；`bpmcontrol.cpp:41, 877-1030`；`sync/enginesync.cpp:516-560`（同步目标 = 另一个在播 deck） |
+| ✅ | `beatsync_phase` 走同一个相位同步。 | `bpmcontrol.cpp` |
+| ✅ | 写 `bpm` → `rate_ratio = bpm / local_bpm`；速率滑块允许越界，不受 rateRange 限制。 | `bpmcontrol.cpp:185-197, 1105-1119`；`ratecontrol.cpp:30-60, 291` |
+| ✅ | `duration` 是曲目元数据时长（秒）；`file_bpm` 是网格 BPM；`track_loaded` 只读。 | `mixer/basetrackplayer.cpp:94-97, 466, 582-602`；`enginebuffer.cpp:180, 549, 618` |
+
+## 控件名与取值
+
+| | 结论 | 源码 |
+|---|---|---|
+| ✅ | EQ：`[EqualizerRack1_[ChannelN]_Effect1],parameter1/2/3` = 低/中/高增益；默认 EQ 是 BiquadFullKillEQ，范围 0..4、中性 1、0 = kill（Bessel / LR8 也一样；只有 3-band biquad 上限 2）。 | `effects/chains/equalizereffectchain.cpp:41-45`；`effectknobparameterslot.h:23`；`backends/builtin/equalizer_util.h:10-30`；`presets/effectchainpresetmanager.cpp:689` |
+| ✅ | 滤波：`[QuickEffectRack1_[ChannelN]],super1`，默认快速效果是 Filter，LPF 连左、HPF 连右，0.5 中性。 | `quickeffectchain.cpp:38`；`presets/effectchainpresetmanager.cpp:696`；`builtin/filtereffect.cpp:39-64` |
+| ✅ | 效果单元：`[EffectRack1_EffectUnitN]` 的 `mix`（0..1）、`super1`、`enabled`、`group_[ChannelN]_enable`。 | `effects/effectchain.cpp:53-73, 305` |
+| ⚠️ | 效果单元是**推子后**（Postfader），EQ 是推子前：A 推子拉到 0 以后 reverb / echo 尾巴仍然能听到。 | `standardeffectchain.cpp:13`；`equalizereffectchain.cpp:14` |
+| ✅ | 推子 `[Master],crossfader`（-1..1）；deck 朝向 `[ChannelN],orientation` 0=左 1=中 2=右。 | `engine/enginemixer.cpp:104`；`channels/enginechannel.h:15-19` |
+| ❌ | **推子模式必须是「加性」**：加性模式居中时两边增益都是 1，推到一侧时这一侧仍是 1；恒功率模式居中时两边都小于 1。AutoDJ 装载时会把推子甩到在播 deck 那一侧——恒功率下在播的 A 会突然变响。引擎 `init` 里把 `[Mixer Profile],xFaderMode` 设为 0（加性），`shutdown` 恢复。 | `enginexfader.cpp:6, 16-60`；`enginexfader.h:6-7`；`enginemixer.cpp:170-182` |
+| ⚠️ | 推钮类控件（ControlPushButton）不忽略重复写入：写两次 1 会触发两次。 | `control/controlpushbutton.cpp:10`；`control/control.cpp:293` |
+
+## 弹出与装载
+
+| | 结论 | 源码 |
+|---|---|---|
+| ❌ | **空 deck 上 `eject` 会把上一首被弹出的歌装回来**；500ms 内连按两次会装回倒数第二首；在播时 eject 被忽略。引擎的 `eject` 命令现在只弹已装载的 deck。 | `mixer/basetrackplayer.cpp:373-406`；`basetrackplayer.h:24` |
+| ✅ | 2.5.6 没有"启动时恢复上次 deck 里的歌"的功能（旧系统观察到的"会话恢复"不是这个原因）。 | 全局搜索无相关代码 |
+| ✅ | 曲目一装进 deck 就排队分析（BPM / 网格 / 调性 / 波形）；分析调度按曲目 ID，分析器自己持有曲目引用，弹出后也会做完；结果在曲目离开缓存时写库。 | `mixer/playermanager.cpp:184-202, 731-745`；`track/globaltrackcache.cpp:274-411` |
+
+## AutoDJ（只当装载器用）
+
+| | 结论 | 源码 |
+|---|---|---|
+| ✅ | 左 / 右 deck = 第一个朝向为 0 / 2 的 deck；缺一个就拒绝（`ADJ_NOT_TWO_DECKS`）。两边都在播也拒绝；队列空也拒绝。被拒时 `[AutoDJ],enabled` 保持 0（这个控件需要确认，开启请求在主线程异步处理）。引擎装载时开 AutoDJ 后 1.5 秒仍是 0 就报 `autodj_refused`。 | `library/autodj/autodjprocessor.cpp:358-441, 588-590, 1766-1784` |
+| ⚠️ | **两边都没在播**：如果左 deck 里的歌正好是队首且位置 < 66%，直接播它；否则把队首装进**左 deck 并起播**，推子甩到 -1，进入 P1LOADED；等左 deck 位置更新后才把它从队列删掉，并把下一首装进右 deck。引擎因此要求冷启动只往 deck1 装。 | `autodjprocessor.cpp:414-429, 538-552, 683-735` |
+| ⚠️ | **一边在播**：先把在播 deck 的歌从队首删掉（如果它在队首），再把新的队首装进另一边（**不起播、不删除**），推子甩向在播一侧。 | `autodjprocessor.cpp:409-413, 553-571` |
+| ⚠️ | **队首删除是滞后的**：装载时不删，下一次开启 AutoDJ 时如果在播 deck 的歌在队首才删。我们的节奏（下一首总在上一首已在播时装载）正好让队列一致；冷启动的竞态由身份核对兜底。 | `autodjprocessor.cpp:933-972` |
+| ✅ | `skip_next`：左 deck 没在播 → 删左 deck 的歌（若在队首）并往左装下一首；否则右 deck 没在播 → 同理往右装。队列空时 AutoDJ 自己关闭并弹出该 deck。「同步到 Mixxx」靠它逐首装载触发分析，以 AutoDJ 自己关闭为结束信号。 | `autodjprocessor.cpp:321-356, 916-931` |
+| ⚠️ | AutoDJ 开着时如果在播 deck 越过它算出的淡化点会自己开始混音——我们装完立刻关 AutoDJ，装载发生在曲子前段，碰不到。 | `autodjprocessor.cpp:661-` |
+| ✅ | AutoDJ 队列 = `Playlists` 里 `name = 'Auto DJ'`（`hidden = 1`）的表；`PlaylistTracks.position` 从 1 起，`pl_datetime_added = CURRENT_TIMESTAMP`。 | `library/dao/trackschema.h:11`；`autodj/autodjfeature.cpp:34-38`；`dao/playlistdao.cpp:19-22, 440-475` |
+
+## 曲库数据库
+
+| | 结论 | 源码 |
+|---|---|---|
+| ✅ | 用到的表和列都在 2.5.6 的结构里（schema 版本 39）：`library`（`duration FLOAT`、`samplerate`、`bpm`、`key_id`、`beats`、`beats_version`、`beats_sub_version`、`bpm_lock`、`location`、`mixxx_deleted`）、`track_locations`、`Playlists`、`PlaylistTracks`、`directories`。测试用的假曲库直接由 `res/schema.xml` 生成（`tools/mixxx_schema.py` → `djstudio/mixxx/schema_2_5_6.sql`）。 | `res/schema.xml`；`database/schemamanager.cpp:195-260` |
+| ❌ | **网格位置单位是帧**（每声道一个样本），不是立体声样本。原来按 ÷2 解码，所有首拍时间都会减半、小节号全错。 | `track/beats.cpp:286-305, 345-373` |
+| ✅ | 网格格式：`BeatGrid-1.0/2.0` 先按 protobuf `BeatGrid` 解析，失败且长 16 字节再按旧结构 `{double bpm; double firstBeat}`；`BeatMap-1.0` 是 `repeated Beat`（不看 enabled）。恒定网格存的是"最后一个标记"的位置，网格向两边延伸。采样率取 `library.samplerate`。 | `beats.cpp:17-20, 257-340`；`proto/beats.proto`；`library/dao/trackdao.cpp:1271-1280` |
+| ⚠️ | **按 BPM 标签建的临时网格**：`beats_sub_version` 为空且首拍在 0。装载时 Mixxx 会重新分析，相位不可信——视为"没分析"。 | `analyzer/analyzerbeats.cpp:129-170` |
+| ✅ | `key_id` = ChromaticKey 枚举（1–12 大调 C…B，13–24 小调 C…B）。 | `proto/keys.proto:13-39` |
+| ✅ | `[Library] RescanOnStartup` 为真时启动扫描曲库目录。 | `library/library_prefs.cpp:16-19`；`coreservices.cpp:612-617` |
+
+## 平台差异（仍需真机确认）
+
+- macOS 版 Mixxx 用 CoreAudio 解码 MP3/AAC（`COREAUDIO` 选项），我们的分析用 ffmpeg。两者对编码器延迟的处理可能差几十毫秒，
+  表现为曲库页「网格核对」有很小的相位差（< 0.1 拍内不报警）。
+- IAC 总线会把消息回送给所有监听者（包括发送者）——这是 CoreMIDI 的行为，不在 Mixxx 源码里。协议已按方向区分帧头。

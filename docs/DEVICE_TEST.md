@@ -23,19 +23,21 @@
 ## 2. 映射 + 真机探测
 
 1. 「同步」或「准备」会把 `DJStudio.js` / `DJStudio.midi.xml` 部署到 Mixxx 的 controllers 目录。
-2. Mixxx → 偏好设置 → 控制器 → IAC 总线：映射选 **DJ Studio**，勾「启用」，确定。右上角应变成「引擎在线 0.1.0」。
+2. 准备时会自动把 mixxx.cfg 里 IAC 总线的映射换成 DJ Studio（沿用原来 AgentMCP 用的设备）。若日志提示找不到 IAC 设备，就在 Mixxx → 偏好设置 → 控制器 → IAC 总线：映射选 **DJ Studio**，勾「启用」。右上角应显示「引擎在线 0.2.0」。
 3. 往 deck1 拖一首已分析的歌（不播放），把播放位置拖到曲中，然后在「体检」页点**真机探测**（或 `djstudio probe`）。
 
-探测逐条验证这些假设：
+Mixxx 的行为已经按 2.5.6 源码逐条核对过（见 [MIXXX_NOTES.md](MIXXX_NOTES.md)），探测在真机上再确认一遍：
 
-| 假设 | 不成立时的影响 / 对策 |
+| 检查 | 不通过时 |
 |---|---|
-| Mixxx 把 SysEx 交给 `DJStudio.incomingData`，`midi.sendSysexMsg` 能发出 | 改用 CC 备用传输（探测会测） |
-| `[EqualizerRack1_[ChannelN]_Effect1],parameter1..3`、`[QuickEffectRack1_[ChannelN]],super1`、`[EffectRack1_EffectUnitN],mix` 存在 | 控件名要改 |
-| `[ChannelN],duration` 可读（否则用 track_samples） | 自动回退 |
-| `[ChannelN],bpm` 可写（引擎靠它变速 / 同速） | 改用 rate |
-| 网格 blob 位置单位是「立体声样本」（`SAMPLES_PER_POS = 2`） | 探测会给出结论；不对就改 `djstudio/mixxx/beats.py` |
-| 推子归中时两边都是满音量 | 要听：探测不能测。若中间位置偏小，在 Mixxx 偏好设置 → 混音器里把推子曲线改成「加性 / 快切」 |
+| SysEx 双向（Python→引擎 需要 XML 里的 0xF0 绑定） | 映射没换成 DJ Studio / 不是 0.2.0；准备时会自动改 mixxx.cfg |
+| CC 备用传输 | 仅备用 |
+| EQ / 滤波 / 效果单元控件能写能读 | 效果单元里没放效果，或 Mixxx 版本不同 |
+| `bpm` 控件可写 | 版本不同 |
+| 网格解码（对照 Mixxx 自己的 `beat_distance`） | 把结果发给 Claude |
+| 推子模式 = 加性、deck 朝向左/右 | 引擎 init 没跑 |
+
+听感项（探测测不了）：推子居中时两边音量是否一样；echo / reverb 是否挂在对的 deck。
 
 ## 3. 第一次播放
 
