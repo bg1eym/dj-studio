@@ -1,4 +1,4 @@
-"""按我们对 Mixxx 曲库结构的理解造一个最小的 mixxxdb.sqlite（只含我们用到的表和列）。"""
+"""按我们对 Mixxx 曲库结构的理解造一个最小的 mixxxdb.sqlite（测试和演示模式用）。"""
 import sqlite3
 from pathlib import Path
 

@@ -1,0 +1,132 @@
+"""命令行入口：`djstudio serve`（默认）/ demo / doctor / validate / import / prepare / play / probe。"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tempfile
+import threading
+import time
+import webbrowser
+from pathlib import Path
+
+
+def _serve(studio, host: str, port: int, open_browser: bool) -> None:  # type: ignore[no-untyped-def]
+    import uvicorn
+
+    from .web.app import create_app
+
+    app = create_app(studio)
+    url = f"http://{host}:{port}/"
+    print(f"DJ Studio → {url}")
+    if open_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+def _wait_job(job) -> int:  # type: ignore[no-untyped-def]
+    seen = 0
+    while True:
+        for line in job.log[seen:]:
+            print(line)
+        seen = len(job.log)
+        if job.state != "running":
+            return 0 if job.state == "ok" else 1
+        time.sleep(0.3)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="djstudio", description="DJ Studio：Mixxx 驱动的自动打碟 Web App")
+    sub = ap.add_subparsers(dest="cmd")
+    s = sub.add_parser("serve", help="启动网页（默认）")
+    s.add_argument("--port", type=int, default=None)
+    s.add_argument("--no-browser", action="store_true")
+    d = sub.add_parser("demo", help="演示模式：合成曲目 + 模拟 Mixxx，不需要真 Mixxx")
+    d.add_argument("--dir", default=None, help="演示数据目录（默认临时目录）")
+    d.add_argument("--speed", type=float, default=8.0, help="模拟器倍速")
+    d.add_argument("--port", type=int, default=8431)
+    d.add_argument("--no-browser", action="store_true")
+    sub.add_parser("doctor", help="环境体检")
+    v = sub.add_parser("validate", help="校验 set（id 或 json 文件路径）")
+    v.add_argument("set")
+    i = sub.add_parser("import", help="导入音频文件 / 文件夹到托管曲库")
+    i.add_argument("paths", nargs="+")
+    p = sub.add_parser("prepare", help="准备 set（重启 Mixxx、部署引擎、写 AutoDJ 队列）")
+    p.add_argument("set")
+    pl = sub.add_parser("play", help="在终端里播放已准备好的 set（Ctrl-C = 淡出停止）")
+    pl.add_argument("set")
+    sub.add_parser("probe", help="真机探测（需要 Mixxx 运行、deck1 有一首已分析的歌）")
+    args = ap.parse_args(argv)
+    cmd = args.cmd or "serve"
+
+    if cmd == "demo":
+        from .demo import setup_demo
+
+        root = Path(args.dir) if args.dir else Path(tempfile.mkdtemp(prefix="djstudio-demo-"))
+        print(f"准备演示数据：{root}（合成曲目 + 分析，约半分钟）")
+        studio = setup_demo(root, args.speed)
+        _serve(studio, "127.0.0.1", args.port, not args.no_browser)
+        return 0
+
+    from .studio import Studio
+
+    studio = Studio()
+    if cmd == "serve":
+        _serve(studio, studio.cfg.host, args.port or studio.cfg.port, not args.no_browser)
+        return 0
+    if cmd == "doctor":
+        rc = 0
+        for r in studio.doctor():
+            mark = {"ok": "✓", "warn": "!", "error": "✗"}[r["level"]]
+            print(f"{mark} {r['name']}：{r['detail']}")
+            rc |= r["level"] == "error"
+        return rc
+    if cmd == "validate":
+        from .setfile import load_set
+
+        path = Path(args.set)
+        st = load_set(path) if path.suffix == ".json" else studio.load(args.set)
+        c = studio.compile(st)
+        for iss in c.issues:
+            print(iss)
+        print("✓ 校验通过" if c.ok else "✗ 校验没通过", f"（约 {c.duration / 60:.1f} 分钟）")
+        return 0 if c.ok else 1
+    if cmd == "import":
+        res = studio.library.import_paths(args.paths)
+        print(f"导入 {len(res.added)} 首，已存在 {len(res.existing)} 首，失败 {len(res.failed)} 首")
+        for f, e in res.failed:
+            print(f"  ✗ {f}：{e}")
+        print("分析中…")
+        studio.library.wait_idle(3600)
+        return 0
+    if cmd == "prepare":
+        return _wait_job(studio.prepare(args.set))
+    if cmd == "probe":
+        rc = _wait_job(studio.probe())
+        if studio.job and studio.job.result:
+            print(json.dumps(studio.job.result, ensure_ascii=False, indent=2))
+        return rc
+    if cmd == "play":
+        studio.play(args.set)
+        cond = studio.conductor
+        assert cond
+        seen = 0
+        try:
+            while cond.running:
+                for line in cond.progress.log[seen:]:
+                    print(line)
+                seen = len(cond.progress.log)
+                time.sleep(0.3)
+        except KeyboardInterrupt:
+            print("淡出停止…")
+            cond.request_stop()
+            cond.join(30)
+        for line in cond.progress.log[seen:]:
+            print(line)
+        return 0 if cond.progress.stage == "done" else 1
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

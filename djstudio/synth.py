@@ -1,4 +1,4 @@
-"""合成测试用的 techno 片段（已知 BPM / 首拍 / 小节相位 / 段落）。"""
+"""合成测试 / 演示用的 techno 片段（已知 BPM / 首拍 / 小节相位 / 段落）。"""
 import wave
 from pathlib import Path
 

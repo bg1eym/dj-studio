@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DJ Studio</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">DJ Studio</div>
+    <nav id="tabs">
+      <a href="#library" data-tab="library">曲库</a>
+      <a href="#sets" data-tab="sets">Set</a>
+      <a href="#show" data-tab="show">演出</a>
+      <a href="#doctor" data-tab="doctor">体检</a>
+    </nav>
+    <div class="engine" id="engine-badge" title="引擎状态"><span class="dot"></span><span class="txt">引擎未连接</span></div>
+  </header>
+  <div id="alarm" class="alarm hidden"></div>
+  <main>
+    <section id="tab-library" class="tab"></section>
+    <section id="tab-sets" class="tab"></section>
+    <section id="tab-show" class="tab"></section>
+    <section id="tab-doctor" class="tab"></section>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

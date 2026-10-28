@@ -12,8 +12,8 @@ from djstudio.mixxx import process
 from djstudio.setfile import SetFile
 from djstudio.studio import Studio
 
-from . import fake_mixxxdb
-from .synth import techno, write_wav
+from djstudio.mixxx import fakedb as fake_mixxxdb
+from djstudio.synth import techno, write_wav
 
 pytestmark = pytest.mark.skipif(not have_ffmpeg() or shutil.which("node") is None, reason="需要 ffmpeg 和 node")
 

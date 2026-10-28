@@ -307,7 +307,8 @@ class Studio:
             raise StudioError("连不上 IAC 总线")
         if not c.wait_until(c.online, max(1.0, deadline - time.monotonic())):
             raise StudioError("Mixxx 启动 2 分钟内引擎没有回传状态：检查控制器映射是否启用（docs/DEVICE_TEST.md）")
-        job.say(f"引擎在线（{c.version}），等待 Mixxx 安定 {settle:g}s …")
+        c.send({"t": "hello"})
+        job.say(f"引擎在线（DJStudio.js {c.version}），等待 Mixxx 安定 {settle:g}s …")
         boots = c.boots
         t_end = time.monotonic() + settle
         while time.monotonic() < t_end:
