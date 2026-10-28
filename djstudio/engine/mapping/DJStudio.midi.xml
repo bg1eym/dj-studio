@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MixxxControllerPreset mixxxVersion="2.4.0+" schemaVersion="1">
+  <info>
+    <name>DJ Studio</name>
+    <author>DJ Studio</author>
+    <description>DJ Studio 自动打碟引擎（IAC 虚拟 MIDI 总线）。主通道是 SysEx（由 DJStudio.incomingData 接收），下面的 CC 只是备用传输。</description>
+  </info>
+  <controller id="DJStudio">
+    <scriptfiles>
+      <file filename="DJStudio.js" functionprefix="DJStudio"/>
+    </scriptfiles>
+    <controls>
+      <control>
+        <group>[Master]</group>
+        <key>DJStudio.ccByte</key>
+        <status>0xBF</status>
+        <midino>0x01</midino>
+        <options>
+          <script-binding/>
+        </options>
+      </control>
+      <control>
+        <group>[Master]</group>
+        <key>DJStudio.ccStart</key>
+        <status>0xBF</status>
+        <midino>0x02</midino>
+        <options>
+          <script-binding/>
+        </options>
+      </control>
+      <control>
+        <group>[Master]</group>
+        <key>DJStudio.ccEnd</key>
+        <status>0xBF</status>
+        <midino>0x03</midino>
+        <options>
+          <script-binding/>
+        </options>
+      </control>
+    </controls>
+    <outputs/>
+  </controller>
+</MixxxControllerPreset>
