@@ -26,10 +26,12 @@ class DeckState:
     bpm: float
     file_bpm: float
     vol: float
+    load_seq: int = 0  # 这个 deck 装上新歌的累计次数
 
     @classmethod
     def from_list(cls, a: list[Any]) -> "DeckState":
-        return cls(bool(a[0]), bool(a[1]), int(a[2]), int(a[3]), float(a[4]), float(a[5]), float(a[6]))
+        return cls(bool(a[0]), bool(a[1]), int(a[2]), int(a[3]), float(a[4]), float(a[5]), float(a[6]),
+                   int(a[7]) if len(a) > 7 else 0)
 
 
 class EngineClient:

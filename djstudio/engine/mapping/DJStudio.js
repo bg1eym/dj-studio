@@ -11,10 +11,18 @@
 // 协议详见 docs/ENGINE.md；Python 侧见 djstudio/engine/protocol.py。改协议必须两边同步。
 //
 // 只用 ES5 语法，兼容各版本 Mixxx 的脚本引擎。
+//
+// 依据 Mixxx 2.5.6 源码核对过的行为（详见 docs/MIXXX_NOTES.md）：
+// - playposition 每秒只更新 15 次（enginebuffer.cpp kPlaypositionUpdateRate），beat_distance 每个音频
+//   buffer 都更新（EngineBuffer::postProcess）→ 拍位 = playposition 估出的整数拍 + beat_distance 小数部分。
+// - quantize 开着时按 play，引擎会把这一 deck 的相位对齐到另一个正在播的 deck（requestSyncPhase →
+//   getBeatMatchPosition，就近 ±0.5 拍）。所以 B 停在 b_in 的整拍上，到点只按 play，相位由 Mixxx 采样级对齐。
+// - 暂停时 seek 不做相位调整（processSeek: !paused && SEEK_PHASE），cue 到的就是精确位置。
+// - 空 deck 上 eject 会重新装回上一首被弹出的歌（basetrackplayer.cpp slotEjectTrack）→ 只对已装载的 deck eject。
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.1.0";
+DJStudio.VERSION = "0.2.0";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -22,6 +30,7 @@ DJStudio.LOAD_TIMEOUT_MS = 15000;
 DJStudio.PHASE_TOL = 0.03; // 拍；超过就用 beatsync_phase 校正
 DJStudio.PHASE_CHECK_MS = 2000;
 DJStudio.LATE_TOL = 1.0; // 拍；程序到达时时间线已过 0 点超过这么多 → 拒绝（late）
+DJStudio.AUTODJ_ACCEPT_MS = 1500; // 开 AutoDJ 后这么久还没生效 = 被拒（队列空 / 两边都在播 / 朝向不对）
 
 DJStudio.FX_UNIT = { echo: 1, reverb: 2 };
 
@@ -38,6 +47,8 @@ DJStudio.reset = function () {
     DJStudio.loader = null;
     DJStudio.timer = 0;
     DJStudio.lastErr = "";
+    DJStudio.xfMode = null;
+    DJStudio.loadSeq = [0, 0, 0]; // 每个 deck 装上新歌的次数（下标 1、2）
 };
 DJStudio.reset();
 
@@ -63,17 +74,25 @@ DJStudio.init = function (id, debugging) {
     DJStudio.set("[Channel1]", "orientation", 0);
     DJStudio.set("[Channel2]", "orientation", 2);
     DJStudio.set("[Master]", "crossfader", 0);
+    // 推子用「加性」模式：居中时两边增益都是 1，AutoDJ 装载时把推子甩到一边也不改变在播 deck 的音量
+    // （enginexfader.cpp getXfadeGains；恒功率模式居中时两边都 < 1）。退出时恢复用户设置。
+    DJStudio.xfMode = DJStudio.get("[Mixer Profile]", "xFaderMode");
+    DJStudio.set("[Mixer Profile]", "xFaderMode", 0);
     for (var u = 1; u <= 2; u++) {
         DJStudio.set(DJStudio.fxGroup(u), "mix", 0);
         DJStudio.set(DJStudio.fxGroup(u), "group_[Channel1]_enable", 0);
         DJStudio.set(DJStudio.fxGroup(u), "group_[Channel2]_enable", 0);
     }
+    // 装载计数：track_loaded 变成 1 就加一（用来区分「同一首」和「装了新的一首」）
+    engine.makeConnection("[Channel1]", "track_loaded", function (v) { if (v > 0) { DJStudio.loadSeq[1]++; } });
+    engine.makeConnection("[Channel2]", "track_loaded", function (v) { if (v > 0) { DJStudio.loadSeq[2]++; } });
     DJStudio.timer = engine.beginTimer(DJStudio.TICK_MS, function () { DJStudio.tick(); });
     DJStudio.send({ t: "hello", v: DJStudio.VERSION, boot: 1 });
 };
 
 DJStudio.shutdown = function () {
     if (DJStudio.timer) { engine.stopTimer(DJStudio.timer); DJStudio.timer = 0; }
+    if (DJStudio.xfMode !== null) { DJStudio.set("[Mixer Profile]", "xFaderMode", DJStudio.xfMode); }
 };
 
 // ------------------------------------------------------------------ 传输层
@@ -169,6 +188,17 @@ DJStudio.loaded = function (d) { return DJStudio.get(DJStudio.ch(d), "track_load
 DJStudio.beatAt = function (grid, ms) { return (ms - grid[0]) * grid[1] / 60000; };
 DJStudio.msAt = function (grid, beat) { return grid[0] + beat * 60000 / grid[1]; };
 
+// deck 当前所在的网格拍号（小数）。playposition 最多滞后约 67ms，只用来定整数拍；
+// 小数部分取 Mixxx 每个音频 buffer 都更新的 beat_distance（与我们解码的是同一份网格）。
+DJStudio.beatNow = function (d, grid) {
+    var est = DJStudio.beatAt(grid, DJStudio.posMs(d));
+    if (!DJStudio.playing(d)) { return est; }
+    var frac = DJStudio.get(DJStudio.ch(d), "beat_distance");
+    if (!(frac >= 0 && frac < 1)) { return est; }
+    var b = Math.round(est - frac) + frac;
+    return Math.abs(b - est) <= 0.5 ? b : est;
+};
+
 DJStudio.seekMs = function (d, ms) {
     var dur = DJStudio.durMs(d);
     if (dur > 0) { DJStudio.set(DJStudio.ch(d), "playposition", ms / dur); }
@@ -183,7 +213,8 @@ DJStudio.deckStatus = function (d) {
         Math.round(DJStudio.durMs(d)),
         Math.round(DJStudio.get(g, "bpm") * 100) / 100,
         Math.round(DJStudio.get(g, "file_bpm") * 100) / 100,
-        Math.round(DJStudio.get(g, "volume") * 1000) / 1000
+        Math.round(DJStudio.get(g, "volume") * 1000) / 1000,
+        DJStudio.loadSeq[d]
     ];
 };
 
@@ -256,7 +287,9 @@ DJStudio.handle = function (m) {
     } else if (t === "neutral") {
         DJStudio.neutral(m.deck);
     } else if (t === "eject") {
-        if (DJStudio.playing(m.deck)) { err = "deck playing"; } else { DJStudio.set(DJStudio.ch(m.deck), "eject", 1); }
+        // 空 deck 上 eject 会把上一首弹出的歌装回来，所以只弹已装载的
+        if (DJStudio.playing(m.deck)) { err = "deck playing"; }
+        else if (DJStudio.loaded(m.deck)) { DJStudio.set(DJStudio.ch(m.deck), "eject", 1); }
     } else if (t === "set") {
         DJStudio.set(m.g, m.k, m.v);
     } else if (t === "get") {
@@ -284,7 +317,7 @@ DJStudio.arm = function (p) {
     var a = p.a.deck;
     if (!DJStudio.loaded(a)) { return "deck A not loaded"; }
     if (p.b && !DJStudio.loaded(p.b.deck)) { return "deck B not loaded"; }
-    var tl = DJStudio.beatAt(p.a.grid, DJStudio.posMs(a)) - p.a.start;
+    var tl = DJStudio.beatNow(a, p.a.grid) - p.a.start;
     if (tl > DJStudio.LATE_TOL) { return "late: tl=" + tl.toFixed(2); }
     DJStudio.prog = {
         p: p, st: "armed", tl: tl, fired: {}, bStarted: false, aStopped: false,
@@ -292,8 +325,10 @@ DJStudio.arm = function (p) {
     };
     if (p.b) {
         var b = p.b.deck;
-        DJStudio.seekMs(b, DJStudio.msAt(p.b.grid, p.b["in"]));
+        // 先停再 cue：暂停时 seek 不做相位调整，B 停在 b_in 的精确整拍上
         DJStudio.set(DJStudio.ch(b), "play", 0);
+        DJStudio.set(DJStudio.ch(b), "quantize", 1);
+        DJStudio.seekMs(b, DJStudio.msAt(p.b.grid, p.b["in"]));
         var vb = p.lanes["B.vol"] ? DJStudio.interp(p.lanes["B.vol"], -1) : 0;
         DJStudio.set(DJStudio.ch(b), "volume", vb);
         var bpm0 = p.bpm && p.bpm.length ? DJStudio.interp(p.bpm, p.play) : DJStudio.get(DJStudio.ch(a), "bpm");
@@ -306,10 +341,10 @@ DJStudio.progTl = function (pr) {
     var p = pr.p;
     var a = p.a.deck;
     if (!pr.aStopped && DJStudio.playing(a)) {
-        return DJStudio.beatAt(p.a.grid, DJStudio.posMs(a)) - p.a.start;
+        return DJStudio.beatNow(a, p.a.grid) - p.a.start;
     }
     if (p.b && pr.bStarted) {
-        return DJStudio.beatAt(p.b.grid, DJStudio.posMs(p.b.deck)) - p.b["in"] + p.play;
+        return DJStudio.beatNow(p.b.deck, p.b.grid) - p.b["in"] + p.play;
     }
     return pr.tl; // 两边都没在走：时间线冻结
 };
@@ -336,11 +371,12 @@ DJStudio.fire = function (pr, ev) {
 DJStudio.startB = function (pr) {
     var p = pr.p;
     var b = p.b.deck;
-    var over = pr.tl - p.play; // 已经超过起播点多少拍
+    var over = pr.tl - p.play; // 已经超过起播点多少拍（tick 间隔，通常 < 0.1 拍）
     var bpmA = DJStudio.get(DJStudio.ch(p.a.deck), "bpm");
     var bpm = p.bpm && p.bpm.length ? DJStudio.interp(p.bpm, pr.tl) : bpmA;
     if (bpm > 0) { DJStudio.set(DJStudio.ch(b), "bpm", bpm); }
-    DJStudio.seekMs(b, DJStudio.msAt(p.b.grid, p.b["in"] + Math.max(0, over)));
+    // Mixxx 起播时就近对齐相位（±0.5 拍）。晚得多的话先把整数拍补上，否则会对到前一拍。
+    if (over >= 0.4) { DJStudio.seekMs(b, DJStudio.msAt(p.b.grid, p.b["in"] + Math.round(over))); }
     DJStudio.set(DJStudio.ch(b), "play", 1);
     pr.bStarted = true;
     pr.lastPhase = DJStudio.now();
@@ -353,8 +389,8 @@ DJStudio.phaseCheck = function (pr) {
     var now = DJStudio.now();
     if (now - pr.lastPhase < DJStudio.PHASE_CHECK_MS) { return; }
     pr.lastPhase = now;
-    var ta = DJStudio.beatAt(p.a.grid, DJStudio.posMs(p.a.deck)) - p.a.start;
-    var tb = DJStudio.beatAt(p.b.grid, DJStudio.posMs(p.b.deck)) - p.b["in"] + p.play;
+    var ta = DJStudio.beatNow(p.a.deck, p.a.grid) - p.a.start;
+    var tb = DJStudio.beatNow(p.b.deck, p.b.grid) - p.b["in"] + p.play;
     var diff = tb - ta;
     var frac = diff - Math.round(diff);
     if (Math.abs(Math.round(diff)) >= 1) {
@@ -421,6 +457,8 @@ DJStudio.startLoad = function (d) {
     if (DJStudio.loader) { return "loader busy"; }
     if (DJStudio.playing(d)) { return "deck playing"; }
     var other = d === 1 ? 2 : 1;
+    // 两边都没在播时 AutoDJ 总是装进左 deck（朝向 0 = deck1）并起播（autodjprocessor.cpp toggleAutoDJ）
+    if (!DJStudio.playing(other) && d !== 1) { return "fresh load must target deck1"; }
     if (DJStudio.playing(other) && DJStudio.prog && DJStudio.prog.st === "running" && DJStudio.prog.p.b &&
         DJStudio.prog.p.b.deck === d) { return "deck in use by running program"; }
     DJStudio.set(DJStudio.ch(d), "volume", 0);
@@ -446,7 +484,16 @@ DJStudio.runLoader = function () {
     if (L.st === "eject") {
         if (DJStudio.loaded(d)) { return; }
         L.st = "wait";
+        L.enT = DJStudio.now();
         DJStudio.set("[AutoDJ]", "enabled", 1);
+        return;
+    }
+    if (L.st === "wait" && !DJStudio.loaded(d) && DJStudio.get("[AutoDJ]", "enabled") <= 0 &&
+        DJStudio.now() - L.enT > DJStudio.AUTODJ_ACCEPT_MS) {
+        // 开启请求是异步的；被拒时 enabled 一直是 0（队列空 / 两边都在播 / 没有左右朝向的 deck）
+        DJStudio.loader = null;
+        DJStudio.set(DJStudio.ch(other), "volume", L.otherVol);
+        DJStudio.send({ t: "ev", e: "load_failed", deck: d, st: "autodj_refused" });
         return;
     }
     if (L.st === "wait") {

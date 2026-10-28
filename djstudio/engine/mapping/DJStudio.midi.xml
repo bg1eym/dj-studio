@@ -10,6 +10,16 @@
       <file filename="DJStudio.js" functionprefix="DJStudio"/>
     </scriptfiles>
     <controls>
+      <!-- SysEx 必须显式绑定：MidiController::receive(QByteArray) 只在存在 status=0xF0 的
+           script-binding 映射时才调用脚本的 incomingData（Mixxx 2.5.6 midicontroller.cpp:577/606）。 -->
+      <control>
+        <group>[Master]</group>
+        <key>DJStudio.incomingData</key>
+        <status>0xF0</status>
+        <options>
+          <script-binding/>
+        </options>
+      </control>
       <control>
         <group>[Master]</group>
         <key>DJStudio.ccByte</key>

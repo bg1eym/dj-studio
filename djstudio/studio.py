@@ -25,7 +25,6 @@ from .setfile import SetFile, SetTrack, load_set, save_set
 
 MAPPING_DIR = Path(__file__).parent / "engine" / "mapping"
 MAPPING_FILES = ("DJStudio.js", "DJStudio.midi.xml")
-ANALYZE_EXTRA = 8.0  # file_bpm 出来后再等几秒，让节拍网格 / 调性分析跑完
 
 
 def mapping_version() -> str:
@@ -120,7 +119,7 @@ class Studio:
 
     def _mixxx_grid_for(self, t: Track) -> tuple[float, float] | None:
         m = self._mixxx_tracks([t]).get(t.id)
-        return (m.grid.bpm, m.grid.first_beat) if m and m.grid else None
+        return (m.grid.bpm, m.grid.first_beat) if m and m.grid and m.analyzed else None
 
     def find_track(self, st: SetTrack) -> Track | None:
         t = self.store.get(st.id) if st.id else None
@@ -143,7 +142,7 @@ class Studio:
             if t is None:
                 return None
             m = mx.get(t.id)
-            if m is None or m.grid is None:
+            if m is None or m.grid is None or not m.analyzed:
                 # 不在 Mixxx 库 / 没分析：返回空网格让编译器报「没分析」
                 return TrackInfo(t.id, t.display, Grid(0.0 if m is None else m.bpm or 0.0, 0.0, 0, 0.0))
             g = Grid(m.grid.bpm, m.grid.first_beat, 0, m.duration or t.duration)
@@ -347,6 +346,7 @@ class Studio:
         ids = [mx[t.id].id for t in tracks if t]
         self._ensure_quit(job)
         self._deploy(job)
+        self._configure_controller(job)
         bk = self.mixxx.backup(self.cfg.home / "backups")
         job.say(f"已备份 Mixxx 曲库 → {bk.name}")
         self.mixxx.write_autodj_queue(ids)
@@ -378,6 +378,7 @@ class Studio:
             self._ensure_quit(job)
             process.set_cfg_value(self.cfg.mixxx_dir / "mixxx.cfg", "[Library]", "RescanOnStartup", "1")
             self._deploy(job)
+            self._configure_controller(job)
             self._launch_and_connect(job, settle)
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
@@ -398,41 +399,90 @@ class Studio:
         return {"scanned": len(need_scan), "analyzed": len(unanalyzed)}
 
     def _mixxx_analyze(self, job: Job, tracks: list[Track], mx: dict[str, MixxxTrack], settle: float) -> None:
-        """让 Mixxx 分析：把这些歌排进 AutoDJ 队列，逐首装进 deck1（静音）触发分析。
+        """让 Mixxx 分析：每首歌只要被装进 deck，Mixxx 就会排队分析（playermanager.cpp slotAnalyzeTrack），
+        分析器自己持有曲目引用，弹出后也会做完并写库。
 
-        Mixxx 不通过控件公开分析进度：等到 file_bpm > 0 后再多等 ANALYZE_EXTRA 秒，最后以数据库为准核对。
+        用 AutoDJ 逐首装载（两边音量都是 0，听不到）：开 AutoDJ → 第 1 首装进 deck1 并播放、第 2 首装进 deck2；
+        之后每按一次 skip_next，deck2 换成队列里的下一首（autodjprocessor.cpp skipNext）。全部装过一遍后关掉，
+        再轮询数据库直到每首都有真正的分析网格。
         """
-        job.say(f"{len(tracks)} 首还没被 Mixxx 分析：逐首装进 deck1 触发分析（静音）")
+        job.say(f"{len(tracks)} 首还没被 Mixxx 分析：逐首静音装载触发分析")
         self._ensure_quit(job)
         self._deploy(job)
+        self._configure_controller(job)
         self.mixxx.write_autodj_queue([mx[t.id].id for t in tracks])
         c = self._launch_and_connect(job, settle)
         for d in (1, 2):
             ds = c.deck(d)
             if ds and ds.playing:
                 raise StudioError("Mixxx 里有 deck 在播")
-        for t in tracks:
-            cur = [c.mark()]
-            c.send({"t": "load", "deck": 1})
-            ev = None
-            deadline = time.monotonic() + 30
-            while ev is None and time.monotonic() < deadline:
-                ev = next((e for e in c.drain(cur) if e.get("e") in ("loaded", "load_failed")), None)
-                time.sleep(0.2)
-            if not ev or ev["e"] == "load_failed":
-                raise StudioError(f"装载 {t.display} 失败")
-            ok = c.wait_until(lambda: (ds := c.deck(1)) is not None and ds.file_bpm > 0, 90)
-            time.sleep(ANALYZE_EXTRA)
-            ds = c.deck(1)
-            job.say(f"  {t.display}：{ds.file_bpm if ok and ds else '分析超时'} BPM")
-        c.send({"t": "eject", "deck": 1})
-        # Mixxx 在曲目卸载时把分析结果写进库；退出确保落盘
-        self._ensure_quit(job)
-        mx2 = self._mixxx_tracks(tracks)
-        bad = [t.display for t in tracks if t.id not in mx2 or not mx2[t.id].analyzed]
-        if bad:
-            raise StudioError("这些歌 Mixxx 没分析出网格：" + "、".join(bad))
+        for d in (1, 2):
+            c.send({"t": "eject", "deck": d})
+            c.send({"t": "vol", "deck": d, "v": 0.0})
+        c.wait_until(lambda: not any((x := c.deck(d)) and x.loaded for d in (1, 2)), 5)
+
+        def loads() -> int:
+            return sum((x := c.deck(d)) and x.load_seq or 0 for d in (1, 2))
+
+        def autodj_on() -> bool:
+            return bool(c.status and c.status.get("ad"))
+
+        # 一直按 skip_next，直到队列用完、AutoDJ 自己关掉（autodjprocessor.cpp loadNextTrackFromQueue）。
+        # 每按一次至多两次就会让队首前进一首（skipNext / removeLoadedTrackFromTopOfQueue），所以上限 2n+4 次。
+        n0 = loads()
+        c.send({"t": "set", "g": "[AutoDJ]", "k": "enabled", "v": 1})
+        if not c.wait_until(lambda: loads() > n0, 30):
+            raise StudioError("AutoDJ 没有装载第 1 首（队列空？两个 deck 朝向不是左/右？）")
+        presses = 0
+        while autodj_on() and presses < 2 * len(tracks) + 4:
+            before = loads()
+            c.wait_until(lambda: loads() > before or not autodj_on(), 3)  # 开启后自动预载的那一首
+            time.sleep(0.5)  # 给分析调度一点时间
+            before = loads()
+            c.send({"t": "set", "g": "[AutoDJ]", "k": "skip_next", "v": 1})
+            presses += 1
+            c.wait_until(lambda: loads() > before or not autodj_on(), 30)
+            job.say(f"  已装载 {loads() - n0} 次")
+        if autodj_on():
+            c.send({"t": "set", "g": "[AutoDJ]", "k": "enabled", "v": 0})
+        for d in (1, 2):
+            c.send({"t": "play", "deck": d, "on": 0})
+        c.wait_until(lambda: not any((x := c.deck(d)) and x.playing for d in (1, 2)), 5)
+        for d in (1, 2):
+            c.send({"t": "eject", "deck": d})
+            c.send({"t": "vol", "deck": d, "v": 1.0})
+        job.say("全部装载过一遍，等待 Mixxx 分析完成并写库 …")
+        deadline = time.monotonic() + 60 + 30 * len(tracks)
+        pending = list(tracks)
+        while pending and time.monotonic() < deadline:
+            time.sleep(3)
+            mx2 = self._mixxx_tracks(pending)
+            done = [t for t in pending if t.id in mx2 and mx2[t.id].analyzed]
+            for t in done:
+                job.say(f"  ✓ {t.display}：{mx2[t.id].bpm:.2f} BPM，调 {mx2[t.id].key or '?'}")
+            pending = [t for t in pending if t not in done]
+        if pending:
+            raise StudioError("这些歌 Mixxx 还没分析完（或分析失败）：" + "、".join(t.display for t in pending))
         job.say("Mixxx 分析完成")
+
+    def _configure_controller(self, job: Job) -> None:
+        """Mixxx 退出时，把 IAC 总线的控制器映射设成 DJ Studio 并启用（mixxx.cfg：
+        [ControllerPreset] <设备名> = 映射文件绝对路径，[Controller] <设备名> = 1；controllermanager.cpp）。
+        设备名从已有配置里找：原来用 AgentMCP / DJ Studio 映射的那个设备，或名字里含 IAC 的设备。"""
+        cfg_path = self.cfg.mixxx_dir / "mixxx.cfg"
+        cfg = process.read_cfg(cfg_path)
+        presets = cfg.get("[ControllerPreset]", {})
+        want = str((self.cfg.mixxx_controllers / "DJStudio.midi.xml").resolve())
+        key = next((k for k, v in presets.items() if v.endswith(("AgentMCP.midi.xml", "DJStudio.midi.xml"))), None)
+        if key is None:
+            key = next((k for k in list(presets) + list(cfg.get("[Controller]", {}))
+                        if self.cfg.midi_port.lower() in k.lower()), None)
+        if key is None:
+            job.say("!! mixxx.cfg 里找不到 IAC 设备：第一次需要在 Mixxx 偏好设置 → 控制器里手动选一次「DJ Studio」映射")
+            return
+        ch = process.set_cfg_value(cfg_path, "[ControllerPreset]", key, want)
+        ch |= process.set_cfg_value(cfg_path, "[Controller]", key, "1")
+        job.say(f"控制器 {key}：映射 = DJ Studio" + ("（已更新 mixxx.cfg）" if ch else "（已是）"))
 
     # ------------------------------------------------------------ 播放
 

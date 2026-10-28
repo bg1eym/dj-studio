@@ -326,7 +326,7 @@ class Conductor:
                     self._stage("ending" if ending else "transition", f"{pid} 进行中")
                     self.log(f"▶ {pid} 开始（{'终曲淡出' if ending else '过渡'}，tl={ev.get('tl')}）")
                 elif e == "b_play":
-                    self.log(f"  B 起播（晚了 {ev.get('over')} 拍，已补偿）")
+                    self.log(f"  B 起播（触发晚了 {ev.get('over')} 拍；相位由 Mixxx 起播时对齐）")
                 elif e == "fired":
                     self.log(f"  事件 {ev.get('ev')} @ {ev.get('tl')}")
                 elif e == "phase_fix":

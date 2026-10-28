@@ -94,7 +94,7 @@ def create_app(studio: Studio) -> FastAPI:
     def track_json(t: Track, m: MixxxTrack | None, full: bool = False) -> dict[str, Any]:
         a = t.analysis or {}
         grid = None
-        if m and m.grid:
+        if m and m.grid and m.analyzed:
             g = Grid(m.grid.bpm, m.grid.first_beat, 0, m.duration or t.duration)
             src = "mixxx"
         elif a:
@@ -116,6 +116,7 @@ def create_app(studio: Studio) -> FastAPI:
             "own_bpm": a.get("own_grid", {}).get("bpm"),
             "in_mixxx": m is not None,
             "mixxx_analyzed": bool(m and m.analyzed),
+            "mixxx_tag_grid": bool(m and m.metadata_grid),
             "mixxx_bpm": m.bpm if m else None,
             "key": m.key if m else None,
             "grid": grid,

@@ -4,6 +4,9 @@
 - 读：任何时候都可以（只读连接）。
 - 写：只在 Mixxx 完全退出时，且先备份。Mixxx 运行时它会覆盖我们的修改，甚至损坏库。
 - 路径比较一律先做 Unicode NFC 归一化（macOS 文件名可能是 NFD）。
+
+表结构按 Mixxx 2.5.6 res/schema.xml（schema 版本 39）核对；AutoDJ 队列的读写方式按
+src/library/dao/playlistdao.cpp、src/library/autodj/autodjfeature.cpp。
 """
 from __future__ import annotations
 
@@ -16,13 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .beats import MixxxGrid, camelot, decode
+from .beats import MixxxGrid, camelot, decode, is_metadata_grid
 
-AUTODJ_HIDDEN = 1  # Playlists.hidden：1 = AutoDJ 队列，2 = 历史记录
+AUTODJ_NAME = "Auto DJ"  # trackschema.h AUTODJ_TABLE；Mixxx 按名字找这张表
+AUTODJ_HIDDEN = 1  # PlaylistDAO::PLHT_AUTO_DJ（2 = 历史记录 PLHT_SET_LOG）
 
 REQUIRED = {
     "library": {"id", "artist", "title", "duration", "samplerate", "bpm", "key_id", "beats", "beats_version",
-                "location", "mixxx_deleted"},
+                "beats_sub_version", "bpm_lock", "location", "mixxx_deleted"},
     "track_locations": {"id", "location", "filename", "directory", "fs_deleted"},
     "Playlists": {"id", "name", "hidden"},
     "PlaylistTracks": {"id", "playlist_id", "track_id", "position"},
@@ -46,10 +50,17 @@ class MixxxTrack:
     key: str | None
     grid: MixxxGrid | None
     deleted: bool
+    beats_sub_version: str = ""
+    bpm_lock: bool = False
+
+    @property
+    def metadata_grid(self) -> bool:
+        """网格只是按 BPM 标签建的（相位不可信，Mixxx 装载时会重新分析）。"""
+        return not self.bpm_lock and is_metadata_grid(self.grid, self.beats_sub_version)
 
     @property
     def analyzed(self) -> bool:
-        return self.grid is not None and self.bpm > 0
+        return self.grid is not None and self.bpm > 0 and not self.metadata_grid
 
 
 class MixxxDBError(RuntimeError):
@@ -96,7 +107,7 @@ class MixxxDB:
 
     _SELECT = """
         SELECT l.id, tl.location, l.title, l.artist, l.duration, l.samplerate, l.bpm, l.key_id,
-               l.beats, l.beats_version, l.mixxx_deleted
+               l.beats, l.beats_version, l.beats_sub_version, l.bpm_lock, l.mixxx_deleted
         FROM library l JOIN track_locations tl ON tl.id = l.location
     """
 
@@ -111,6 +122,7 @@ class MixxxDB:
             id=int(r["id"]), location=r["location"], title=r["title"] or "", artist=r["artist"] or "",
             duration=float(r["duration"] or 0), samplerate=sr, bpm=float(r["bpm"] or 0),
             key=camelot(r["key_id"]), grid=grid, deleted=bool(r["mixxx_deleted"]),
+            beats_sub_version=r["beats_sub_version"] or "", bpm_lock=bool(r["bpm_lock"]),
         )
 
     def tracks_by_location(self, paths: Iterable[str]) -> dict[str, MixxxTrack]:
@@ -135,7 +147,9 @@ class MixxxDB:
 
     @staticmethod
     def _autodj_id(c: sqlite3.Connection) -> int | None:
-        r = c.execute("SELECT id FROM Playlists WHERE hidden = ? ORDER BY id LIMIT 1", (AUTODJ_HIDDEN,)).fetchone()
+        r = c.execute("SELECT id FROM Playlists WHERE name = ? ORDER BY id LIMIT 1", (AUTODJ_NAME,)).fetchone()
+        if r is None:
+            r = c.execute("SELECT id FROM Playlists WHERE hidden = ? ORDER BY id LIMIT 1", (AUTODJ_HIDDEN,)).fetchone()
         return int(r["id"]) if r else None
 
     def autodj_queue(self) -> list[int]:
@@ -154,15 +168,11 @@ class MixxxDB:
                 if pid is None:
                     raise MixxxDBError("Mixxx 库里没有 AutoDJ 播放列表（先正常打开一次 Mixxx）")
                 c.execute("DELETE FROM PlaylistTracks WHERE playlist_id = ?", (pid,))
-                now = time.strftime("%Y-%m-%dT%H:%M:%S")
-                cols = {r["name"] for r in c.execute("PRAGMA table_info(PlaylistTracks)")}
+                # 与 PlaylistDAO::appendTracksToPlaylist 相同：位置从 1 起，时间用 CURRENT_TIMESTAMP
                 for pos, tid in enumerate(track_ids, start=1):
-                    if "pl_datetime_added" in cols:
-                        c.execute("INSERT INTO PlaylistTracks (playlist_id, track_id, position, pl_datetime_added)"
-                                  " VALUES (?, ?, ?, ?)", (pid, tid, pos, now))
-                    else:
-                        c.execute("INSERT INTO PlaylistTracks (playlist_id, track_id, position) VALUES (?, ?, ?)",
-                                  (pid, tid, pos))
+                    c.execute("INSERT INTO PlaylistTracks (playlist_id, track_id, position, pl_datetime_added)"
+                              " VALUES (?, ?, ?, CURRENT_TIMESTAMP)", (pid, tid, pos))
+                c.execute("UPDATE Playlists SET date_modified = CURRENT_TIMESTAMP WHERE id = ?", (pid,))
 
     # ------------------------------------------------------------ 备份
 

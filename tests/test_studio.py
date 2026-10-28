@@ -1,5 +1,7 @@
 """服务层集成测试：导入音频 → 分析 → （假）Mixxx 库 → 编译 → 准备 → 在模拟器里播完整套。"""
 import json
+import sqlite3  # noqa: F401
+from pathlib import Path
 import shutil
 import time
 
@@ -152,3 +154,83 @@ def test_browse_restricted(env, tmp_path):
     assert {f["name"] for f in out["files"]} == set(SPECS)
     with pytest.raises(PermissionError):
         browse("/etc", studio.cfg.browse_roots)
+
+
+def test_sync_mixxx_analysis_loads_each_track_once(tmp_path, monkeypatch):
+    """同步到 Mixxx：没分析的歌经 AutoDJ + skip_next 每首装载一次；之后等数据库出现真正的分析网格。"""
+    import threading
+
+    from djstudio.mixxx import fakedb as fdb
+
+    lib = tmp_path / "Music" / "DJStudio"
+    lib.mkdir(parents=True)
+    mixxx_dir = tmp_path / "mixxx"
+    mixxx_dir.mkdir()
+    fdb.create(mixxx_dir / "mixxxdb.sqlite", [lib])
+    cfg = Config(home=tmp_path / "home", library=lib, mixxx_dir=mixxx_dir, browse_roots=[tmp_path])
+    state = {"running": False, "link": None}
+    monkeypatch.setattr(process, "mixxx_running", lambda: state["running"])
+    monkeypatch.setattr(process, "launch_mixxx", lambda: state.update(running=True))
+    monkeypatch.setattr(process, "quit_mixxx", lambda timeout=30.0: state.update(running=False) or True)
+
+    names = ["p.wav", "q.wav", "r.wav", "s.wav"]
+    specs = {"p.wav": 126.0, "q.wav": 128.0, "r.wav": 130.0, "s.wav": 131.0}
+    for n in names:
+        write_wav(lib / n, techno(specs[n], 0.2, 0, (("groove", 8),), seed=len(n)))
+    box = {}
+
+    def link_factory():
+        st = box["s"]
+        rows = []
+        for t in st.store.all():
+            m = st._mixxx_tracks([t]).get(t.id)
+            rows.append({"id": str(m.id), "dur": m.duration, "bpm": specs[Path(t.path).name], "first_beat": 0.2})
+        link = SimLink(rows, speed=20)
+        link.sim({"cmd": "queue", "ids": [str(i) for i in st.mixxx.autodj_queue()]})
+        state["link"] = link
+        return link
+
+    studio = Studio(cfg, link_factory=link_factory)
+    box["s"] = studio
+    studio.library.import_paths([str(lib)], analyze_now=False)
+    tracks = studio.store.all()
+    mids = {}
+    for t in tracks:  # 已扫描进库、没分析
+        mids[fdb.add_track(cfg.mixxx_db, t.path, t.duration, None)] = t
+
+    # 假的「Mixxx 分析器」：曲目被装载后把真正的网格写进库
+    stop = threading.Event()
+
+    def analyzer():
+        done = set()
+        while not stop.is_set():
+            link = state["link"]
+            if link:
+                try:
+                    loads = link.sim({"cmd": "state"})["loads"]
+                except Exception:  # noqa: BLE001
+                    loads = []
+                for _, _, mid in loads:
+                    mid = int(mid)
+                    if mid not in done:
+                        done.add(mid)
+                        t = mids[mid]
+                        with sqlite3.connect(cfg.mixxx_db) as c:
+                            c.execute("UPDATE library SET bpm=?, beats=?, beats_version='BeatGrid-2.0', "
+                                      "beats_sub_version='plugin_id=qm' WHERE id=?",
+                                      (specs[Path(t.path).name], encode_grid_v2(specs[Path(t.path).name], 0.2, 44100), mid))
+            time.sleep(0.1)
+
+    import sqlite3
+    from djstudio.mixxx.beats import encode_grid_v2
+
+    th = threading.Thread(target=analyzer, daemon=True)
+    th.start()
+    job = wait_job(studio.sync_mixxx(settle=0.3), 90)
+    stop.set()
+    assert job.state == "ok", "\n".join(job.log)
+    loads = [int(x[2]) for x in state["link"].sim({"cmd": "state"})["loads"]]
+    assert set(loads) == set(mids), loads  # 每首至少装过一次（AutoDJ 可能重复装同一首）
+    mx = studio._mixxx_tracks(tracks)
+    assert all(m.analyzed for m in mx.values())
+    studio.disconnect()

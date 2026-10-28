@@ -57,15 +57,16 @@ def run_probe(studio: Any, job: Any) -> dict[str, Any]:
         ok = abs(back - test) < 1e-3
         add(f"控件 {g},{k}", "ok" if ok else "error", f"写 {test} 读回 {back:g}" + ("" if ok else "（控件不存在或名字不对）"))
 
-    xf, o1, o2 = get(("[Master]", "crossfader"), ("[Channel1]", "orientation"), ("[Channel2]", "orientation"))
-    add("推子 / deck 朝向", "ok" if (abs(xf) < 0.01 and o1 == 0 and o2 == 2) else "warn",
-        f"crossfader={xf:g}，deck1 朝向={o1:g}，deck2 朝向={o2:g}（期望 0 / 0 / 2）")
+    xf, o1, o2, xm = get(("[Master]", "crossfader"), ("[Channel1]", "orientation"), ("[Channel2]", "orientation"),
+                         ("[Mixer Profile]", "xFaderMode"))
+    add("推子 / deck 朝向", "ok" if (abs(xf) < 0.01 and o1 == 0 and o2 == 2 and xm == 0) else "warn",
+        f"crossfader={xf:g}，deck1 朝向={o1:g}，deck2 朝向={o2:g}，推子模式={xm:g}（期望 0 / 0 / 2 / 0=加性）")
 
-    loaded, dur, ts, sr, fbpm, pos, bd = get((CH1, "track_loaded"), (CH1, "duration"), (CH1, "track_samples"),
-                                             (CH1, "track_samplerate"), (CH1, "file_bpm"), (CH1, "playposition"),
-                                             (CH1, "beat_distance"))
+    loaded, dur, ts, sr, fbpm, pos, bd, playing = get(
+        (CH1, "track_loaded"), (CH1, "duration"), (CH1, "track_samples"), (CH1, "track_samplerate"),
+        (CH1, "file_bpm"), (CH1, "playposition"), (CH1, "beat_distance"), (CH1, "play"))
     if not loaded:
-        add("deck1 曲目", "warn", "deck1 没有歌：往 deck1 拖一首已分析的歌（停着）再探测，才能验证下面几项")
+        add("deck1 曲目", "warn", "deck1 没有歌：往 deck1 拖一首已分析的歌（停着，位置拖到曲中）再探测，才能验证下面几项")
         return {"results": results}
     dur_calc = ts / 2 / sr if sr else 0
     add("时长控件", "ok" if dur > 0 else "warn",
@@ -80,38 +81,29 @@ def run_probe(studio: Any, job: Any) -> dict[str, Any]:
     c.send({"t": "bpm", "deck": 1, "v": bpm0})
     add("bpm 控件可写", "ok" if abs(bpm1 - target) < 0.05 else "error", f"写 {target} 读回 {bpm1:g}")
 
-    # 网格位置单位：用 Mixxx 自己算的 beat_distance 对照我们解码的网格
+    # 网格解码核对：用 Mixxx 自己每个 buffer 都更新的 beat_distance，对照我们从数据库解码的网格。
+    # （位置单位按 2.5.6 源码是帧；这里在真机上再确认一次，同时也验证了曲目时长 / 采样率的读法）
     d = dur if dur > 0 else dur_calc
     t_now = pos * d
-    cands = []
     with closing(studio.mixxx._ro()) as conn:
-        rows = conn.execute("SELECT id, title, duration, samplerate, beats, beats_version FROM library "
-                            "WHERE abs(duration - ?) < 1.0 AND beats IS NOT NULL", (d,)).fetchall()
-    import djstudio.mixxx.beats as B
-
-    verdicts = []
+        rows = conn.execute("SELECT title, samplerate, beats, beats_version FROM library "
+                            "WHERE abs(duration - ?) < 0.5 AND beats IS NOT NULL", (d,)).fetchall()
+    best = None
     for r in rows:
-        for spp in (2, 1):
-            saved = B.SAMPLES_PER_POS
-            B.SAMPLES_PER_POS = spp
-            try:
-                g = decode(r["beats"], r["beats_version"], int(r["samplerate"] or 0))
-            finally:
-                B.SAMPLES_PER_POS = saved
-            if not g:
-                continue
-            ph = ((t_now - g.first_beat) * g.bpm / 60.0) % 1.0
-            err = min(abs(ph - bd), 1 - abs(ph - bd))
-            cands.append((err, spp, r["title"], g.bpm))
-    if not cands:
-        add("网格位置单位", "warn", f"库里找不到时长≈{d:.1f}s 且有网格的歌，无法核对")
+        g = decode(r["beats"], r["beats_version"], int(r["samplerate"] or 0))
+        if not g:
+            continue
+        ph = ((t_now - g.first_beat) * g.bpm / 60.0) % 1.0
+        err = min(abs(ph - bd), 1 - abs(ph - bd))
+        if best is None or err < best[0]:
+            best = (err, r["title"], g.bpm)
+    if best is None:
+        add("网格解码", "warn", f"库里找不到时长≈{d:.1f}s 且有网格的歌，无法核对")
     else:
-        cands.sort()
-        err, spp, title, gb = cands[0]
-        verdicts.append(spp)
-        lvl = "ok" if err < 0.02 and spp == B.SAMPLES_PER_POS else ("error" if err < 0.02 else "warn")
-        add("网格位置单位", lvl,
-            f"《{title}》用 SAMPLES_PER_POS={spp} 时 beat_distance 误差 {err:.3f}"
-            + ("" if spp == B.SAMPLES_PER_POS else f"——需要把 djstudio/mixxx/beats.py 的 SAMPLES_PER_POS 改成 {spp}")
-            + ("" if err < 0.02 else "（误差偏大，结论不可靠：换一首、把播放位置拖到曲中再试）"))
+        err, title, gb = best
+        # playposition 每秒只更新 15 次，停着时没有这个误差；在播时允许 0.15 拍
+        tol = 0.15 if playing else 0.02
+        add("网格解码", "ok" if err <= tol else "error",
+            f"《{title}》{gb:.2f} BPM：我们算的拍内位置与 Mixxx 的 beat_distance 相差 {err:.3f} 拍"
+            + ("" if err <= tol else "（解码有误，请把这条结果发给 Claude）"))
     return {"results": results}
