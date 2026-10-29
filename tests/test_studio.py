@@ -447,12 +447,15 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     job = wait_job(studio.job, 120)
     assert job.state == "ok", "\n".join(job.log)
     # 以前连 Mixxx 时按 Mixxx 网格切的段落：再分析一次时按自己的网格重切
-    t = studio.store.get(studio.load(job.result["set"]).tracks[0].id)
+    # 换了解码器（这里假装是别的解码器分析的）的也重新分析
+    t, u = (studio.store.get(x.id) for x in studio.load(job.result["set"]).tracks)
+    assert t.analysis["decoder"] == "ffmpeg"
     studio.store.update(t.id, analysis={**t.analysis, "grid_source": "mixxx"})
+    studio.store.update(u.id, analysis={**u.analysis, "decoder": "something-else"})
     studio._auto_key = None
     job = wait_job(studio.auto_prepare(), 120)
-    assert job.state == "ok" and any("重切" in line for line in job.log), "\n".join(job.log)
-    assert studio.store.get(t.id).analysis["grid_source"] == "own"
+    assert job.state == "ok" and any("2 首" in line and "重新分析" in line for line in job.log), "\n".join(job.log)
+    assert studio.store.get(t.id).analysis["grid_source"] == "own" and studio.store.get(u.id).analysis["decoder"] == "ffmpeg"
     assert job.stages == studio.BUILTIN_STAGES and job.progress == 1.0
     sid = job.result["set"]
     # 网格用自己分析的

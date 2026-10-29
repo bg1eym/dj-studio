@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .audio import AUDIO_EXTS, AudioError, decode_mono, probe, ANALYSIS_SR
+from .audio import AUDIO_EXTS, AudioError, decode_mono, decoder_name, probe, ANALYSIS_SR
 from .analysis import ANALYSIS_VERSION, analyze
 from .store import Store, Track
 
@@ -190,9 +190,11 @@ class Library:
         t = self.store.get(tid)
         if not t:
             return
+        decoder = decoder_name()
         x = decode_mono(Path(t.path), ANALYSIS_SR)
         grid = self.mixxx_grid(t) if self.mixxx_grid else None
         result, wf = analyze(x, ANALYSIS_SR, grid, t.bar1 if t.bar1_confirmed else None)
+        result["decoder"] = decoder
         self.store.save_waveform(tid, wf)
         fields: dict[str, Any] = {"analysis": result, "analysis_version": ANALYSIS_VERSION, "analysis_error": None}
         if not t.bar1_confirmed:

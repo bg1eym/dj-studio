@@ -19,7 +19,7 @@ from .engine.conductor import Conductor, Progress
 from .engine.link import Link, LinkError, RtMidiLink, SimLink
 from .grid import Grid
 from .library.analysis import downbeat_from_bar1
-from .library.audio import AUDIO_EXTS, AudioError, have_decoder, probe
+from .library.audio import AUDIO_EXTS, AudioError, decoder_name, have_decoder, probe
 from .library.importer import Library
 from .library.store import Store, Track
 from .mixxx import process
@@ -915,14 +915,17 @@ class Studio:
         if missing:
             raise StudioError("这些歌还没放进来：" + "、".join(missing))
         ids = [m.id for m in matches if m]
-        if self.builtin:
-            # 以前连 Mixxx 时按 Mixxx 的网格切的段落：内置引擎用自己的网格，重切一遍
-            stale = [i for i in ids if ((t := self.store.get(i)) and (t.analysis or {}).get("grid_source") == "mixxx")]
-            if stale:
-                job.say(f"{len(stale)} 首以前按 Mixxx 的网格切的段落，按自己的网格重切 …")
-                for i in stale:
-                    self.library.enqueue(i)
-                self._wait_analysis(job, 0.3, 1.0, "按自己的网格重切段落")
+        # 要重新分析的：换了解码器（mp3 开头的编码延迟两边处理可能不同，差几十毫秒）；
+        # 内置引擎下以前按 Mixxx 的网格切的段落（内置引擎用自己的网格）
+        dec = decoder_name()
+        stale = [i for i in ids if (t := self.store.get(i)) and (
+            (t.analysis or {}).get("decoder", "ffmpeg") != dec
+            or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
+        if stale:
+            job.say(f"{len(stale)} 首按现在的解码器 / 网格重新分析 …")
+            for i in stale:
+                self.library.enqueue(i)
+            self._wait_analysis(job, 0.3, 1.0, "重新分析")
 
         if not self.builtin:
             # 3 Mixxx 扫描 + 分析（Mixxx 的网格是同步的依据）

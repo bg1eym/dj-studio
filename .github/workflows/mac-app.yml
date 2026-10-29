@@ -79,13 +79,13 @@ jobs:
         with:
           name: engine-${{ matrix.arch }}
           path: tools/mixxx-engine/dist
-      - name: 失败时上传日志
-        if: failure()
+      - name: 上传日志（成功失败都传，Release「ci-logs」）
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view ci-logs >/dev/null 2>&1 || gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）"
-          { echo "== $GITHUB_SHA engine-${{ matrix.arch }}"; cat engine-deps.txt engine-smoke.log 2>/dev/null; tail -n 800 engine-build.log 2>/dev/null; } > engine-${{ matrix.arch }}.log
+          { echo "== $GITHUB_SHA engine-${{ matrix.arch }} ${{ job.status }}"; cat engine-deps.txt engine-smoke.log 2>/dev/null; tail -n 800 engine-build.log 2>/dev/null; } > engine-${{ matrix.arch }}.log
           gh release upload ci-logs engine-${{ matrix.arch }}.log --clobber
 
   app:
@@ -134,11 +134,11 @@ jobs:
         run: |
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --prerelease --title "DJ Studio（Mac）" --notes "独立的 DJ Studio.app。Apple 芯片下载 arm64，Intel 下载 x64。"
           gh release upload "$RELEASE_TAG" DJ-Studio-mac-${{ matrix.arch }}.zip selftest-${{ matrix.arch }}.txt --clobber
-      - name: 失败时上传日志
-        if: failure()
+      - name: 上传日志（成功失败都传，Release「ci-logs」）
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view ci-logs >/dev/null 2>&1 || gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）"
-          { echo "== $GITHUB_SHA app-${{ matrix.arch }}"; cat selftest-${{ matrix.arch }}.txt 2>/dev/null; tail -n 400 app-build.log 2>/dev/null; } > app-${{ matrix.arch }}.log
+          { echo "== $GITHUB_SHA app-${{ matrix.arch }} ${{ job.status }}"; cat selftest-${{ matrix.arch }}.txt 2>/dev/null; tail -n 400 app-build.log 2>/dev/null; } > app-${{ matrix.arch }}.log
           gh release upload ci-logs app-${{ matrix.arch }}.log --clobber

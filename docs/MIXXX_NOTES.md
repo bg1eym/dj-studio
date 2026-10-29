@@ -76,14 +76,16 @@
 | ✅ | `key_id` = ChromaticKey 枚举（1–12 大调 C…B，13–24 小调 C…B）。 | `proto/keys.proto:13-39` |
 | ✅ | `[Library] RescanOnStartup` 为真时启动扫描曲库目录。 | `library/library_prefs.cpp:16-19`；`coreservices.cpp:612-617` |
 
-## 真引擎测试台实测（tools/mixxx-harness）
+## 真引擎实测（测试台，现在是 tools/mixxx-engine 的声音引擎）
 
 这些不是读源码得出的，是把 DJStudio.js 装进 Mixxx 2.5.6 真正的 MidiController / 引擎、录下主输出后测出来的。
+（「测试台 analyze」那几条用的是当时编进测试台的 Mixxx 分析器；声音引擎里没有带分析器。）
 
 | | 结论 | 测法 |
 |---|---|---|
-| ✅ | 整套 set（长交接 + 瞬时切换 + 终曲淡出）在真引擎里按谱面跑完；过渡中两边时间线拍位差 < 0.05 拍。冷启动时 AutoDJ 抢先预载 deck2 的竞态真实出现，身份核对正确处理。 | `tests/test_mixxx_harness.py` |
-| ✅ | 映射加载时 Mixxx 总会先加载系统目录里的 `common-controller-scripts.js`（真机上在 app 资源里，不用我们管）。 | `legacycontrollermappingfilehandler.cpp:233` |
+| ⚠️ | **Linux 上 Mixxx 解码 mp3（libmad）比 ffmpeg 晚约 25ms**（≈ 1105 个采样：编码器延迟 + 解码器延迟，ffmpeg 按 LAME 头去掉了，libmad 这条路没去）。Mac 上 Mixxx 用 CoreAudio 解码，处理方式又可能不同。→ 分析改用声音引擎自己的解码（`--decode`），和播放同一个解码器；分析结果记下解码器，换了就重新分析。 | 同一个 320k mp3 用两边解码，波形互相关：−553 个采样 @22050 |
+| ✅ | 整套 set（长交接 + 瞬时切换 + 终曲淡出）在真引擎里按谱面跑完；过渡中两边时间线拍位差 < 0.05 拍。冷启动时 AutoDJ 抢先预载 deck2 的竞态真实出现，身份核对正确处理。 | `tests/test_mixxx_engine.py` |
+| ✅ | 映射加载时 Mixxx 总会先加载系统目录里的 `common-controller-scripts.js`（真机上在 Mixxx 的 app 资源里；声音引擎把它放在程序旁边的 `res/controllers`）。 | `legacycontrollermappingfilehandler.cpp:233` |
 | ✅ | 用 Mixxx 自己的 `AnalyzerBeats` 分析后序列化出的 blob，我们的解码器读出的 BPM / 首拍与 Mixxx 完全一致（帧单位再次确认）。分析器的 sub_version 形如 `rounding=V4|vamp_plugin_id=qm-tempotracker:0`。 | 测试台 `analyze` 命令 |
 | ❌ | **Mixxx 的节拍分析（qm-tempotracker）会把整条网格放到反拍上**。先在合成曲上发现，再用用户的真曲确认：RW2023 #10–#14 五首里，#11 Doppler、#12 Kali、#13 Formula 的网格比 kick 偏了 0.41–0.50 拍；#10、#14 的网格在 kick 起音上（与我们的起音点差 +6.3 / −6.1ms）。Mixxx 同步对齐的是网格，所以用原网格做 #10→#11，两首 kick 在录音里相差 **210ms**（半拍）；换成校正后的网格，相差 0.0ms。→ 分析时必须核对，存疑的用「校正网格」写入自估网格并锁定。 | 测试台 `analyze`；录音用波形互相关定位两首各自的播放位置（`HarnessLink` + 录主输出） |
 | ✅ | **同步精度**：EQ 不动、两首都有 kick 的段落叠 16 小节，录音里两条网格的相对位置 −0.5…+0.6ms，16 小节内不漂。B 起播触发晚 0.03–0.14 拍时 Mixxx 起播的相位同步都把它拉了回来。 | 诊断 set（4 段 custom 过渡），波形互相关；互相关方法自检：人为错开 0 / 3 / −12.5 / 30ms 全部测回 |

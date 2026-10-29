@@ -21,8 +21,10 @@ Mixxx + DJStudio.js（控制器映射）
 
 - **builtin（默认）**：不连本机的 Mixxx——`Studio._mixxx_tracks()` 返回空（不读 Mixxx 曲库），连 Mixxx 的操作（同步、校正 Mixxx 网格、
   真机探测、IAC 连接）直接报错。网格用自己分析的 `own_grid`；一键分析只有 音频分析 → 读打碟谱 → 生成 set → 准备内置引擎 四步；
-  「开始演出」= 在 Node 模拟器（`sim/fake_mixxx.mjs`）里跑同一份 `DJStudio.js` 和同一个 conductor（和预演同一套，`Studio.rehearse(builtin=True)`），
-  可以倍速、从第 k 段过渡开始。没有声音。
+  「开始演出」= 在**声音引擎** `djstudio-engine`（`tools/mixxx-engine`：只编了 Mixxx 2.5.6 的引擎核心）里跑同一份 `DJStudio.js` 和同一个 conductor
+  （和预演同一套，`Studio.rehearse(builtin=True)`）。原速时出声（PortAudio → 系统默认输出，引擎在声卡回调里处理，同 Mixxx 的 SoundManager）；
+  可以倍速（没有声音）、从第 k 段过渡开始。找不到声音引擎时退回 Node 模拟器（`sim/fake_mixxx.mjs`，没有声音）。
+  分析也用声音引擎解码（`--decode`），和播放是同一个 Mixxx 解码器；分析结果记下解码器，换了就重新分析。
 - **mixxx**：下面的结构图——`DJStudio.js` 作为控制器映射跑在本机的 Mixxx 里，经 IAC 通信。
 
 ## 分工：快的在引擎，慢的在 Python
@@ -55,7 +57,7 @@ Mixxx + DJStudio.js（控制器映射）
 `mv`（主输出电平），以及 deck 位置和程序时间线位置 `pg.tl`。Python 原样经 SSE 每 100ms 推给网页；`web/static/live.js` 画两条滚动波形、
 混音台和过渡时间线，两帧之间按播放速度外推位置。计划（编译出的曲线）和实际（读回的旋钮）分开画：时间线上是计划，旋钮是实际。
 
-**预演**：同一套 conductor + `DJStudio.js`，换成 Node 模拟器（`Studio.rehearsal_link_factory`，开发时也可以换成真 Mixxx 测试台）。
+**预演**：同一套 conductor + `DJStudio.js`，在声音引擎里跑但不出声（没有声音引擎时用 Node 模拟器；`Studio.rehearsal_link_factory` 可以换）。
 从第 k 段开始时用截短的 set（`Studio.rehearsal_set`：第 k 首从过渡前 8 小节起播）。
 
 ## 关键设计决定
@@ -89,8 +91,16 @@ Mixxx + DJStudio.js（控制器映射）
 - `tests/test_studio.py`：导入合成音频 → 分析（BPM / 首拍 / 小节相位 / 段落）→ 假 mixxxdb → 准备 → 播完。
 - `tests/test_web.py`：API 冒烟、路径限制。
 
-- `tests/test_mixxx_harness.py`：同样的 conductor 驱动**真 Mixxx 2.5.6 的代码**（`tools/mixxx-harness`，编进 Mixxx 自己的测试程序：
-  真 MidiController、脚本引擎、deck、EQ / 滤波、同步），并录下主输出，在**音频**上检查过渡中两个 kick 没有双击。需要先构建 Mixxx，否则跳过。
+- `tests/test_mixxx_engine.py`：同样的 conductor 驱动**声音引擎**（`tools/mixxx-engine`，Mixxx 2.5.6 的真 MidiController、脚本引擎、deck、
+  EQ / 滤波、同步），录下主输出在**音频**上检查过渡中两个 kick 没有双击；解码与 ffmpeg 一致；出声时引擎跟着（假）声卡的时钟走、不断音。
+  需要先构建引擎（`DJSTUDIO_ENGINE_BIN`），否则跳过。
 
-Node 模拟器按 Mixxx 源码的行为写成（docs/MIXXX_NOTES.md）；真引擎测试台跑的是 Mixxx 本身的代码，但没有 CoreMIDI / IAC、
-PlayerManager 和真 AutoDJProcessor。两者都**不能替代 Mac 上的真机**，真机要验证的见 [DEVICE_TEST.md](DEVICE_TEST.md)。
+## 独立的 Mac 应用
+
+`.github/workflows/mac-app.yml` 在 GitHub 的 macOS 构建机上：用 Mixxx 的预编译依赖编 `djstudio-engine`（Apple 芯片版交叉编译，
+和 Mixxx 官方一样），检查它只依赖系统库；PyInstaller（`packaging/macos/djstudio.spec`）把 Python、网页服务和引擎打成 DJ Studio.app，
+在 .app 里跑 `selftest`，ad-hoc 签名后放到 Release `mac-app-latest`。应用没有窗口（`LSUIElement`），打开后在浏览器里用，
+从网页右上角「退出」；同一版本已经开着时再打开只会打开网页。
+
+Node 模拟器按 Mixxx 源码的行为写成（docs/MIXXX_NOTES.md）；声音引擎跑的是 Mixxx 本身的代码，但没有 PlayerManager 和真 AutoDJProcessor
+（AutoDJ 的装载逻辑是移植的）。

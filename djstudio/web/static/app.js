@@ -65,8 +65,15 @@ const fmt = (t) => {
 };
 const fmtBar = (b) => (b === null || b === undefined || isNaN(b) ? "–" : b.toFixed(1));
 const deckFor = (i) => (i % 2 === 0 ? 1 : 2);
-// 内置引擎（默认）：DJStudio.js 在内置的模拟 Mixxx 里跑，不连本机的 Mixxx，没有声音
+// 内置引擎（默认）：DJStudio.js 在内置的 Mixxx 引擎里跑（原速时出声），不连本机的 Mixxx
 const isBuiltin = () => !S.state || S.state.engine_mode !== "mixxx";
+const hasSound = () => !!(S.state && S.state.sound_engine);
+function soundText(e) {
+  const who = e.builtin ? (e.link === "mixxx-engine" ? "内置 Mixxx 引擎" : "内置模拟器") : "预演 · 模拟器";
+  const a = e.audio || {};
+  const snd = a.on ? `声音：${a.device}` : e.link === "mixxx-engine" && e.speed === 1 && e.builtin ? `没有声音（${a.error || "打不开声音输出"}）` : "没有声音";
+  return `${who} · ${e.speed}× · ${snd}`;
+}
 
 // ------------------------------------------------------------------ 全局状态
 
@@ -192,8 +199,8 @@ function updateEngineBadge() {
   const lost = S.progress && S.progress.stage !== "done" && S.progress.engine_ok === false;
   b.className = "engine" + (e.online ? " online" : (e.connected || lost ? " lost" : ""));
   b.title = e.builtin ? "内置引擎：DJStudio.js 在内置的模拟 Mixxx 里运行，不连本机的 Mixxx，没有声音" : "引擎状态";
-  $(".txt", b).textContent = e.rehearsal ? (e.builtin ? `内置引擎运行中（${e.speed}×）` : `预演中（模拟器 ${e.speed}×）`)
-    : e.builtin ? "内置引擎" : e.online ? "Mixxx 已连接" : (e.connected ? "引擎失联" : "Mixxx 未连接");
+  $(".txt", b).textContent = e.rehearsal ? (e.builtin ? `演出中（${e.speed}×${e.audio && e.audio.on ? " · 有声音" : ""}）` : `预演中（模拟器 ${e.speed}×）`)
+    : e.builtin ? (hasSound() ? "内置 Mixxx 引擎" : "内置模拟器（没有声音）") : e.online ? "Mixxx 已连接" : (e.connected ? "引擎失联" : "Mixxx 未连接");
   if (!e.builtin && e.online) b.title = `引擎脚本 DJStudio.js ${e.version || ""}`;
   $("#ver").textContent = (S.state && S.state.version) || "";
   const al = $("#alarm");
@@ -436,10 +443,11 @@ function renderHomeJob() {
     const opts = builtin ? h("div", { class: "row play-opts" },
       h("label", {}, "从 ", h("select", { id: "play-from" }, h("option", { value: 0 }, "头"),
         Array.from({ length: nTr }, (_, i) => h("option", { value: i + 1 }, `过渡 ${i + 1} 前 8 小节（#${i + 1} → #${i + 2}）`))), " 开始"),
-      h("label", {}, "速度 ", h("select", { id: "play-speed" }, [1, 2, 4, 8].map((v) => h("option", { value: v }, `${v}×`))))) : null;
+      h("label", {}, "速度 ", h("select", { id: "play-speed" }, [1, 2, 4, 8].map((v) => h("option", { value: v }, v === 1 ? "1×（有声音）" : `${v}×（没有声音）`))))) : null;
     el.append(h("div", { class: "ready" },
       h("div", { class: "grow" }, h("div", { class: "ready-big" }, "可以演出了"),
-        h("div", { class: "dim" }, builtin ? `约 ${Math.round(r.duration / 60)} 分钟。用内置引擎：不连 Mixxx，看得到每个旋钮怎么动，没有声音。`
+        h("div", { class: "dim" }, builtin ? `约 ${Math.round(r.duration / 60)} 分钟。用内置的 Mixxx 引擎，不连你装的 Mixxx。` +
+          (hasSound() ? "原速时从电脑的声音输出放出来；倍速时没有声音。" : "没有找到声音引擎：看得到旋钮，没有声音。")
           : `约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好。`), opts),
       h("button", { class: "primary huge", onclick: () => guard(async () => {
         const body = builtin ? { from: +$("#play-from").value, speed: +$("#play-speed").value } : {};
@@ -1102,8 +1110,9 @@ function renderShowStatus() {
     put(el,
       h("div", { class: "row status-line" },
         h("span", { class: "stage", style: p.stage === "error" ? "color:var(--err)" : "" }, STAGE_LABEL[p.stage] || p.stage),
-        e.rehearsal ? h("span", { class: "badge ok", title: "内置的模拟 Mixxx 里跑的是真正的引擎脚本 DJStudio.js，旋钮 / 推子是它里面 Mixxx 控件的值" },
-          `${e.builtin ? "内置引擎" : "预演 · 模拟器"} ${e.speed}× · 没有声音`) : null,
+        e.rehearsal ? h("span", { class: "badge ok", title: e.link === "mixxx-engine"
+          ? "内置的 Mixxx 引擎（Mixxx 2.5.6 的引擎核心）在跑 DJStudio.js，旋钮 / 推子是 Mixxx 控件读回的值"
+          : "模拟器里跑的是真正的引擎脚本 DJStudio.js，旋钮 / 推子是模拟器里 Mixxx 控件的值" }, soundText(e)) : null,
         h("span", { class: "dim" }, p.message || ""),
         h("span", { class: "grow" }),
         h("span", {}, `第 ${p.index + 1 + off} / ${p.n_tracks + off} 首`, cur ? ` · ${cur.title || cur.id}` : "")),

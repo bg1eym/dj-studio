@@ -19,6 +19,7 @@ from ..library.audio import AUDIO_EXTS
 from ..library.importer import browse
 from ..library.store import Track
 from ..mixxx.db import MixxxTrack
+from ..engine.bundled import engine_binary
 from ..selfupdate import version_text
 from ..setfile import SetFile
 from ..studio import Studio, StudioError, mapping_version
@@ -65,6 +66,7 @@ def create_app(studio: Studio) -> FastAPI:
             "mapping_version": mapping_version(),
             "version": version_text(),
             "engine_mode": "builtin" if studio.builtin else "mixxx",
+            "sound_engine": engine_binary() is not None,  # 有声音引擎（Mixxx 的引擎核心）；没有时内置引擎是没声音的模拟器
         }
 
     @app.get("/api/state")

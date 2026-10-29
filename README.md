@@ -1,37 +1,42 @@
 # DJ Studio
 
-**Mixxx 驱动的自动打碟 Web App**：从 Mac 本地文件夹导入音频 → 分析结构 → 按编排方案生成 set → 一键准备 → Mixxx 按谱面自动混完整套，网页上实时监控。
+**自动打碟 Web App**：放进打碟谱 PDF → 自动找到曲子并分析 → 按谱在 Mixxx 的引擎里自动混完整套，网页上看每个旋钮怎么动，耳朵听结果。
 
-- **默认用内置引擎**：引擎脚本 `DJStudio.js` 在内置的模拟 Mixxx（Node.js）里运行，**不连、不启动本机的 Mixxx**。
-  网页上看得到每个旋钮、推子、滤波、效果器按谱怎么动，没有声音。
-- 要真出声、由 Mixxx 混音：`DJSTUDIO_ENGINE=mixxx djstudio`。这时 `DJStudio.js` 作为 Mixxx 控制器映射运行，通过 IAC 虚拟 MIDI 总线与后端通信。
-- 运行时**零 AI 依赖**：分析、编译、执行都是确定性的代码；编排方案（你给的）由 Claude 转成 set 文件，也可以在网页上直接编辑。
+- **独立的 Mac 应用（DJ Studio.app）**：网页服务、Python、声音引擎都在里面，不用装 Homebrew / Python / ffmpeg / Node，也不碰你装的 Mixxx。
+- **声音引擎** `djstudio-engine`：只用 Mixxx 2.5.6 源码里打碟要用的部分（deck、混音器、EQ / 滤波 / Echo / Reverb、同步、控制器脚本引擎、解码），
+  过渡全部是按谱拨 Mixxx 的旋钮和推子，音频文件从不改动。原速时从电脑的声音输出放出来。见 [tools/mixxx-engine](tools/mixxx-engine/README.md)。
+- 运行时**零 AI 依赖**：分析、编译、执行都是确定性的代码，结果能在网页上手动改。
 - 过渡手法：**长交接**（longhand）/ **瞬时切换**（instant）/ **自定义**（custom，逐小节旋钮位）。
 - 只绑 `127.0.0.1`，只在本机浏览器使用。
-
-> 当前状态：内置引擎的整套流程（只放打碟谱 → 找曲子 → 分析 → 演出）用真实的 14 首测过；引擎脚本也在真 Mixxx 2.5.6 的引擎代码
-> （测试台，见 `tools/mixxx-harness`）上跑过整套 set。连 Mixxx 的模式（`DJSTUDIO_ENGINE=mixxx`）在 Mac 上还不稳定，
-> 要用时按 [docs/DEVICE_TEST.md](docs/DEVICE_TEST.md) 一步步来。
+- 还保留连本机 Mixxx 的模式（`DJSTUDIO_ENGINE=mixxx`，经 IAC 虚拟 MIDI），见 [docs/DEVICE_TEST.md](docs/DEVICE_TEST.md)。
 
 ## 安装（Mac）
 
-```bash
-brew install python ffmpeg node
-```
+打开终端，粘贴这一行（自动选 Apple 芯片 / Intel 版，装进「应用程序」并打开；以后更新也是这一行）：
 
 ```bash
-git clone https://github.com/bg1eym/dj-studio ~/dj-studio
+A=$(uname -m | sed 's/x86_64/x64/'); curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-$A.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"
 ```
 
+也可以在 [Release 页](https://github.com/bg1eym/dj-studio/releases/tag/mac-app-latest)下载 zip（Apple 芯片：`arm64`；Intel：`x64`），
+解压后把 DJ Studio 拖进「应用程序」。这样下载的第一次打开要：右键 → 打开 → 打开（macOS 15 以后：双击一次，再到 系统设置 → 隐私与安全性 → 「仍要打开」），
+因为应用没有经过苹果公证。
+
+打开后会自动打开浏览器 http://127.0.0.1:8430/ 。应用没有窗口，退出点网页右上角「退出」；再打开 DJ Studio 就回来。
+日志在 `~/DJStudio/logs/app.log`。
+
+### 从源码运行（开发）
+
 ```bash
-cd ~/dj-studio && python3 -m venv ~/.venvs/djstudio && ~/.venvs/djstudio/bin/pip install -e '.[dev]'
+git clone https://github.com/bg1eym/dj-studio ~/dj-studio && cd ~/dj-studio && python3 -m venv ~/.venvs/djstudio && ~/.venvs/djstudio/bin/pip install -e '.[dev]'
 ```
 
 ```bash
 ~/.venvs/djstudio/bin/djstudio
 ```
 
-浏览器会打开 http://127.0.0.1:8430/ （以后也可以双击 `~/dj-studio/DJStudio.command`）。内置引擎要用 node（`brew install node`），演示模式（`djstudio demo`，http://127.0.0.1:8431/）也是。代码放在 iCloud 之外（例如 `~/dj-studio`），别放进「文稿」。
+从源码运行时每次启动会自动 `git pull`。声音引擎要另外编（`tools/mixxx-engine/build.sh`）或用 `DJSTUDIO_ENGINE_BIN` 指过去；
+没有引擎时分析用 ffmpeg、内置引擎退回 Node 模拟器（没有声音）。
 
 ### 默认位置（可用环境变量覆盖）
 
@@ -61,9 +66,9 @@ cd ~/dj-studio && python3 -m venv ~/.venvs/djstudio && ~/.venvs/djstudio/bin/pip
    找到就复制进托管曲库。找不到的会列出来，拖进来就行。
 2. **分析**：曲子齐了自动开始，一个进度条，不用管——
    音频分析 → 读打碟谱 → 按谱生成 set 并校验（小节号按谱上「第 1 小节第 1 拍」对齐，旋钮钟点位换成 dB，见 [docs/SET_FORMAT.md](docs/SET_FORMAT.md)）
-   → 试启动一次内置引擎。不碰 Mixxx，14 首大约两三分钟。
-3. **▶ 开始演出**：可以选从头或「过渡 k 前 8 小节」开始、1–8 倍速。同一页换成演出画面（波形、混音台、过渡时间线），
-   **■ 停止**随时可用（淡出停止）。
+   → 试启动一次声音引擎（检查声音输出）。不碰你装的 Mixxx，14 首大约两三分钟。
+3. **▶ 开始演出**：可以选从头或「过渡 k 前 8 小节」开始；原速时有声音（电脑当前的声音输出），2–8 倍速时没有声音。
+   同一页换成演出画面（波形、混音台、过渡时间线），**■ 停止**随时可用（淡出停止）。
 
 连 Mixxx 时（`DJSTUDIO_ENGINE=mixxx`）第 2 步还会：让 Mixxx 扫描并分析（会重启 Mixxx）→ 网格核对（Mixxx 把网格放在反拍上的自动换成自估网格并锁定，先备份）
 → 准备 Mixxx（部署引擎脚本、写 AutoDJ 队列、启动、等引擎上线）；开始演出只能从头、原速。
@@ -73,16 +78,8 @@ cd ~/dj-studio && python3 -m venv ~/.venvs/djstudio && ~/.venvs/djstudio/bin/pip
 
 ### 更新
 
-每次启动都会自动更新：`djstudio` 启动时先 `git pull`，拉到新代码就重启自己（依赖变了会先重装）；之前开着的 DJ Studio 会先被关掉。
-右上角显示版本和提交号，看得出跑的是不是最新代码。不想自动更新：`DJSTUDIO_NO_UPDATE=1 djstudio`。
-
-第一次从 0.1 升到 0.2（之前的版本还不会自动更新）要手动拉一次：
-
-```bash
-cd ~/dj-studio && git pull && ~/.venvs/djstudio/bin/pip install -e '.[dev]'
-```
-
-以后在 Finder 里双击 `~/dj-studio/DJStudio.command` 就能打开（第一次会先安装）。
+应用：再运行一次上面「安装」那一行（会换成最新的 DJ Studio.app；曲库、分析结果、set 都在 `~/DJStudio` 和 `~/Music/DJStudio`，不受影响）。
+右上角显示版本和提交号。从源码运行时每次启动自动 `git pull`（`DJSTUDIO_NO_UPDATE=1` 关掉）。
 
 ### 演出画面：看着它打碟
 

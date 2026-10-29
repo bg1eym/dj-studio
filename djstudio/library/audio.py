@@ -29,6 +29,11 @@ def have_decoder() -> bool:
     return engine_binary() is not None or have_ffmpeg()
 
 
+def decoder_name() -> str:
+    """现在用哪个解码器（写进分析结果：换了解码器要重新分析，mp3 开头的编码延迟两边处理可能不同）。"""
+    return "mixxx-engine" if _engine() else "ffmpeg"
+
+
 def _engine() -> Path | None:
     from ..engine.bundled import engine_binary
 
