@@ -46,16 +46,25 @@ jobs:
           gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）" 2>/dev/null || true
           echo "== $GITHUB_SHA engine-${{ matrix.arch }} started $(date -u)" > engine-${{ matrix.arch }}.log
           for i in 1 2 3 4 5 6; do gh release upload ci-logs engine-${{ matrix.arch }}.log --clobber && break; sleep 10; done
+          # 整个任务期间每 3 分钟把进度（走到哪一步 + 编译输出的最后几行）传到 ci-logs：这边看不到 Actions 的日志
+          echo "started $(date -u)" > "$RUNNER_TEMP/progress.txt"
+          nohup bash -c 'while sleep 180; do { echo "== $GITHUB_SHA engine-${{ matrix.arch }} $(date -u)"; cat "$RUNNER_TEMP/progress.txt"; echo "-- 编译输出"; tail -n 40 "$GITHUB_WORKSPACE/engine-build.log" 2>/dev/null; } > "$RUNNER_TEMP/engine-${{ matrix.arch }}-progress.log"; gh release upload ci-logs "$RUNNER_TEMP/engine-${{ matrix.arch }}-progress.log" --clobber >/dev/null 2>&1; done' >/dev/null 2>&1 &
       - name: Mixxx 源码
-        run: git clone --depth 1 --branch "$MIXXX_TAG" https://github.com/mixxxdj/mixxx "$RUNNER_TEMP/mixxx"
+        run: |
+          echo "$(date -u +%H:%M:%S) Mixxx 源码" >> "$RUNNER_TEMP/progress.txt"
+          git clone --depth 1 --branch "$MIXXX_TAG" https://github.com/mixxxdj/mixxx "$RUNNER_TEMP/mixxx"
       - uses: jwlawson/actions-setup-cmake@v2.2
         with:
           cmake-version: "3.21.x"
       - name: 工具
-        run: brew install ccache ninja || true
+        run: |
+          echo "$(date -u +%H:%M:%S) 工具" >> "$RUNNER_TEMP/progress.txt"
+          brew install ccache ninja || true
       - name: Mixxx 的构建环境（预编译的依赖）
         working-directory: ${{ runner.temp }}/mixxx
-        run: ${{ matrix.buildenv }} setup
+        run: |
+          echo "$(date -u +%H:%M:%S) Mixxx 的构建环境（预编译的依赖）" >> "$RUNNER_TEMP/progress.txt"
+          ${{ matrix.buildenv }} setup
         env:
           BUILDENV_BASEPATH: /Users/runner/buildenv
       # 编译缓存：失败的构建也存下来（下一次只编改了的文件）
@@ -71,10 +80,9 @@ jobs:
             -DCOREAUDIO=ON -DQT6=ON -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
         run: |
+          echo "$(date -u +%H:%M:%S) 编引擎" >> "$RUNNER_TEMP/progress.txt"
           set -o pipefail
           ccache --max-size=2G
-          # 每 5 分钟把编译进度传到 ci-logs（这边看不到 Actions 的日志）
-          ( while sleep 300; do { echo "== $GITHUB_SHA engine-${{ matrix.arch }} building $(date -u)"; tail -n 40 engine-build.log; } > engine-${{ matrix.arch }}.log; gh release upload ci-logs engine-${{ matrix.arch }}.log --clobber >/dev/null 2>&1; done ) &
           tools/mixxx-engine/build.sh "$RUNNER_TEMP/mixxx" 2>&1 | tee engine-build.log
           ccache --show-stats
       - uses: actions/cache/save@v4
@@ -84,13 +92,16 @@ jobs:
           key: engine-${{ matrix.arch }}-${{ github.run_number }}-${{ github.run_attempt }}
       - name: 看引擎依赖哪些库（只应有系统自带的）
         run: |
+          echo "$(date -u +%H:%M:%S) 看引擎依赖哪些库（只应有系统自带的）" >> "$RUNNER_TEMP/progress.txt"
           set -o pipefail
           F=tools/mixxx-engine/dist/djstudio-engine
           { lipo -info "$F"; ls -la "$F"; otool -L "$F"; } | tee engine-deps.txt
           if otool -L "$F" | tail -n +2 | grep -vE '^\s*(/usr/lib/|/System/)'; then echo "有非系统库"; exit 1; fi
       - name: 冒烟测试（x64 版能在这台机器上直接跑）
         if: matrix.arch == 'x64'
-        run: python3 packaging/macos/smoke_engine.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee engine-smoke.log
+        run: |
+          echo "$(date -u +%H:%M:%S) 冒烟测试（x64 版能在这台机器上直接跑）" >> "$RUNNER_TEMP/progress.txt"
+          python3 packaging/macos/smoke_engine.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee engine-smoke.log
       - uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.arch }}
