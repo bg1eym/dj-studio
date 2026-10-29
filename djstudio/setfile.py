@@ -63,6 +63,7 @@ class Transition(_Model):
     lanes: dict[str, list[Point]] = Field(default_factory=dict)  # 覆盖/追加的自动化曲线（整条替换）
     events: list[Point] = Field(default_factory=list)  # [bar, "A.stop"] / [bar, "A.loop:8"] …
     tempo: list[Point] | None = None  # 主控 BPM 曲线 [[bar, bpm], ...]；None = 默认
+    label: str = ""  # 显示用的手法名（打碟谱生成的 custom 过渡写「长交接」/「瞬时切换」）
     note: str = ""
 
     @field_validator("lanes")

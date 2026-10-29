@@ -312,3 +312,42 @@ def test_rehearsal_runs_set_in_simulator_without_mixxx(env):
     while studio.engine_state().get("rehearsal") and time.time() - t0 < 10:
         time.sleep(0.2)
     assert not studio.engine_state().get("rehearsal")
+
+
+def test_auto_prepare_from_plan(env, monkeypatch):
+    """一键：曲子 + 打碟谱 → 音频分析 → 读谱 → Mixxx（已扫描分析）→ 网格核对 → 生成 set → 准备。"""
+    from djstudio.plan.cdw import Knobs, Plan, PlanRow, PlanTrack, PlanTransition
+
+    studio, src, state = env
+    studio.library.import_paths([str(src)])
+    by_name = {t.path.split("/")[-1]: t for t in studio.store.all()}
+    for name, t in by_name.items():
+        bpm, fb, _ = SPECS[name]
+        fake_mixxxdb.add_track(studio.cfg.mixxx_db, t.path, t.duration, bpm, fb, samplerate=22050, title=name)
+    ba, fa, da = SPECS["a.wav"]
+    bb, fb_, db_ = SPECS["b.wav"]
+    K = lambda lo=0, v=10: Knobs(lo, 0, 0, 0, v)  # noqa: E731
+    plan = Plan("测试谱", [
+        PlanTrack(1, "A", ba, ba, False, None, None, None, "a.wav", fa + da * 60 / ba),
+        PlanTrack(2, "B", bb, ba, False, None, 25, "longhand", "b.wav", fb_ + db_ * 60 / bb),
+    ], [PlanTransition(1, "A", "B", "longhand", 25, ba, ba, None, [
+        PlanRow(21, None, False, K(), None),
+        PlanRow(25, 1, False, K(), K(lo=-5, v=5)),
+        PlanRow(33, 9, False, K(lo=-2), K(lo=0, v=10)),
+        PlanRow(41, 17, True, K(lo=-5), K()),
+    ])])
+    pdf = studio.plans_dir / "测试谱.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"%PDF-1.4 stub")
+    monkeypatch.setattr(studio, "load_plan", lambda path: plan)
+    st = studio.plan_status()
+    assert st and [r["track"] for r in st["tracks"]] == [by_name["a.wav"].id, by_name["b.wav"].id]
+
+    job = wait_job(studio.auto_prepare(settle=0.5), 120)
+    assert job.state == "ok", "\n".join(job.log)
+    assert job.progress == 1.0 and job.stage == len(studio.AUTO_STAGES) - 1
+    s = studio.load(job.result["set"])
+    assert [t.id for t in s.tracks] == [by_name["a.wav"].id, by_name["b.wav"].id]
+    tr = s.transitions[0]
+    assert tr.technique == "custom" and tr.label == "长交接" and tr.start == 21 and tr.play_at == 4
+    assert studio.prepared()["set"] == s.id and len(studio.mixxx.autodj_queue()) == 2

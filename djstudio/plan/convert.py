@@ -1,0 +1,354 @@
+"""打碟谱（Plan）→ djset/2。全部是确定性规则，结果是普通的 set 文件，网页上照常能改。
+
+小节对齐
+  谱上每首的第 1 小节 = 「第 1 小节第 1 拍」的秒数（Engine DJ 清单）。把它吸附到这首歌的网格拍上：
+  该拍的拍号 mod 4 就是小节相位（写进 set 的 ``downbeat`` 覆盖，不改曲库）；本应用的第 1 小节 = 曲中最早的
+  小节线，所以「谱上第 b 小节 = 本应用第 b + k 小节」，k 写进 note。再用谱上的 breakdown / drop 小节
+  与本应用切出的段落交叉核对（谱里自己说了：差 1 小节说明第 1 拍选错了一拍）。
+
+旋钮（谱上是 Prime 4+ 的钟点位，见 cdw.py）
+  EQ：12 点 = 0 dB，7 点 = 全切（谱上写 -25 dB），5 点 = +6 dB。12 点以左按 -25·(钟头/5)^1.56 dB：
+  10 点 ≈ -6 dB，对上谱里「B LOW 给到一半」写 10 点。这条曲线是假设（docs/DEVICE_TEST.md），只在 eq_db 一处。
+  Filter：左负右正，钟头/5 → -1..1（「左 9 点」= -0.6 =「切一半」）。推子：0–10 → 推子位置 0..1。
+  两行之间直线过渡；相邻两行只差 1 小节而且变化大（≥ 2 个钟头 / 推子 ≥ 3 格）= 在后一行那一拍跳变
+  （谱里这些都是「一拍回中」「同一拍拧到底」之类的动作）。
+
+过渡
+  一律 custom：时间线从表格第一行（B 还没进的那一行）开始，B 在「B 的第 1 小节落在 A 的第 X 小节」起播；
+  A 自己播完（谱：出曲推子不拉，跑到自己的最后一小节）。主速：页眉的主速；「B 第 m–n 小节把主速 X → Y」
+  按 B 的小节换算进时间线。特效「Main FX Reverb，第 a–b 小节，Wet/Dry 1/3」→ 该 deck 的 reverb 从 a 起 1/3。
+"""
+from __future__ import annotations
+
+import difflib
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ..grid import BEATS_PER_BAR, Grid
+from ..setfile import SetFile
+from .cdw import Knobs, Plan, PlanRow, PlanTrack, PlanTransition
+
+EQ_CUT_DB = -25.0  # 谱：7 点 = 全切（-25 dB）
+EQ_MAX_DB = 6.0  # 谱：5 点 = 满（+6 dB）
+EQ_TAPER = 1.56  # 10 点 = -6 dB（「一半」）
+STEP_HOURS = 2.0  # 相邻一小节、变化 ≥ 这么多钟头 → 跳变
+STEP_FADER = 3.0
+OUTLIER_MS = 25.0
+WRONG_BEAT_TOL = 0.2  # 谱的第 1 拍离最近网格拍超过这么多拍 → 可能对错了拍
+
+
+def eq_db(hours: float) -> float:
+    if hours >= 0:
+        return round(EQ_MAX_DB * min(hours, 5.0) / 5.0, 2)
+    return round(EQ_CUT_DB * (min(-hours, 5.0) / 5.0) ** EQ_TAPER, 2)
+
+
+def filter_val(hours: float) -> float:
+    return round(max(-5.0, min(5.0, hours)) / 5.0, 3)
+
+
+def fader_pos(v: float) -> float:
+    return round(max(0.0, min(10.0, v)) / 10.0, 3)
+
+
+@dataclass
+class LibTrack:
+    """候选曲目：曲库里的一首，带网格（Mixxx 的，或分析的）。"""
+
+    id: str
+    path: str
+    title: str
+    artist: str
+    duration: float
+    grid: Grid | None  # bpm / first_beat / downbeat（曲库里确认过的小节相位）
+    sections: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class Note:
+    level: str  # error / warn / info
+    where: str
+    msg: str
+
+    def __str__(self) -> str:
+        return f"[{self.level}] {self.where}：{self.msg}"
+
+
+@dataclass
+class Alignment:
+    downbeat: int  # 网格拍号 mod 4 = 小节第 1 拍
+    k: int  # 谱上第 b 小节 = 本应用第 b + k 小节
+    residual_ms: float  # 谱的第 1 拍 − 最近的网格拍
+    bar1_s: float  # 按谱的小节相位，本应用第 1 小节的起点（秒）——相位和曲库不同时写回曲库
+    rephase: bool  # 小节相位和曲库里的不同
+    cue_dev: list[tuple[int, str, float | None]] = field(default_factory=list)  # (谱小节, 标签, 偏差小节)
+
+
+@dataclass
+class Converted:
+    set: SetFile | None
+    matches: list[LibTrack | None]
+    alignments: list[Alignment | None]
+    notes: list[Note]
+
+    @property
+    def ok(self) -> bool:
+        return self.set is not None and not any(n.level == "error" for n in self.notes)
+
+
+# ---------------------------------------------------------------- 曲目匹配
+
+def _norm(s: str) -> str:
+    s = Path(s).stem if s.lower().endswith((".mp3", ".wav", ".flac", ".aiff", ".aif", ".m4a", ".ogg")) else s
+    s = re.sub(r"^\s*\d{1,3}[\s_.\-]+", "", s)  # 文件名前面的编号
+    return re.sub(r"[^0-9a-z]", "", s.lower().replace("&", ""))
+
+
+def _lead_no(path: str) -> int | None:
+    m = re.match(r"^\s*(\d{1,3})[\s_.\-]", Path(path).name)
+    return int(m.group(1)) if m else None
+
+
+def match_tracks(plan: Plan, lib: list[LibTrack]) -> tuple[list[LibTrack | None], list[Note]]:
+    notes: list[Note] = []
+    scored: list[tuple[float, int, int]] = []
+    for i, pt in enumerate(plan.tracks):
+        want = [_norm(pt.file_name), _norm(pt.title.replace("—", " "))]
+        for j, lt in enumerate(lib):
+            have = [_norm(lt.path), _norm(f"{lt.artist} {lt.title}"), _norm(lt.title)]
+            sim = max(difflib.SequenceMatcher(None, w, h).ratio() for w in want if w for h in have if h)
+            score = sim + (0.35 if _lead_no(lt.path) == pt.no else 0.0)
+            # 时长核对：谱上的小节数 × 原 BPM + 第 1 拍的秒数 ≈ 文件时长
+            if pt.bars and pt.bpm_orig and lt.duration:
+                est = (pt.bar1_s or 0.0) + pt.bars * BEATS_PER_BAR * 60.0 / pt.bpm_orig
+                if abs(est - lt.duration) > 12 * BEATS_PER_BAR * 60.0 / pt.bpm_orig:
+                    score -= 0.4
+            scored.append((score, i, j))
+    scored.sort(reverse=True)
+    out: list[LibTrack | None] = [None] * len(plan.tracks)
+    used: set[int] = set()
+    for score, i, j in scored:
+        if out[i] is not None or j in used or score < 0.6:
+            continue
+        out[i] = lib[j]
+        used.add(j)
+    for i, pt in enumerate(plan.tracks):
+        if out[i] is None:
+            notes.append(Note("error", f"#{pt.no:02d} {pt.title}", f"曲库里找不到这首（谱上的文件名：{pt.file_name or '—'}）"))
+    return out, notes
+
+
+# ---------------------------------------------------------------- 小节对齐
+
+def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
+    where = f"#{pt.no:02d} {pt.title}"
+    g = lt.grid
+    if g is None or g.bpm <= 0:
+        return None, [Note("error", where, "还没有网格（分析 / Mixxx 分析没完成）")]
+    notes: list[Note] = []
+    if pt.bpm_orig and abs(g.bpm - pt.bpm_orig) > 0.6:
+        notes.append(Note("error", where, f"BPM 对不上：谱上原 BPM {pt.bpm_orig:g}，网格 {g.bpm:.2f}"))
+    anchor = pt.bar1_s if pt.bar1_s is not None else g.bar_time(1)
+    jf = g.time_beat(anchor)
+    j = round(jf)
+    res = (jf - j) * g.beat_len * 1000
+    if abs(jf - j) > WRONG_BEAT_TOL:
+        notes.append(Note("warn", where, f"谱的第 1 小节（{anchor:.3f}s）离最近的网格拍 {res:+.0f}ms，"
+                                         "可能对到了别的拍：在曲库页看一下这首的小节线"))
+    db = j % BEATS_PER_BAR
+    g2 = Grid(g.bpm, g.first_beat, db, g.duration)
+    k = round(g2.beat_bar(j)) - 1
+    al = Alignment(db, k, round(res, 1), round(g2.bar_time(1), 5), db != g.downbeat)
+    if al.rephase:
+        notes.append(Note("info", where, f"小节线按谱定（和原来自动估的差 {(db - g.downbeat) % 4} 拍）"))
+    # 段落核对：谱上的 breakdown / drop 小节 vs 本应用切出的段落起点
+    starts = {"break": [s["start"] for s in lt.sections if s["label"] == "breakdown"],
+              "drop": [s["start"] for s in lt.sections if s["label"] in ("drop", "groove")]}
+    for bar, label in pt.cues:
+        kind = "drop" if "drop" in label else "break" if "break" in label else None
+        if not kind or not starts[kind]:
+            al.cue_dev.append((bar, label, None))
+            continue
+        # 段落起点是按曲库里的小节相位（g）数的，换成谱的相位（g2）的小节号再比
+        ours = [g2.beat_bar(g.bar_beat(s_)) for s_ in starts[kind]]
+        dev = min((o - (bar + k) for o in ours), key=abs)
+        al.cue_dev.append((bar, label, round(dev, 2)))
+    devs = [d for _, _, d in al.cue_dev if d is not None]
+    near = [d for d in devs if abs(d) <= 4]
+    if near and not al.rephase:
+        same = len(near) >= 3 and len(set(near)) == 1 and near[0] != 0
+        txt = "、".join(f"第 {b} 小节 {lab.split()[0]} {d:+g}" for b, lab, d in al.cue_dev if d is not None and abs(d) <= 4)
+        notes.append(Note("warn" if same else "info", where,
+                          f"谱上的段落和本应用切出的段落：{txt}" + ("——整体差一个常数，小节号可能错位" if same else "")))
+    if pt.bars and g.duration:
+        ours_total = g2.last_bar - k
+        if abs(ours_total - pt.bars) > 2:
+            notes.append(Note("warn" if abs(ours_total - pt.bars) > 8 else "info", where,
+                              f"谱上 {pt.bars} 小节，本应用对齐后约 {ours_total:.1f} 小节"))
+    return al, notes
+
+
+# ---------------------------------------------------------------- 过渡
+
+PARAMS = ("lo", "mid", "hi", "filter", "vol")
+
+
+def _value(param: str, k: Knobs) -> float:
+    if param in ("lo", "mid", "hi"):
+        return eq_db(getattr(k, param))
+    if param == "filter":
+        return filter_val(k.filter)
+    return fader_pos(k.vol)
+
+
+def _raw(param: str, k: Knobs) -> float:
+    return getattr(k, param)
+
+
+def _lane(rows: list[tuple[float, Knobs]], param: str, first_step: bool = False) -> list[list[Any]]:
+    pts: list[list[Any]] = []
+    prev: tuple[float, Knobs] | None = None
+    for t, kn in rows:
+        v = _value(param, kn)
+        step = False
+        if prev is None:
+            step = first_step
+        elif t - prev[0] <= 1.0 + 1e-9:
+            d = abs(_raw(param, kn) - _raw(param, prev[1]))
+            step = d >= (STEP_FADER if param == "vol" else STEP_HOURS)
+        pts.append([t, v, "step"] if step else [t, v])
+        prev = (t, kn)
+    # 去掉中间重复：连续三个点值相同（且中间那个不是跳变）就删中间的
+    out: list[list[Any]] = []
+    for i, p in enumerate(pts):
+        if 0 < i < len(pts) - 1 and len(p) == 2 and p[1] == pts[i - 1][1] == pts[i + 1][1]:
+            continue
+        out.append(p)
+    return out
+
+
+def _neutral(lane: list[list[Any]], param: str) -> bool:
+    neutral = {"lo": 0.0, "mid": 0.0, "hi": 0.0, "filter": 0.0, "vol": 1.0}[param]
+    return all(abs(float(p[1]) - neutral) < 1e-9 for p in lane)
+
+
+def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str, Any], list[Note]]:
+    where = f"过渡 {tr.no}（{tr.a_name} → {tr.b_name}）"
+    notes: list[Note] = []
+    a0 = tr.rows[0].a_bar
+    play_at = tr.b1_at_a - a0
+    if play_at < 0:
+        raise ValueError(f"{where}：表格第一行在 B 起播之后")
+    last = tr.rows[-1].a_bar - a0
+
+    a_rows = [(r.a_bar - a0, r.a) for r in tr.rows]
+    b_rows = [(r.a_bar - a0, r.b) for r in tr.rows if r.b is not None]
+    lanes: dict[str, list[list[Any]]] = {}
+    for p in PARAMS:
+        la = _lane(a_rows, p)
+        if not _neutral(la, p):
+            lanes[f"A.{p}"] = la
+        lb = _lane(b_rows, p, first_step=(p == "vol"))  # type: ignore[arg-type]
+        if p == "vol" or not _neutral(lb, p):
+            lanes[f"B.{p}"] = lb
+
+    for fx in tr.effects:
+        t0 = fx.bar0 - a0 if fx.deck == "A" else play_at + fx.bar0 - 1
+        name = f"{fx.deck}.{fx.kind}"
+        lanes[name] = [[max(0.0, t0), 0.0], [max(0.0, t0), round(fx.wet, 3), "step"]]
+
+    tempo: list[list[Any]] = [[0, tr.tempo_from]]
+    bars = float(last)
+    if tr.ramp_b:
+        m, n = tr.ramp_b
+        t0, t1 = play_at + m - 1, play_at + n
+        tempo = [[0, tr.tempo_from], [t0, tr.tempo_from], [t1, tr.tempo_to]]
+        bars = max(bars, float(t1))
+    elif tr.tempo_to != tr.tempo_from:
+        notes.append(Note("warn", where, f"主速 {tr.tempo_from:g} → {tr.tempo_to:g} 没写在哪几小节换，按 B 起播时跳变处理"))
+        tempo = [[0, tr.tempo_from], [play_at, tr.tempo_to, "step"]]
+
+    if not tr.rows[-1].end:
+        notes.append(Note("warn", where, "最后一行没标「结束」，A 仍按自己播完处理"))
+    note = f"打碟谱过渡 {tr.no}：{'长交接' if tr.technique == 'longhand' else '瞬时切换'}，B 第 1 小节 = A 第 {tr.b1_at_a} 小节"
+    if a.k or b.k:
+        note += f"（谱上的小节号换成本应用：A {a.k:+d}，B {b.k:+d}）"
+    out = {
+        "technique": "custom",
+        "start": float(a0 + a.k),
+        "b_in": float(1 + b.k),
+        "play_at": float(play_at),
+        "bars": bars,
+        "params": {"a_end": "playout"},
+        "lanes": lanes,
+        "events": [],
+        "tempo": tempo,
+        "label": "长交接" if tr.technique == "longhand" else "瞬时切换",
+        "note": note,
+    }
+    return out, notes
+
+
+# ---------------------------------------------------------------- 总装
+
+def _slug(s: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
+    return s or "plan"
+
+
+def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | None = None) -> Converted:
+    notes: list[Note] = [Note("warn", "打碟谱", w) for w in plan.warnings]
+    matches, mnotes = match_tracks(plan, lib)
+    notes += mnotes
+    aligns: list[Alignment | None] = []
+    for pt, lt in zip(plan.tracks, matches):
+        if lt is None:
+            aligns.append(None)
+            continue
+        al, an = align(pt, lt)
+        aligns.append(al)
+        notes += an
+    if any(a is None for a in aligns):
+        return Converted(None, matches, aligns, notes)
+    res = sorted(a.residual_ms for a in aligns if a)
+    med = res[len(res) // 2]
+    for pt, a in zip(plan.tracks, aligns):
+        if a and abs(a.residual_ms - med) > OUTLIER_MS:
+            notes.append(Note("info", f"#{pt.no:02d} {pt.title}",
+                              f"谱的第 1 拍比网格 {a.residual_ms:+.0f}ms（其它曲子中位 {med:+.0f}ms）。"
+                              "谱的作者测起音的位置和这里不完全一样；同步按网格走，两个 kick 照样对齐"))
+
+    keylocked = [pt for pt in plan.tracks if pt.keylock]
+    if keylocked:
+        notes.append(Note("warn", ", ".join(f"#{pt.no:02d}" for pt in keylocked),
+                          "谱上要求 Key Lock 开。Mixxx 的时间拉伸会让这首比引擎位置晚 17–29ms，叠放时两个 kick 会出双击，"
+                          "所以先关 Key Lock（音高随速度变化）。要开的话把 set 的 keylock 改成 true"))
+
+    tracks = []
+    for i, (pt, lt, al) in enumerate(zip(plan.tracks, matches, aligns)):
+        assert lt and al
+        t: dict[str, Any] = {"id": lt.id, "title": pt.title.split(" — ")[0], "play_bpm": pt.bpm_play or None,
+                             "downbeat": al.downbeat,
+                             "note": f"谱 #{pt.no:02d}；谱上第 1 小节 = {pt.bar1_s if pt.bar1_s is not None else '—'}s"
+                                     + (f"，本应用第 {1 + al.k} 小节" if al.k else "")}
+        if i == 0:
+            t["start"] = float(1 + al.k)
+        tracks.append(t)
+    trans = []
+    for tr in plan.transitions:
+        a, b = aligns[tr.no - 1], aligns[tr.no]
+        assert a and b
+        d, tn = transition(tr, a, b)
+        trans.append(d)
+        notes += tn
+    sid = set_id or _slug(Path(source).stem if source else plan.title)
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": sid, "name": plan.title, "created": time.strftime("%Y-%m-%d"),
+        "source": source, "note": "由打碟谱自动生成（djstudio.plan）。旋钮钟点位 → dB 的换算见 docs/SET_FORMAT.md。",
+        "keylock": False, "tracks": tracks, "transitions": trans,
+        "ending": {"mode": "playout"},
+    })
+    return Converted(s, matches, aligns, notes)

@@ -55,12 +55,39 @@ class Job:
     started: float = field(default_factory=time.time)
     finished: float | None = None
 
+    stages: list[str] = field(default_factory=list)  # 分步任务（一键分析）的步骤名
+    weights: list[float] = field(default_factory=list)
+    stage: int = -1
+    frac: float = 0.0  # 当前步骤内的进度 0..1
+    detail: str = ""
+
     def say(self, msg: str) -> None:
         self.log.append(f"{time.strftime('%H:%M:%S')} {msg}")
+        self.detail = msg.strip()
+
+    def step(self, i: int, detail: str = "") -> None:
+        self.stage, self.frac = i, 0.0
+        self.say(f"【{i + 1}/{len(self.stages)} {self.stages[i]}】{detail}")
+
+    def sub(self, frac: float, detail: str | None = None) -> None:
+        self.frac = max(0.0, min(1.0, frac))
+        if detail:
+            self.detail = detail
+
+    @property
+    def progress(self) -> float:
+        if not self.stages:
+            return 1.0 if self.state != "running" else 0.0
+        if self.state == "ok":
+            return 1.0
+        w = self.weights or [1.0] * len(self.stages)
+        done = sum(w[: max(0, self.stage)]) + (w[self.stage] * self.frac if self.stage >= 0 else 0.0)
+        return done / sum(w)
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "state": self.state, "log": self.log[-300:], "result": self.result,
-                "started": self.started, "finished": self.finished}
+                "started": self.started, "finished": self.finished, "stages": self.stages, "stage": self.stage,
+                "progress": round(self.progress, 4), "detail": self.detail}
 
 
 class Studio:
@@ -75,6 +102,7 @@ class Studio:
         self._client_lock = threading.Lock()
         self.conductor: Conductor | None = None
         self._rehearsal: dict[str, Any] | None = None
+        self._plan_cache: tuple[Any, Any] | None = None
         # 预演用的引擎：默认 Node 模拟器；开发时可以换成真 Mixxx 测试台（HarnessLink，同一套行协议）
         self.rehearsal_link_factory: Callable[[list[dict[str, Any]], float], Link] = _sim_rehearsal_link
         self.job: Job | None = None
@@ -270,13 +298,14 @@ class Studio:
 
     # ------------------------------------------------------------ 后台任务
 
-    def start_job(self, name: str, fn: Callable[[Job], Any]) -> Job:
+    def start_job(self, name: str, fn: Callable[[Job], Any], stages: list[str] | None = None,
+                  weights: list[float] | None = None) -> Job:
         with self._job_lock:
             if self.job and self.job.state == "running":
                 raise StudioError(f"已经有任务在跑：{self.job.name}")
             if self.conductor and self.conductor.running:
                 raise StudioError("set 正在播放，不能做这个操作")
-            job = self.job = Job(name)
+            job = self.job = Job(name, stages=list(stages or []), weights=list(weights or []))
 
         def run() -> None:
             try:
@@ -468,6 +497,7 @@ class Studio:
             presses += 1
             c.wait_until(lambda: loads() > before or not autodj_on(), 30)
             job.say(f"  已装载 {loads() - n0} 次")
+            job.sub(0.4 * min(1.0, (loads() - n0) / max(1, len(tracks))), f"Mixxx 装载第 {loads() - n0}/{len(tracks)} 首")
         if autodj_on():
             c.send({"t": "set", "g": "[AutoDJ]", "k": "enabled", "v": 0})
         for d in (1, 2):
@@ -486,6 +516,8 @@ class Studio:
             for t in done:
                 job.say(f"  ✓ {t.display}：{mx2[t.id].bpm:.2f} BPM，调 {mx2[t.id].key or '?'}")
             pending = [t for t in pending if t not in done]
+            job.sub(0.4 + 0.4 * (len(tracks) - len(pending)) / len(tracks),
+                    f"Mixxx 分析完 {len(tracks) - len(pending)}/{len(tracks)} 首")
         if pending:
             raise StudioError("这些歌 Mixxx 还没分析完（或分析失败）：" + "、".join(t.display for t in pending))
         job.say("Mixxx 分析完成")
@@ -551,8 +583,177 @@ class Studio:
                     self.store.update(p["id"], bar1_confirmed=False)
                     job.say("    ⚠ 之前确认的小节线不在新网格的拍点上，已取消确认，请在曲库页重新核对小节线")
             self.library.enqueue(p["id"])  # 按新网格重新切小节、重新核对
-        self.library.wait_idle(600)
+        self._wait_analysis(job, 0.1, 1.0, "按校正后的网格重新切小节")
         return {"fixed": len(plan)}
+
+    # ------------------------------------------------------------ 一键：放进曲子和打碟谱 → 分析 → 可以演出
+
+    AUTO_STAGES = ["音频分析", "读打碟谱", "Mixxx 分析", "网格核对", "生成 set", "准备 Mixxx"]
+    AUTO_WEIGHTS = [0.25, 0.03, 0.40, 0.07, 0.05, 0.20]
+
+    @property
+    def plans_dir(self) -> Path:
+        return self.cfg.home / "plans"
+
+    @property
+    def inbox_dir(self) -> Path:
+        return self.cfg.home / "inbox" / "上传"
+
+    def current_plan(self) -> Path | None:
+        """最近放进来的打碟谱。"""
+        pdfs = sorted(self.plans_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime) if self.plans_dir.exists() else []
+        return pdfs[-1] if pdfs else None
+
+    def load_plan(self, path: Path) -> Any:
+        """读打碟谱（按文件修改时间缓存：35 页的 PDF 读一次要一两秒）。"""
+        from .plan.cdw import parse
+
+        key = (str(path), path.stat().st_mtime)
+        if self._plan_cache and self._plan_cache[0] == key:
+            return self._plan_cache[1]
+        plan = parse(path)
+        self._plan_cache = (key, plan)
+        return plan
+
+    def _wait_analysis(self, job: Job, lo: float, hi: float, what: str) -> None:
+        """等托管曲库的分析队列做完，把进度报在当前步骤的 [lo, hi] 区间里。"""
+        total = None
+        while True:
+            q = self.library.queue_state()
+            left = len(q["queued"]) + (1 if q["busy"] else 0)
+            total = max(total or 0, left, 1)
+            job.sub(lo + (hi - lo) * (1 - left / total), f"{what}：还有 {left} 首" if left else f"{what}：完成")
+            if not left:
+                return
+            time.sleep(0.5)
+
+    def lib_tracks(self, track_ids: list[str] | None = None) -> list[Any]:
+        """曲库 → 打碟谱转换器用的候选曲目（有 Mixxx 网格用 Mixxx 的，否则用自估网格）。"""
+        from .plan.convert import LibTrack
+
+        tracks = [t for t in self.store.all() if track_ids is None or t.id in track_ids]
+        mx = self._mixxx_tracks(tracks)
+        out = []
+        for t in tracks:
+            a = t.analysis or {}
+            m = mx.get(t.id)
+            if m and m.grid and m.analyzed:
+                g = Grid(m.grid.bpm, m.grid.first_beat, 0, m.duration or t.duration)
+            elif a.get("own_grid"):
+                g = Grid(a["own_grid"]["bpm"], a["own_grid"]["first_beat"], 0, t.duration)
+            else:
+                g = None
+            if g is not None and t.bar1 is not None:
+                g = Grid(g.bpm, g.first_beat, downbeat_from_bar1(g, t.bar1), g.duration)
+            out.append(LibTrack(t.id, t.path, t.title, t.artist, t.duration, g, a.get("sections", [])))
+        return out
+
+    def plan_status(self) -> dict[str, Any] | None:
+        """当前打碟谱读出来是什么、每首对上了曲库里的哪个文件（上传完就能看）。"""
+        from .plan.cdw import PdfError, PlanError
+        from .plan.convert import match_tracks
+
+        path = self.current_plan()
+        if not path:
+            return None
+        try:
+            plan = self.load_plan(path)
+        except (PlanError, PdfError) as e:
+            return {"file": path.name, "error": str(e)}
+        lib = self.lib_tracks()
+        matches, _ = match_tracks(plan, lib)
+        by_id = {t.id: t for t in self.store.all()}
+        mx = self._mixxx_tracks(list(by_id.values()))
+        rows = []
+        for pt, lt in zip(plan.tracks, matches):
+            t = by_id.get(lt.id) if lt else None
+            rows.append({"no": pt.no, "title": pt.title, "bpm": pt.bpm_play, "file": pt.file_name,
+                         "track": t.id if t else None, "display": t.display if t else None,
+                         "analyzed": bool(t and t.analysis), "mixxx": bool(t and t.id in mx and mx[t.id].analyzed),
+                         "grid_ok": bool(t and (t.analysis or {}).get("grid_check", {"ok": True}).get("ok", True))})
+        return {"file": path.name, "title": plan.title, "n_tracks": len(plan.tracks),
+                "n_transitions": len(plan.transitions), "tracks": rows,
+                "techniques": [tr.technique for tr in plan.transitions], "warnings": plan.warnings}
+
+    AUTO_SETTLE = 15.0  # Mixxx 启动后等它安定的秒数
+
+    def auto_prepare(self, plan_path: Path | None = None, settle: float | None = None) -> Job:
+        settle = self.AUTO_SETTLE if settle is None else settle
+        path = plan_path or self.current_plan()
+        if not path:
+            raise StudioError("还没有打碟谱：把 PDF 拖进来")
+        return self.start_job("分析", lambda job: self._auto(job, path, settle), self.AUTO_STAGES, self.AUTO_WEIGHTS)
+
+    def _auto(self, job: Job, path: Path, settle: float) -> dict[str, Any]:
+        from .plan.convert import convert, match_tracks
+
+        # 1 音频分析：等托管曲库里排队的分析做完
+        job.step(0)
+        self._wait_analysis(job, 0.0, 1.0, "音频分析")
+        bad = [t.display for t in self.store.all() if t.analysis_error]
+        if bad:
+            job.say("!! 这些文件分析失败（不影响别的）：" + "、".join(bad))
+
+        # 2 读打碟谱 + 对上曲库里的文件
+        job.step(1, path.name)
+        plan = self.load_plan(path)
+        job.say(f"「{plan.title}」：{len(plan.tracks)} 首，{len(plan.transitions)} 段过渡")
+        matches, notes = match_tracks(plan, self.lib_tracks())
+        missing = [f"#{pt.no:02d} {pt.title}" for pt, m in zip(plan.tracks, matches) if m is None]
+        if missing:
+            raise StudioError("这些歌还没放进来：" + "、".join(missing))
+        ids = [m.id for m in matches if m]
+
+        # 3 Mixxx 扫描 + 分析（Mixxx 的网格是同步的依据）
+        job.step(2)
+        self._sync(job, ids, settle)
+        self._wait_analysis(job, 0.8, 1.0, "按 Mixxx 的网格重新切小节")
+
+        # 4 网格核对：Mixxx 把网格放在反拍上的，换成自估网格并锁定
+        job.step(3)
+        fix = self.grid_fix_plan(ids)
+        if fix:
+            job.say(f"{len(fix)} 首的 Mixxx 网格对不上 kick，自动校正（先备份 Mixxx 曲库）")
+            self._fix_grids(job, ids)
+        else:
+            job.say("网格都对得上")
+        job.sub(1.0)
+
+        # 5 打碟谱 → set，并校验。谱上的第 1 小节就是你在 Engine DJ 里打 Hot Cue 1 的位置：
+        #   小节相位和这里自动估的不同时，按谱写回曲库（确认过的小节线），重新切段落后再转一次
+        job.step(4)
+        conv = convert(plan, self.lib_tracks(ids), source=path.name)
+        moved = []
+        for pt, lt, al in zip(plan.tracks, conv.matches, conv.alignments):
+            if lt and al and al.rephase:
+                t = self.store.get(lt.id)
+                if t and t.bar1_confirmed:
+                    job.say(f"提示 #{pt.no:02d} {t.display}：曲库里确认过的小节线和谱差 {al.downbeat} 拍相位，按谱改")
+                self.store.update(lt.id, bar1=al.bar1_s, bar1_confirmed=True)
+                self.library.enqueue(lt.id)
+                moved.append(f"#{pt.no:02d}")
+        if moved:
+            job.say(f"小节线按谱定：{'、'.join(moved)}；重新切段落 …")
+            self._wait_analysis(job, 0.1, 0.9, "按谱的小节线重新切段落")
+            conv = convert(plan, self.lib_tracks(ids), source=path.name)
+        for n in conv.notes:
+            job.say(("!! " if n.level == "error" else "提示 " if n.level == "warn" else "  ") + str(n))
+        if not conv.ok or conv.set is None:
+            raise StudioError("打碟谱转成 set 没成功：" + "；".join(str(n) for n in conv.notes if n.level == "error"))
+        s = conv.set
+        self.save(s)
+        c = self.compile(s)
+        errs = [str(i) for i in c.issues if i.level == "error"]
+        if errs:
+            raise StudioError("生成的 set 校验没通过：\n" + "\n".join(errs))
+        job.say(f"set「{s.name}」已生成（{s.id}），约 {c.duration / 60:.1f} 分钟")
+
+        # 6 准备 Mixxx：部署引擎、写 AutoDJ 队列、启动 Mixxx、等引擎上线
+        job.step(5)
+        self._prepare(job, s.id, settle)
+        return {"set": s.id, "duration": c.duration,
+                "notes": [vars(n) for n in conv.notes if n.level != "info"],
+                "issues": [{"level": i.level, "where": i.where, "msg": i.msg} for i in c.issues]}
 
     # ------------------------------------------------------------ 播放
 

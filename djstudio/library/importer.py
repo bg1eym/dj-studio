@@ -107,11 +107,12 @@ class Library:
 
     # ------------------------------------------------------------ 导入
 
-    def import_paths(self, paths: list[str], analyze_now: bool = True) -> ImportResult:
+    def import_paths(self, paths: list[str], analyze_now: bool = True, trusted: bool = False) -> ImportResult:
+        """trusted：路径是我们自己写的（网页上传的暂存文件），不做浏览范围检查。"""
         res = ImportResult()
         files: list[Path] = []
         for s in paths:
-            p = check_allowed(Path(s), [*self.browse_roots, self.root])
+            p = Path(s).resolve() if trusted else check_allowed(Path(s), [*self.browse_roots, self.root])
             if p.is_dir():
                 files += sorted(f for f in p.rglob("*") if f.suffix.lower() in AUDIO_EXTS and not f.name.startswith("."))
             elif p.suffix.lower() in AUDIO_EXTS:

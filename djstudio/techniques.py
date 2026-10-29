@@ -45,7 +45,7 @@ class Expanded:
 DEFAULTS: dict[str, dict[str, Any]] = {
     "longhand": {
         "bars": 48,
-        "b_vol_half": 0.7,  # B 进场的半音量
+        "b_vol_half": 0.5,  # B 进场的半音量（推子位置；打碟谱的「推子 5」）
         "b_full_after": None,  # B 进场后多少小节推满；None = min(32, 交接段 2/3)
         "lo_floor_db": -15.0,  # 低频对换的底
         "lo_from": 0.25,  # 低频对换窗口（交接段比例）
@@ -64,7 +64,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "sweep_amount": 0.6,
         "echo_out": 0.5,  # 切点前最后一小节 A 的 echo 湿度；0 = 不加
     },
-    "custom": {},
+    "custom": {
+        "a_end": "stop",  # stop：时间线结束时停 A；playout：A 自己播完（打碟谱：出曲跑到自己的最后一小节）
+    },
 }
 
 
@@ -83,7 +85,7 @@ def expand(tr: Transition, a_bpm: float, b_bpm: float, a_bars_left: float | None
     elif tr.technique == "instant":
         ex = _instant(tr, p)
     else:
-        ex = _custom(tr)
+        ex = _custom(tr, p)
 
     for name, pts in tr.lanes.items():
         ex.lanes[name] = [list(pt) for pt in pts]
@@ -167,13 +169,16 @@ def _instant(tr: Transition, p: dict[str, Any]) -> Expanded:
     return Expanded(bars=L, play_at=P, lanes=lanes, events=[[P, "A.stop"]])
 
 
-def _custom(tr: Transition) -> Expanded:
+def _custom(tr: Transition, p: dict[str, Any]) -> Expanded:
     if tr.bars is None or tr.play_at is None:
         raise TechniqueError("custom 手法必须写明 bars 和 play_at")
+    if p["a_end"] not in ("stop", "playout"):
+        raise TechniqueError(f"custom 的 a_end 只能是 stop / playout：{p['a_end']!r}")
+    playout = p["a_end"] == "playout"
     events: list[Point] = []
-    if not any(str(e[1]) == "A.stop" for e in tr.events):
+    if not playout and not any(str(e[1]) == "A.stop" for e in tr.events):
         events.append([tr.bars, "A.stop"])
-    return Expanded(bars=tr.bars, play_at=tr.play_at, events=events)
+    return Expanded(bars=tr.bars, play_at=tr.play_at, events=events, a_playout=playout)
 
 
 def _check(ex: Expanded) -> None:

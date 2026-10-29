@@ -64,3 +64,25 @@ def test_live_view_assets_and_rehearsal_api(client):
     assert client.post("/api/sets/x3/rehearse", json={"speed": 100}).status_code == 400
     r = client.post("/api/sets/x3/rehearse", json={"speed": 2})
     assert r.status_code == 400 and "校验" in r.json()["error"]  # 曲目不在曲库：和真播一样先过校验
+
+
+def test_upload_audio_and_reject_bad_files(client, tmp_path):
+    import shutil as _sh
+
+    from djstudio.library.audio import have_ffmpeg
+    from djstudio.synth import techno, write_wav
+
+    assert client.put("/api/upload", params={"name": "notes.txt"}, content=b"x").status_code == 400
+    assert client.put("/api/upload", params={"name": "../x.mp3"}, content=b"").status_code == 400  # 空文件
+    r = client.put("/api/upload", params={"name": "谱.pdf"}, content=b"%PDF-1.4 not really")
+    assert r.status_code == 422 and "打碟谱" in r.json()["detail"]
+    assert client.get("/api/plan").json() is None  # 读不了的谱不算当前打碟谱
+    if not have_ffmpeg() or _sh.which("ffprobe") is None:
+        return
+    wav = tmp_path / "w.wav"
+    write_wav(wav, techno(128.0, 0.1, 0, (("groove", 4),)))
+    r = client.put("/api/upload", params={"name": "01_Song.wav"}, content=wav.read_bytes())
+    assert r.status_code == 200 and r.json()["kind"] == "audio" and r.json()["track"]
+    again = client.put("/api/upload", params={"name": "01_Song.wav"}, content=wav.read_bytes()).json()
+    assert again["existing"] and again["track"] == r.json()["track"]
+    assert [t["id"] for t in client.get("/api/tracks").json()] == [r.json()["track"]]

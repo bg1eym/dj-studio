@@ -1,7 +1,9 @@
+import math
+
 import pytest
 from pydantic import ValidationError
 
-from djstudio.compiler import _lane_native, compile_set, to_native
+from djstudio.compiler import _lane_native, compile_set, fader_gain, to_native
 from djstudio.grid import Grid
 from djstudio.setfile import SetFile
 
@@ -38,8 +40,19 @@ def test_units():
 
 def test_step_points_expand_to_two():
     pts = _lane_native("B.vol", [[4, 0.7, "step"], [8, 0.7], [9, 1.0]], 4)
-    assert pts[0] == [16.0, 0.0] and pts[1] == [16.0, 0.7]
+    g07 = fader_gain(0.7)
+    assert pts[0] == [16.0, 0.0] and pts[1] == [16.0, pytest.approx(g07, abs=1e-4)]
     assert pts[-1] == [36.0, 1.0]
+    # 推子按位置线性推上去（逐拍重采样成增益），不是增益直线
+    mid = next(v for x, v in pts if x == 34.0)
+    assert mid == pytest.approx(fader_gain(0.85), abs=1e-4)
+
+
+def test_fader_position_is_mixxx_taper():
+    """vol = 推子位置；换成 Mixxx 的 volume 值用它自己的 ControlAudioTaperPot(-20, 0, 1) 曲线。"""
+    assert fader_gain(0) == 0 and fader_gain(1) == 1
+    assert 20 * math.log10(fader_gain(0.5) * 0.9 + 0.1) == pytest.approx(-10, abs=1e-6)
+    assert to_native("vol", 0.7) == pytest.approx(fader_gain(0.7), abs=1e-5)
 
 
 def test_db_lane_resampled_per_beat():

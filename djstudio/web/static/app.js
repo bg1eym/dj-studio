@@ -93,9 +93,10 @@ const S = {
 // ------------------------------------------------------------------ 路由
 
 function route() {
-  S.tab = (location.hash.slice(1) || "library").split("/")[0];
+  S.tab = (location.hash.slice(1) || "start").split("/")[0];
   for (const a of document.querySelectorAll("#tabs a")) a.classList.toggle("active", a.dataset.tab === S.tab);
   for (const s of document.querySelectorAll(".tab")) s.classList.toggle("active", s.id === "tab-" + S.tab);
+  if (S.tab === "start") renderStart();
   if (S.tab === "library") renderLibrary();
   if (S.tab === "sets") renderSets();
   if (S.tab === "show") renderShow();
@@ -133,12 +134,13 @@ function connectEvents() {
   es.addEventListener("job", (e) => {
     S.job = JSON.parse(e.data);
     renderJobPanels();
+    if (S.tab === "start") loadState().then(() => renderStart());
     if (S.job.state !== "running") {
       loadTracks();
       loadState().then(() => { if (S.tab === "show") renderShow(); });
     }
   });
-  es.addEventListener("track", () => { scheduleTracksReload(); });
+  es.addEventListener("track", () => { scheduleTracksReload(); if (S.tab === "start") schedulePlanReload(); });
   es.onerror = () => { S.engine = { connected: false, online: false }; updateEngineBadge(); };
 }
 
@@ -164,7 +166,7 @@ async function loadState() {
 setInterval(async () => {
   if (S.job && S.job.state === "running") {
     const st = await api("GET", "/api/state").catch(() => null);
-    if (st) { S.job = st.job; renderJobPanels(); }
+    if (st) { S.job = st.job; S.state = st; renderJobPanels(); if (S.tab === "start") renderStartJob(); }
   }
 }, 1000);
 
@@ -180,6 +182,187 @@ function updateEngineBadge() {
     al.textContent = "⚠ 引擎失联：Mixxx 没有回传状态。conductor 已停发命令，正在等待恢复。看一下 Mixxx 是否卡住 / 弹窗。";
     al.classList.remove("hidden");
   } else al.classList.add("hidden");
+}
+
+// ------------------------------------------------------------------ 开始：放进曲子和打碟谱 → 分析 → 演出
+
+const UP = { files: [], busy: false };
+
+function putFile(file, onprog) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open("PUT", "/api/upload?name=" + encodeURIComponent(file.name));
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onprog(e.loaded / e.total); };
+    x.onload = () => {
+      let body = {};
+      try { body = JSON.parse(x.responseText || "{}"); } catch (_) { /* 非 JSON */ }
+      if (x.status < 300) resolve(body);
+      else reject(new Error(body.detail || body.error || x.statusText));
+    };
+    x.onerror = () => reject(new Error("上传失败（网页服务停了？）"));
+    x.send(file);
+  });
+}
+
+async function addFiles(list) {
+  for (const f of list) {
+    const ext = f.name.toLowerCase().split(".").pop();
+    if (!["pdf", "mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "opus"].includes(ext)) {
+      UP.files.push({ name: f.name, state: "err", msg: "不是音频文件或 PDF", frac: 0 });
+      continue;
+    }
+    UP.files.push({ name: f.name, file: f, state: "queued", frac: 0 });
+  }
+  renderStartUploads();
+  if (UP.busy) return;
+  UP.busy = true;
+  for (const u of UP.files) {
+    if (u.state !== "queued") continue;
+    u.state = "sending";
+    renderStartUploads();
+    try {
+      const r = await putFile(u.file, (fr) => { u.frac = fr; renderStartUploads(); });
+      u.state = "ok";
+      u.msg = r.kind === "plan" ? "打碟谱" : r.existing ? "曲库里已有" : "已放进曲库，分析中";
+      if (r.kind === "plan") { S.plan = r.plan; renderStartPlan(); }
+    } catch (e) {
+      u.state = "err";
+      u.msg = e.message;
+    }
+    u.file = null;
+    renderStartUploads();
+    schedulePlanReload();
+  }
+  UP.busy = false;
+}
+
+let planReloadTimer = 0;
+function schedulePlanReload() {
+  clearTimeout(planReloadTimer);
+  planReloadTimer = setTimeout(async () => {
+    S.plan = await api("GET", "/api/plan").catch(() => S.plan);
+    renderStartPlan();
+    renderStartJob();
+  }, 500);
+}
+
+async function renderStart() {
+  const root = $("#tab-start");
+  if (!root) return;
+  S.plan = await api("GET", "/api/plan").catch(() => null);
+  const input = h("input", { type: "file", multiple: true, accept: "audio/*,.pdf,application/pdf", class: "hidden",
+    onchange: (e) => { addFiles([...e.target.files]); e.target.value = ""; } });
+  const drop = h("div", { class: "drop", onclick: () => input.click() },
+    h("div", { class: "drop-big" }, "把曲子和打碟谱 PDF 拖到这里"),
+    h("div", { class: "dim" }, "也可以点这里选文件。曲子会复制进托管曲库并开始分析；同一首放两次不会重复。"));
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files]); });
+  root.innerHTML = "";
+  root.append(
+    h("div", { class: "step" }, h("div", { class: "step-no" }, "1"), h("div", { class: "grow" },
+      h("h2", {}, "放进来"), drop, input, h("div", { id: "start-uploads" }))),
+    h("div", { class: "step" }, h("div", { class: "step-no" }, "2"), h("div", { class: "grow", id: "start-plan" })),
+    h("div", { class: "step" }, h("div", { class: "step-no" }, "3"), h("div", { class: "grow", id: "start-job" })),
+  );
+  renderStartUploads();
+  renderStartPlan();
+  renderStartJob();
+}
+
+function renderStartUploads() {
+  const el = $("#start-uploads");
+  if (!el) return;
+  el.innerHTML = "";
+  const shown = UP.files.slice(-40);
+  if (!shown.length) return;
+  const n = UP.files.length, done = UP.files.filter((u) => u.state === "ok").length;
+  el.append(h("div", { class: "dim", style: "margin:8px 0 4px" }, `已放进 ${done} / ${n} 个文件`));
+  for (const u of shown) {
+    el.append(h("div", { class: "up-row " + u.state },
+      h("span", { class: "up-name" }, u.name),
+      u.state === "sending" ? h("span", { class: "up-bar" }, h("span", { style: `width:${Math.round(u.frac * 100)}%` })) : null,
+      h("span", { class: "up-msg" }, u.state === "queued" ? "等待" : u.state === "sending" ? `${Math.round(u.frac * 100)}%` : u.msg || "")));
+  }
+}
+
+function renderStartPlan() {
+  const el = $("#start-plan");
+  if (!el) return;
+  const p = S.plan;
+  el.innerHTML = "";
+  el.append(h("h2", {}, "打碟谱"));
+  if (!p) { el.append(h("div", { class: "dim" }, "还没有打碟谱：把 PDF 拖到上面。")); return; }
+  if (p.error) { el.append(h("div", { class: "err-box" }, `「${p.file}」读不了：${p.error}`)); return; }
+  const nl = p.techniques.filter((t) => t === "longhand").length;
+  const missing = p.tracks.filter((t) => !t.track).length;
+  el.append(
+    h("div", { class: "row" }, h("b", {}, p.title), h("span", { class: "dim" }, p.file),
+      h("span", { class: "grow" }),
+      h("span", { class: missing ? "badge err" : "badge ok" }, missing ? `还缺 ${missing} 首` : `${p.n_tracks} 首都在`),
+      h("span", { class: "dim" }, `${p.n_transitions} 段过渡：${nl} 长交接 · ${p.n_transitions - nl} 瞬时切换`)),
+    h("div", { class: "plan-list" }, p.tracks.map((t) => h("div", { class: "plan-row" + (t.track ? "" : " missing") },
+      h("span", { class: "mono dim" }, String(t.no).padStart(2, "0")),
+      h("span", { class: "grow" }, t.title, t.track ? h("span", { class: "dim" }, `  ← ${t.display}`) : h("span", { class: "dim" }, `  （${t.file || "没有文件名"}）`)),
+      h("span", { class: "mono dim" }, `${t.bpm} BPM`),
+      !t.track ? h("span", { class: "badge err" }, "还没放进来")
+        : !t.analyzed ? h("span", { class: "badge warn" }, "分析中")
+          : t.mixxx ? h("span", { class: "badge ok" }, "就绪") : h("span", { class: "badge" }, "已分析")))),
+  );
+}
+
+function renderStartJob() {
+  const el = $("#start-job");
+  if (!el) return;
+  const p = S.plan;
+  const job = S.job && S.job.name === "分析" ? S.job : null;
+  const running = job && job.state === "running";
+  const otherJob = S.job && S.job.state === "running" && !job;
+  const playing = S.state && S.state.playing;
+  const canStart = p && !p.error && p.tracks.every((t) => t.track) && !running && !otherJob && !playing;
+  el.innerHTML = "";
+  el.append(h("div", { class: "row" }, h("h2", { class: "grow" }, "分析"),
+    h("button", { class: running ? "" : "primary", disabled: !canStart, onclick: () => guard(async () => {
+      S.job = await api("POST", "/api/auto"); renderStartJob();
+    }) }, job && job.state !== "running" ? "重新分析" : "开始分析")));
+  if (!job) {
+    el.append(h("div", { class: "dim" }, !p ? "放进打碟谱和曲子之后就可以开始。"
+      : p.tracks.every((t) => t.track) ? "会做：分析音频 → 读打碟谱 → 让 Mixxx 分析（会重启 Mixxx）→ 核对 / 校正网格 → 生成 set → 准备 Mixxx。不用你管，大概几分钟。"
+        : "曲子还没放齐。"));
+    return;
+  }
+  const pct = Math.round((job.progress || 0) * 100);
+  el.append(
+    h("div", { class: "big-bar" + (job.state === "error" ? " err" : job.state === "ok" ? " ok" : "") },
+      h("div", { style: `width:${job.state === "error" ? 100 : pct}%` })),
+    h("div", { class: "row", style: "margin-top:6px" },
+      h("span", { class: "big-pct" }, job.state === "error" ? "没完成" : `${pct}%`),
+      h("span", { class: "grow dim" }, job.state === "error" ? "" : job.detail || "")),
+    h("div", { class: "stages" }, (job.stages || []).map((name, i) => h("span", {
+      class: "stage-chip " + (job.state === "error" && i === job.stage ? "err" : i < job.stage || job.state === "ok" ? "done" : i === job.stage ? "now" : ""),
+    }, (i < job.stage || job.state === "ok" ? "✓ " : i === job.stage && job.state === "running" ? "● " : "") + name))),
+  );
+  if (job.state === "error") {
+    const errs = job.log.filter((l) => l.includes("!!")).slice(-3).map((l) => l.replace(/^\S+ !! /, ""));
+    el.append(h("div", { class: "err-box" }, errs.join("\n") || "出错了，看下面的日志"));
+  }
+  const r = job.state === "ok" ? job.result : null;
+  if (r) {
+    const warns = (r.notes || []).filter((n) => n.level === "warn");
+    if (warns.length) el.append(h("div", { class: "warn-box" }, h("b", {}, "需要注意"), warns.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
+    el.append(h("div", { class: "ready" },
+      h("div", {}, h("div", { class: "ready-big" }, "可以演出了"),
+        h("div", { class: "dim" }, `set「${r.set}」，约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好（队列、引擎都就位）。`)),
+      h("span", { class: "grow" }),
+      h("button", { class: "primary huge", disabled: playing, onclick: () => guard(async () => {
+        await api("POST", `/api/sets/${r.set}/play`);
+        S.showSetId = r.set; S.showCompiled = null;
+        await loadState();
+        location.hash = "#show";
+      }) }, "▶ 开始演出"),
+      h("a", { href: "#show", onclick: () => { S.showSetId = r.set; S.showCompiled = null; } }, "先预演看看")));
+  }
+  el.append(h("details", { class: "job-log" }, h("summary", {}, "详细日志"), h("div", { class: "log" }, job.log.join("\n"))));
 }
 
 // ------------------------------------------------------------------ 曲库

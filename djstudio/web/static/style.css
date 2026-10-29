@@ -155,6 +155,7 @@ canvas.live-wave { width: 100%; height: 84px; display: block; background: #0a0c1
 .kl { font-size: 10px; color: var(--dim); letter-spacing: .5px; margin-top: 1px; }
 .kv { font-size: 11px; font-family: var(--mono); color: #c8cdd8; min-height: 14px; }
 .knob.moved .kv { color: #fff; }
+.ks { font-size: 9px; font-family: var(--mono); color: var(--dim); min-height: 11px; }
 .knob.kill .kv { color: var(--err); font-weight: 700; }
 .knob.kill .knob-cap { fill: #3a1d1d; stroke: var(--err); }
 .knob.turning .knob-cap { stroke: #fff; stroke-width: 1.6; }
@@ -198,3 +199,42 @@ svg.tl-svg { width: 100%; height: 26px; display: block; background: #0b0d11; bor
 @media (max-width: 1100px) { .live-bottom { grid-template-columns: 1fr; } }
 
 .panel.row .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+
+/* ------------------------------------------------------------ 开始页：放进来 → 分析 → 演出 */
+.nav-adv { margin-left: 18px; color: var(--dim); font-size: 12px; }
+.nav-adv a { font-size: 12px; padding: 13px 5px; }
+#tab-start { max-width: 1000px; margin: 0 auto; }
+.step { display: flex; gap: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+.step h2 { margin: 2px 0 10px; }
+.step-no { width: 30px; height: 30px; border-radius: 50%; background: var(--panel2); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--dim); flex: none; }
+.drop { border: 2px dashed #3a4252; border-radius: 10px; padding: 26px; text-align: center; cursor: pointer; background: #12151b; transition: border-color .15s, background .15s; }
+.drop:hover, .drop.over { border-color: var(--accent); background: #142033; }
+.drop-big { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+.up-row { display: flex; gap: 10px; align-items: center; font-size: 13px; padding: 2px 0; }
+.up-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up-bar { width: 140px; height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
+.up-bar span { display: block; height: 100%; background: var(--accent); }
+.up-msg { color: var(--dim); min-width: 110px; text-align: right; }
+.up-row.ok .up-msg { color: var(--ok); }
+.up-row.err .up-msg { color: var(--err); }
+.plan-list { margin-top: 10px; display: grid; grid-template-columns: 1fr; gap: 2px; max-height: 420px; overflow: auto; }
+.plan-row { display: flex; gap: 10px; align-items: center; padding: 3px 6px; border-radius: 4px; font-size: 13px; }
+.plan-row:nth-child(odd) { background: #14171e; }
+.plan-row.missing { background: #2a1616; }
+.err-box { background: #2a1414; border: 1px solid #6b2626; color: #ffd6d6; padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; margin-top: 8px; }
+.warn-box { background: #2a2414; border: 1px solid #6b5426; color: #f3e2bb; padding: 8px 10px; border-radius: 6px; margin-top: 8px; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.big-bar { height: 14px; background: var(--panel2); border-radius: 7px; overflow: hidden; margin-top: 4px; }
+.big-bar > div { height: 100%; background: linear-gradient(90deg, #3d7dd8, #4fa3ff); transition: width .4s; }
+.big-bar.ok > div { background: var(--ok); }
+.big-bar.err > div { background: #7a2d2d; }
+.big-pct { font-size: 20px; font-weight: 700; font-family: var(--mono); min-width: 3.5em; }
+.stages { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.stage-chip { font-size: 12px; padding: 2px 9px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); }
+.stage-chip.done { color: var(--ok); border-color: #255c3c; }
+.stage-chip.now { color: #fff; border-color: var(--accent); background: #16263d; }
+.stage-chip.err { color: var(--err); border-color: #6b2626; }
+.ready { display: flex; gap: 16px; align-items: center; margin-top: 14px; padding: 14px; background: #13261b; border: 1px solid #2f5a3a; border-radius: 10px; }
+.ready-big { font-size: 18px; font-weight: 700; color: #bfe8cb; }
+button.huge { font-size: 17px; padding: 10px 22px; border-radius: 8px; }
+.job-log { margin-top: 10px; }
+.job-log summary { cursor: pointer; color: var(--dim); font-size: 12px; }

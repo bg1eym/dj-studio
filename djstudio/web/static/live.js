@@ -39,37 +39,71 @@ function svg(tag, attrs = {}, parent = null) {
 
 export const dB = (g) => (g <= 0.0005 ? -Infinity : 20 * Math.log10(g));
 const isEq = (p) => p === "hi" || p === "mid" || p === "lo";
+const isFx = (p) => p === "echo" || p === "reverb";
+
+// 钟点位（Prime 4+ 的读法，和打碟谱一样）：离 12 点的钟头数，左负右正，-5 = 7 点，+5 = 5 点。
+// EQ：12 点 0 dB，7 点 -25 dB（谱：全切），5 点 +6 dB；左半边 dB = -25·(钟头/5)^1.56（10 点 ≈ -6 dB）。
+// 与 djstudio/plan/convert.py 的 eq_db 是同一条曲线。
+const EQ_CUT_DB = -25, EQ_MAX_DB = 6, EQ_TAPER = 1.56;
+export function eqHours(gain) {
+  if (gain <= 0.0005) return -5;
+  const d = dB(gain);
+  if (d >= 0) return Math.min(5, (d / EQ_MAX_DB) * 5);
+  return -5 * Math.min(1, Math.pow(d / EQ_CUT_DB, 1 / EQ_TAPER));
+}
+const filterHours = (v) => Math.max(-5, Math.min(5, (v - 0.5) * 10));
+// 推子：Mixxx 的 volume 值是增益，换回推子位置（ControlAudioTaperPot(-20, 0, 1) 的 valueToParameter）
+export function faderPos(gain) {
+  if (gain <= 0) return 0;
+  if (gain >= 1) return 1;
+  return Math.max(0, (20 * Math.log10(gain + 0.1 * (1 - gain)) + 20) / 20);
+}
+function hours(param, v) {
+  if (isEq(param)) return eqHours(v);
+  if (param === "filter") return filterHours(v);
+  return null;
+}
+export function clockText(h, filt = false) {
+  if (Math.abs(h) < 0.15) return filt ? "关" : "12点";
+  const pos = h < 0 ? 12 + h : h; // 7..12 或 0..5
+  const r = Math.round(pos * 2) / 2;
+  const whole = Math.floor(r) === 0 ? 12 : Math.floor(r);
+  let t = `${whole}点${r % 1 ? "半" : ""}`;
+  if (filt) t = (h < 0 ? "左" : "右") + t;
+  else if (h <= -4.9) t += "(切)";
+  return t;
+}
 
 export function fmtParam(param, v) {
-  if (isEq(param)) {
-    const d = dB(v);
-    if (d === -Infinity || d < -40) return "KILL";
-    return Math.abs(d) < 0.05 ? "0 dB" : `${d > 0 ? "+" : ""}${d.toFixed(1)} dB`;
-  }
-  if (param === "filter") {
-    const k = (v - 0.5) * 2;
-    return Math.abs(k) < 0.01 ? "关" : `${k < 0 ? "LPF" : "HPF"} ${Math.round(Math.abs(k) * 100)}%`;
-  }
+  if (isEq(param)) return clockText(eqHours(v));
+  if (param === "filter") return clockText(filterHours(v), true);
+  if (param === "vol") return `推子 ${(faderPos(v) * 10).toFixed(1).replace(/\.0$/, "")}`;
   return `${Math.round(v * 100)}%`;
 }
 
-// 旋钮角度：-135°（最左）…0°（12 点）…+135°（最右）。EQ：中间 = 0 dB，右满 = +12 dB，左满 = kill（-30 dB 起按对数压缩）
-function knobAngle(param, v) {
+function fmtSub(param, v) {
   if (isEq(param)) {
-    if (v <= 0.0005) return -135;
     const d = dB(v);
-    if (d >= 0) return Math.min(1, d / 12) * 135;
-    return -135 * Math.min(1, Math.pow(-d / 30, 0.75));
+    return d === -Infinity || d < -40 ? "kill" : Math.abs(d) < 0.05 ? "0 dB" : `${d > 0 ? "+" : ""}${d.toFixed(1)} dB`;
   }
-  if (param === "filter") return Math.max(-1, Math.min(1, (v - 0.5) * 2)) * 135;
-  return -135 + Math.max(0, Math.min(1, v)) * 270;
+  if (param === "filter") {
+    const k = (v - 0.5) * 2;
+    return Math.abs(k) < 0.01 ? "" : `${k < 0 ? "LPF" : "HPF"} ${Math.round(Math.abs(k) * 100)}%`;
+  }
+  return "";
+}
+
+// 旋钮角度 = 钟点位：7 点 -150°，12 点 0°，5 点 +150°（Prime 4+ 的 300° 行程）
+function knobAngle(param, v) {
+  const h = hours(param, v);
+  if (h !== null) return h * 30;
+  return -150 + Math.max(0, Math.min(1, v)) * 300;
 }
 
 // 时间线行里的纵坐标 0..1（与旋钮位置一致；filter 中线 = 关，上 = HPF，下 = LPF）
 function laneY(param, v) {
-  if (param === "vol") return v;
-  if (param === "filter") return Math.max(0, Math.min(1, v));
-  return (knobAngle(param, v) + 135) / 270;
+  if (param === "vol") return faderPos(v);
+  return (knobAngle(param, v) + 150) / 300;
 }
 
 function arcPath(cx, cy, r, a0, a1) {
@@ -88,7 +122,7 @@ class Knob {
     this.v = null;
     const S = small ? 32 : 42, c = S / 2, r = c - 4;
     this.svg = svg("svg", { viewBox: `0 0 ${S} ${S}`, width: S, height: S, class: "knob-svg" });
-    svg("path", { d: arcPath(c, c, r, -135, 135), class: "knob-track" }, this.svg);
+    svg("path", { d: arcPath(c, c, r, -150, 150), class: "knob-track" }, this.svg);
     if (param !== "echo" && param !== "reverb") svg("line", { x1: c, y1: 1, x2: c, y2: 4, class: "knob-tick" }, this.svg);
     this.arc = svg("path", { d: "", class: "knob-arc", stroke: color }, this.svg);
     svg("circle", { cx: c, cy: c, r: r - 5, class: "knob-cap" }, this.svg);
@@ -96,21 +130,23 @@ class Knob {
     svg("line", { x1: c, y1: c - r + 6, x2: c, y2: c - 3, stroke: "#fff", "stroke-width": 2.2, "stroke-linecap": "round" }, this.ptr);
     this.c = c; this.r = r;
     this.val = el("div", { class: "kv" }, "–");
-    this.root = el("div", { class: "knob" + (small ? " small" : "") }, this.svg, el("div", { class: "kl" }, label), this.val);
+    this.sub = el("div", { class: "ks" });
+    this.root = el("div", { class: "knob" + (small ? " small" : "") }, this.svg, el("div", { class: "kl" }, label), this.val, this.sub);
   }
 
   set(v) {
     if (v === null || v === undefined || v === this.v) return;
     this.v = v;
     const a = knobAngle(this.param, v);
-    const zero = this.param === "echo" || this.param === "reverb" ? -135 : 0;
+    const zero = isFx(this.param) ? -150 : 0;
     this.arc.setAttribute("d", arcPath(this.c, this.c, this.r, zero, a));
     if (this.a !== undefined && Math.abs(a - this.a) > 0.25) this._flash();
     this.a = a;
     this.ptr.style.transform = `rotate(${a}deg)`;
     this.val.textContent = fmtParam(this.param, v);
-    const kill = isEq(this.param) && dB(v) < -40;
-    const off = (this.param === "echo" || this.param === "reverb") ? v < 0.005 : this.param === "filter" ? Math.abs(v - 0.5) < 0.005 : Math.abs(dB(v)) < 0.05;
+    this.sub.textContent = fmtSub(this.param, v);
+    const kill = isEq(this.param) && eqHours(v) <= -4.9;
+    const off = isFx(this.param) ? v < 0.005 : this.param === "filter" ? Math.abs(v - 0.5) < 0.005 : Math.abs(dB(v)) < 0.05;
     this.root.classList.toggle("kill", kill);
     this.root.classList.toggle("moved", !off);
   }
@@ -136,9 +172,10 @@ class Fader {
     if (v === this.v) return;
     if (this.v !== undefined && Math.abs(v - this.v) > 0.002) flash(this);
     this.v = v;
-    this.cap.style.bottom = `calc(${v * 100}% - 7px)`;
-    this.fill.style.height = `${v * 100}%`;
-    this.val.textContent = `${Math.round(v * 100)}%`;
+    const pos = faderPos(v);
+    this.cap.style.bottom = `calc(${pos * 100}% - 7px)`;
+    this.fill.style.height = `${pos * 100}%`;
+    this.val.textContent = (pos * 10).toFixed(1).replace(/\.0$/, "");
   }
 }
 
@@ -295,7 +332,7 @@ class DeckView {
         const k = Math.min(1, Math.abs(mx[MIX.filter] - 0.5) * 2);
         if (mx[MIX.filter] < 0.5) { gh *= 1 - k; gm *= 1 - 0.7 * k; } else { gl *= 1 - k; gm *= 1 - 0.7 * k; }
       }
-      const vol = ds[6];
+      const vol = faderPos(ds[6]);
       g.globalAlpha = ds[1] ? 0.35 + 0.65 * vol : 0.3;
       const pps = wf.rate;
       for (let x = 0; x < w; x++) {
@@ -653,7 +690,7 @@ export class LiveView {
     if (prog && comp && progress && !["done", "stopped", "error", "idle"].includes(progress.stage)) {
       const tr = prog.id === "end" ? null : comp.set.transitions[prog.idx];
       const ta = comp.set.tracks[prog.idx], tb = comp.set.tracks[prog.idx + 1];
-      const title = prog.id === "end" ? "终曲淡出" : `过渡 ${prog.idx + 1} / ${comp.programs.length} · ${TECH_LABEL[tr.technique] || tr.technique}`;
+      const title = prog.id === "end" ? "终曲淡出" : `过渡 ${prog.idx + 1} / ${comp.programs.length} · ${tr.label || TECH_LABEL[tr.technique] || tr.technique}`;
       const sub = prog.id === "end" ? ` #${prog.idx + 1} ${ta.title || ta.id}`
         : ` A = Deck ${prog.a.deck} #${prog.idx + 1} ${ta.title || ta.id}（第 ${tr.start} 小节起）→ B = Deck ${prog.b.deck} #${prog.idx + 2} ${tb.title || tb.id}（从第 ${tr.b_in} 小节进）`;
       this.timeline.setProgram(prog, { key: prog.id + ":" + (comp._id || ""), title, sub });

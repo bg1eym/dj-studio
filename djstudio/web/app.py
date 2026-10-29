@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from ..compiler import Compiled
 from ..grid import Grid
 from ..library.analysis import downbeat_from_bar1
+from ..library.audio import AUDIO_EXTS
 from ..library.importer import browse
 from ..library.store import Track
 from ..mixxx.db import MixxxTrack
@@ -142,6 +143,48 @@ def create_app(studio: Studio) -> FastAPI:
             return browse(path, studio.cfg.browse_roots)
         except (FileNotFoundError, NotADirectoryError) as e:
             raise HTTPException(404, str(e)) from e
+
+    @app.put("/api/upload")
+    async def api_upload(request: Request, name: str) -> dict[str, Any]:
+        """网页拖进来的文件（请求体就是文件内容）。音频进托管曲库并开始分析；PDF 当作打碟谱。"""
+        fname = Path(name).name.strip()
+        ext = Path(fname).suffix.lower()
+        if not fname or fname.startswith(".") or (ext != ".pdf" and ext not in AUDIO_EXTS):
+            raise HTTPException(400, f"不认识的文件：{name}（要音频文件或打碟谱 PDF）")
+        dest_dir = studio.plans_dir if ext == ".pdf" else studio.inbox_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        tmp = dest_dir / f".{fname}.part"
+        size = 0
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                size += len(chunk)
+        if not size:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(400, f"{fname} 是空文件")
+        dest = dest_dir / fname
+        tmp.replace(dest)
+        if ext == ".pdf":
+            dest.touch()  # 最近放进来的打碟谱 = 当前打碟谱
+            st = studio.plan_status()
+            if st and st.get("error"):
+                dest.rename(dest.with_suffix(".pdf.bad"))
+                raise HTTPException(422, f"读不了这份打碟谱：{st['error']}")
+            return {"kind": "plan", "plan": st}
+        res = studio.library.import_paths([str(dest)], trusted=True)
+        dest.unlink(missing_ok=True)  # 已复制进托管曲库
+        if res.failed:
+            raise HTTPException(422, f"{fname}：{res.failed[0][1]}")
+        tid = (res.added or res.existing or [None])[0]
+        return {"kind": "audio", "track": tid, "existing": bool(res.existing)}
+
+    @app.get("/api/plan")
+    def api_plan() -> dict[str, Any] | None:
+        return studio.plan_status()
+
+    @app.post("/api/auto")
+    def api_auto() -> dict[str, Any]:
+        return studio.auto_prepare().to_dict()
 
     @app.post("/api/import")
     def api_import(body: dict[str, Any] = Body(...)) -> dict[str, Any]:

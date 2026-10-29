@@ -9,6 +9,7 @@ dependencies = [
   "uvicorn>=0.29",
   "pydantic>=2.6",
   "numpy>=1.26",
+  "pypdf>=4.0",
   "python-rtmidi>=1.5; sys_platform == 'darwin'",
 ]
 

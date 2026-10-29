@@ -26,6 +26,13 @@ Mixxx + DJStudio.js（控制器映射）
 
 过渡程序在 B 装载完成后就下发（通常提前几分钟），**即使 Python 卡住，这一段也会按谱面执行完**。
 
+### 一键：打碟谱 → 可以演出
+
+`Studio.auto_prepare()` 是一个分 6 步的后台任务（`Job.stages` / `progress`，网页一个进度条）：音频分析 → 读打碟谱
+（`plan/cdw.py`：pypdf 取带坐标的文字，按表头的 x 分列）→ Mixxx 扫描 + 分析（`_sync`）→ 网格核对与自动校正（`_fix_grids`）
+→ 打碟谱转 set（`plan/convert.py`：曲目匹配、小节对齐、钟点位换算；小节相位按谱写回曲库后再转一次）→ 准备（`_prepare`）。
+网页上传走 `PUT /api/upload?name=…`（请求体就是文件），音频复制进托管曲库，PDF 存到 `~/DJStudio/plans/`（最新的就是当前打碟谱）。
+
 ### 网页怎么「看见」旋钮
 
 引擎每 100ms 的状态帧里带 `m`（每个通道从 Mixxx **读回**的 hi / mid / lo / filter / echo / reverb / vu_meter）、`x`（crossfader）、

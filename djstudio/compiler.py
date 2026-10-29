@@ -80,6 +80,22 @@ def deck_for(index: int) -> int:
 
 # ---------------------------------------------------------------- 单位换算
 
+VOL_MIN_DB = -20.0  # [ChannelN],volume = ControlAudioTaperPot(-20, 0, 1)（enginemixer.cpp:894）
+
+
+def fader_gain(pos: float) -> float:
+    """推子位置 0..1 → Mixxx 的 volume 值（增益）。与 Mixxx 自己的推子同一条曲线：
+    ControlAudioTaperPotBehavior::parameterToValue（control/controlbehavior.cpp:206），minDB -20、maxDB 0、neutral 1。
+    位置 0.5 = -10 dB，0.7 = -6 dB，1 = 0 dB。"""
+    if pos <= 0:
+        return 0.0
+    if pos >= 1:
+        return 1.0
+    db = pos * VOL_MIN_DB / -1.0 + VOL_MIN_DB
+    off = 10 ** (VOL_MIN_DB / 20.0)
+    return (10 ** (db / 20.0) - off) / (1 - off)
+
+
 def to_native(param: str, v: float) -> float:
     if param in ("lo", "mid", "hi"):
         if v <= KILL_DB:
@@ -87,6 +103,8 @@ def to_native(param: str, v: float) -> float:
         return round(min(EQ_MAX_GAIN, 10 ** (v / 20.0)), 5)
     if param == "filter":
         return round(0.5 + 0.5 * max(-1.0, min(1.0, v)), 5)
+    if param == "vol":
+        return round(fader_gain(v), 5)
     return round(max(0.0, min(1.0, v)), 5)
 
 
@@ -97,7 +115,7 @@ def _lane_native(name: str, pts: list[list[Any]], play_at: float) -> list[list[f
     out: list[list[float]] = []
     prev_bar: float | None = None
     prev_val = before
-    is_db = param in ("lo", "mid", "hi")
+    is_db = param in ("lo", "mid", "hi", "vol")  # 按人读单位（dB / 推子位置）线性，逐拍重采样成原生值
     for p in pts:
         bar, val = float(p[0]), float(p[1])
         step = len(p) == 3 and p[2] == "step"
@@ -105,7 +123,7 @@ def _lane_native(name: str, pts: list[list[Any]], play_at: float) -> list[list[f
         if step:
             out.append([x, to_native(param, prev_val)])
         elif prev_bar is not None and is_db and val != prev_val:
-            # dB 线性插值 → 逐拍重采样
+            # dB / 推子位置线性插值 → 逐拍重采样
             x0 = prev_bar * BEATS_PER_BAR
             n = int((x - x0) / DB_RESAMPLE_BEATS)
             for k in range(1, n):
@@ -247,7 +265,7 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None]) -> 
         c.schedule.append(Segment("solo", i, t_now, t_now + t_solo, a_t.title or a_t.id))
         t_now += t_solo
         t_tr = ex.bars * BEATS_PER_BAR * 60.0 / ((a_bpm + b_bpm) / 2)
-        c.schedule.append(Segment("transition", i, t_now, t_now + t_tr, tr.technique))
+        c.schedule.append(Segment("transition", i, t_now, t_now + t_tr, tr.label or tr.technique))
         t_now += t_tr
         established = b_est
 
