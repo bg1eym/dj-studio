@@ -1,0 +1,144 @@
+# 在 GitHub 的 macOS 构建机上做出独立的 DJ Studio.app（Apple 芯片 / Intel 各一个）：
+#   1. 用 Mixxx 2.5.6 源码编声音引擎 djstudio-engine（只编这一个程序，见 tools/mixxx-engine）
+#   2. 用 PyInstaller 把网页服务（Python）和引擎打成一个 .app，在构建机上自检
+#   3. 放到 GitHub Release（main → mac-app-latest；mac-app 分支 → mac-app-test）
+# 失败时把日志传到 Release「ci-logs」。
+name: mac-app
+on:
+  push:
+    branches: [main, mac-app]
+    paths:
+      - "tools/mixxx-engine/**"
+      - "packaging/**"
+      - "djstudio/**"
+      - "pyproject.toml"
+      - ".github/workflows/mac-app.yml"
+permissions:
+  contents: write
+concurrency:
+  group: mac-app-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  MIXXX_TAG: "2.5.6"
+  RELEASE_TAG: ${{ github.ref == 'refs/heads/main' && 'mac-app-latest' || 'mac-app-test' }}
+
+jobs:
+  engine:
+    name: engine-${{ matrix.arch }}
+    # Mixxx 的 macOS 构建环境只支持 Intel 构建机；Apple 芯片版是交叉编译（和 Mixxx 官方 CI 一样）
+    runs-on: macos-15-intel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            buildenv: tools/macos_arm64-cross-release_buildenv.sh
+            triplet: arm64-osx-min1100-release
+          - arch: x64
+            buildenv: tools/macos_release_buildenv.sh
+            triplet: x64-osx-min1100-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mixxx 源码
+        run: git clone --depth 1 --branch "$MIXXX_TAG" https://github.com/mixxxdj/mixxx "$RUNNER_TEMP/mixxx"
+      - uses: jwlawson/actions-setup-cmake@v2.2
+        with:
+          cmake-version: "3.21.x"
+      - name: 工具
+        run: brew install ccache ninja || true
+      - name: Mixxx 的构建环境（预编译的依赖）
+        working-directory: ${{ runner.temp }}/mixxx
+        run: ${{ matrix.buildenv }} setup
+        env:
+          BUILDENV_BASEPATH: /Users/runner/buildenv
+      - uses: actions/cache@v4
+        with:
+          path: /Users/runner/Library/Caches/ccache
+          key: engine-${{ matrix.arch }}-${{ github.run_number }}
+          restore-keys: engine-${{ matrix.arch }}-
+      - name: 编引擎
+        run: |
+          set -o pipefail
+          ccache --max-size=2G
+          tools/mixxx-engine/build.sh "$RUNNER_TEMP/mixxx" 2>&1 | tee engine-build.log
+          ccache --show-stats
+        env:
+          CMAKE_ARGS_EXTRA: >-
+            -DCOREAUDIO=ON -DQT6=ON -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: 看引擎依赖哪些库（只应有系统自带的）
+        run: |
+          set -o pipefail
+          F=tools/mixxx-engine/dist/djstudio-engine
+          { lipo -info "$F"; ls -la "$F"; otool -L "$F"; } | tee engine-deps.txt
+          if otool -L "$F" | tail -n +2 | grep -vE '^\s*(/usr/lib/|/System/)'; then echo "有非系统库"; exit 1; fi
+      - name: 冒烟测试（x64 版能在这台机器上直接跑）
+        if: matrix.arch == 'x64'
+        run: python3 packaging/macos/smoke_engine.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee engine-smoke.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.arch }}
+          path: tools/mixxx-engine/dist
+      - name: 失败时上传日志
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ci-logs >/dev/null 2>&1 || gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）"
+          { echo "== $GITHUB_SHA engine-${{ matrix.arch }}"; cat engine-deps.txt engine-smoke.log 2>/dev/null; tail -n 800 engine-build.log 2>/dev/null; } > engine-${{ matrix.arch }}.log
+          gh release upload ci-logs engine-${{ matrix.arch }}.log --clobber
+
+  app:
+    name: app-${{ matrix.arch }}
+    needs: engine
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: macos-14
+          - arch: x64
+            os: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-${{ matrix.arch }}
+          path: tools/mixxx-engine/dist
+      - run: chmod +x tools/mixxx-engine/dist/djstudio-engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 打包 DJ Studio.app
+        run: |
+          set -o pipefail
+          echo "COMMIT = \"${GITHUB_SHA}\"" > djstudio/_build.py
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller
+          export DJSTUDIO_APP_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          pyinstaller --noconfirm packaging/macos/djstudio.spec 2>&1 | tee app-build.log
+      - name: 自检（在 .app 里：引擎、解码、声音输出）
+        run: |
+          set -o pipefail
+          "dist/DJ Studio.app/Contents/MacOS/DJ Studio" selftest 2>&1 | tee selftest-${{ matrix.arch }}.txt
+      - name: 签名（ad-hoc）并压缩
+        run: |
+          codesign --force --deep --sign - "dist/DJ Studio.app"
+          codesign --verify --deep --strict "dist/DJ Studio.app"
+          ditto -c -k --sequesterRsrc --keepParent "dist/DJ Studio.app" DJ-Studio-mac-${{ matrix.arch }}.zip
+          ls -la DJ-Studio-mac-${{ matrix.arch }}.zip
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --prerelease --title "DJ Studio（Mac）" --notes "独立的 DJ Studio.app。Apple 芯片下载 arm64，Intel 下载 x64。"
+          gh release upload "$RELEASE_TAG" DJ-Studio-mac-${{ matrix.arch }}.zip selftest-${{ matrix.arch }}.txt --clobber
+      - name: 失败时上传日志
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ci-logs >/dev/null 2>&1 || gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）"
+          { echo "== $GITHUB_SHA app-${{ matrix.arch }}"; cat selftest-${{ matrix.arch }}.txt 2>/dev/null; tail -n 400 app-build.log 2>/dev/null; } > app-${{ matrix.arch }}.log
+          gh release upload ci-logs app-${{ matrix.arch }}.log --clobber

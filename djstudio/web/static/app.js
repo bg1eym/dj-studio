@@ -1164,6 +1164,15 @@ async function renderDoctor() {
 
 // ------------------------------------------------------------------ 启动
 
+// 退出 DJ Studio：应用没有窗口，从网页退出
+$("#quit-link").addEventListener("click", (e) => {
+  e.preventDefault();
+  if (!confirm("退出 DJ Studio？正在演出的会停下。")) return;
+  fetch("/api/quit", { method: "POST" }).catch(() => {}).finally(() => {
+    document.body.innerHTML = '<div class="home" style="margin-top:80px"><h1>DJ Studio 已退出</h1><div class="dim">可以关掉这个网页了。再打开 DJ Studio 就会回来。</div></div>';
+  });
+});
+
 (async function main() {
   await guard(loadState);
   await guard(loadTracks);

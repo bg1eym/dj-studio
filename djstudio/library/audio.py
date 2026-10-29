@@ -1,9 +1,11 @@
-"""用 ffmpeg / ffprobe 读音频（Mac 上 `brew install ffmpeg`）。"""
+"""读音频：有 DJ Studio 声音引擎（djstudio-engine）就用它解码——和播放用的是同一个 Mixxx 解码器
+（Mac 上是 CoreAudio），分析出的拍子位置和实际播放一致；没有引擎时（开发 / 测试）用 ffmpeg / ffprobe。"""
 from __future__ import annotations
 
 import json
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +23,27 @@ def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
+def have_decoder() -> bool:
+    from ..engine.bundled import engine_binary
+
+    return engine_binary() is not None or have_ffmpeg()
+
+
+def _engine() -> Path | None:
+    from ..engine.bundled import engine_binary
+
+    return engine_binary()
+
+
+def _run_engine(binary: Path, args: list[str], timeout: float) -> subprocess.CompletedProcess[bytes]:
+    from ..engine.bundled import engine_env
+
+    try:
+        return subprocess.run([str(binary), *args], capture_output=True, timeout=timeout, env=engine_env(binary))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise AudioError(f"声音引擎没能运行：{e}") from e
+
+
 @dataclass
 class Probe:
     duration: float
@@ -34,6 +57,16 @@ class Probe:
 
 
 def probe(path: Path) -> Probe:
+    eng = _engine()
+    if eng:
+        r = _run_engine(eng, ["--probe", str(path)], 60)
+        line = next((ln for ln in r.stdout.decode(errors="replace").splitlines() if ln.startswith("{")), "{}")
+        d = json.loads(line)
+        if r.returncode != 0 or "error" in d:
+            raise AudioError(f"读不了 {path.name}：{d.get('error') or r.stderr.decode(errors='replace').strip()[-200:]}")
+        return Probe(duration=float(d["duration"]), samplerate=int(d["samplerate"]), channels=int(d["channels"]),
+                     codec=d.get("codec", ""), bitrate=int(d.get("bitrate") or 0), title=d.get("title", ""),
+                     artist=d.get("artist", ""), album=d.get("album", ""))
     try:
         r = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -61,6 +94,14 @@ def probe(path: Path) -> Probe:
 
 
 def decode_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
+    eng = _engine()
+    if eng:
+        with tempfile.TemporaryDirectory(prefix="djstudio-decode-") as tmp:
+            out = Path(tmp) / "mono.f32"
+            r = _run_engine(eng, ["--decode", str(path), str(out), str(sr)], 300)
+            if r.returncode != 0 or not out.exists():
+                raise AudioError(f"解码失败 {path.name}：{r.stderr.decode(errors='replace').strip()[-200:]}")
+            return np.fromfile(out, dtype=np.float32)
     try:
         r = subprocess.run(
             ["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"],

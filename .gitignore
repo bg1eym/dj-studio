@@ -5,3 +5,7 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 /data/
+/tools/mixxx-engine/dist/
+/tools/mixxx-engine/mixxx-src/
+/build/
+/dist/

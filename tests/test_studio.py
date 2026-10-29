@@ -279,8 +279,9 @@ def test_offbeat_mixxx_grid_detected_and_fixed(env):
     assert not any("网格存疑" in i.msg for i in studio.compile(s).issues)
 
 
-def test_rehearsal_runs_set_in_simulator_without_mixxx(env):
+def test_rehearsal_runs_set_in_simulator_without_mixxx(env, monkeypatch):
     """预演：不准备、不碰 Mixxx（不启动、不写队列），模拟器里按 set 跑；可以从第 k 段过渡前开始。"""
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")  # 声音引擎那条路在 test_mixxx_engine.py
     studio, src, state = env
     studio.library.import_paths([str(src)])
     assert studio.library.wait_idle(60)
@@ -413,6 +414,7 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
 
     for name in ("mixxx_running", "launch_mixxx", "quit_mixxx"):
         monkeypatch.setattr(process, name, boom)
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")  # 没有声音引擎时退回 Node 模拟器；声音引擎那条路在 test_mixxx_engine.py
     src = tmp_path / "src"
     src.mkdir()
     for name in ("a.wav", "b.wav"):

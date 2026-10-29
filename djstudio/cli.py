@@ -1,4 +1,4 @@
-"""命令行入口：`djstudio serve`（默认）/ demo / doctor / validate / import / prepare / play / probe。"""
+"""命令行入口：`djstudio serve`（默认）/ app / selftest / demo / doctor / validate / import / prepare / play / probe。"""
 from __future__ import annotations
 
 import argparse
@@ -27,6 +27,83 @@ def _serve(studio, host: str, port: int, open_browser: bool) -> None:  # type: i
     uvicorn.run(app, host=host, port=port, log_level="warning", timeout_graceful_shutdown=2)
 
 
+def _running_version(host: str, port: int) -> str | None:
+    """端口上已经开着的 DJ Studio 是哪个版本（没开 / 不是 DJ Studio → None）。"""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/state", timeout=1.5) as r:
+            return json.loads(r.read()).get("version")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _app() -> int:
+    """DJ Studio.app（双击打开）：日志写到 ~/DJStudio/logs/app.log；同一版本已经开着就只打开网页。"""
+    from .config import get_config
+    from .selfupdate import version_text
+    from .studio import Studio
+
+    cfg = get_config()
+    cfg.ensure_dirs()
+    log = open(cfg.logs_dir / "app.log", "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+    sys.stdout = sys.stderr = log
+    print(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} DJ Studio {version_text()} 启动")
+    url = f"http://{cfg.host}:{cfg.port}/"
+    if _running_version(cfg.host, cfg.port) == version_text():
+        webbrowser.open(url)
+        return 0
+    _serve(Studio(cfg), cfg.host, cfg.port, True)
+    return 0
+
+
+def _selftest() -> int:
+    """自检（打包好的应用在构建机上跑；用户也可以跑）：找得到声音引擎、能读文件、能解码、引擎能起来、声音输出情况。"""
+    from .engine.bundled import engine_binary, system_mappings
+    from .engine.client import EngineClient
+    from .engine.link import EngineLink
+    from .library.audio import decode_mono, probe
+    from .selfupdate import version_text
+    from .synth import techno, write_wav
+    from .web.app import STATIC
+
+    res: dict = {"version": version_text(), "frozen": bool(getattr(sys, "frozen", False)),
+                 "web": (STATIC / "index.html").exists()}
+    binary = engine_binary()
+    res["engine"] = str(binary) if binary else None
+    res["system_mappings"] = str(system_mappings(binary)) if binary else None
+    ok = bool(binary and res["system_mappings"] and res["web"])
+    with tempfile.TemporaryDirectory() as d:
+        wav = Path(d) / "t.wav"
+        write_wav(wav, techno(128.0, 0.1, 0, (("groove", 8),), seed=1))
+        try:
+            p = probe(wav)
+            res["probe"] = {"duration": round(p.duration, 3), "samplerate": p.samplerate}
+            res["decode_samples"] = int(len(decode_mono(wav)))
+        except Exception as e:  # noqa: BLE001
+            res["decode_error"] = str(e)
+            ok = False
+        if binary:
+            link = EngineLink(binary, [{"id": "t", "path": str(wav), "bpm": 128.0, "first_beat": 0.1}], audio=True)
+            try:
+                client = EngineClient(link)
+                res["engine_online"] = client.wait_until(client.online, 20)
+                client.send({"t": "hello"})
+                client.wait_until(lambda: client.version is not None, 5)
+                res["engine_script"] = client.version
+                res["audio"] = link.audio()
+                ok = ok and res["engine_online"]
+            finally:
+                try:
+                    link.sim({"cmd": "quit"})
+                except Exception:  # noqa: BLE001
+                    pass
+                link.close()
+    res["ok"] = ok
+    print(json.dumps(res, ensure_ascii=False, indent=1))
+    return 0 if ok else 1
+
+
 def _wait_job(job) -> int:  # type: ignore[no-untyped-def]
     seen = 0
     while True:
@@ -49,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--speed", type=float, default=8.0, help="模拟器倍速")
     d.add_argument("--port", type=int, default=8431)
     d.add_argument("--no-browser", action="store_true")
+    sub.add_parser("app", help="DJ Studio.app 用：启动网页并打开浏览器（日志写文件，已经开着就只打开网页）")
+    sub.add_parser("selftest", help="自检：声音引擎、解码、声音输出")
     sub.add_parser("doctor", help="环境体检")
     v = sub.add_parser("validate", help="校验 set（id 或 json 文件路径）")
     v.add_argument("set")
@@ -71,6 +150,10 @@ def main(argv: list[str] | None = None) -> int:
         _serve(studio, "127.0.0.1", args.port, not args.no_browser)
         return 0
 
+    if cmd == "app":
+        return _app()
+    if cmd == "selftest":
+        return _selftest()
     if cmd == "serve":
         from .selfupdate import self_update
 

@@ -350,6 +350,16 @@ def create_app(studio: Studio) -> FastAPI:
         studio.stop()
         return {"ok": True}
 
+    @app.post("/api/quit")
+    def api_quit() -> dict[str, Any]:
+        """退出 DJ Studio（应用没有窗口，从网页退出）：停演出、关引擎，然后结束进程。"""
+        import os
+        import threading
+
+        studio.shutdown()
+        threading.Timer(0.5, lambda: os._exit(0)).start()
+        return {"ok": True}
+
     # ------------------------------------------------------------ 体检 / 探测
 
     @app.get("/api/doctor")

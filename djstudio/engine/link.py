@@ -177,22 +177,26 @@ class SimLink(Link):
         return "sim"
 
 
-class HarnessLink(SimLink):
-    """真 Mixxx 测试台（tools/mixxx-harness）：同一套行协议，背后是 Mixxx 2.5.6 的真 MidiController、
-    脚本引擎、deck 与效果。library 里每首歌给 path（音频文件）、bpm、first_beat。"""
+class EngineLink(SimLink):
+    """DJ Studio 声音引擎（tools/mixxx-engine：只编了 Mixxx 2.5.6 的引擎核心）：同一套行协议，背后是 Mixxx 真正的
+    MidiController、脚本引擎、deck、EQ / 效果与同步。library 里每首歌给 path（音频文件）、bpm、first_beat。
+    audio=True 且 speed == 1 时从系统默认输出设备出声，引擎按声卡时钟走。"""
 
-    def __init__(self, binary: Path, library: list[dict[str, Any]], speed: float = 1.0,
+    def __init__(self, binary: Path, library: list[dict[str, Any]], speed: float = 1.0, audio: bool = False,
                  mapping_xml: Path | None = None) -> None:
-        import os
+        from .bundled import engine_env
 
         mapping_xml = mapping_xml or Path(__file__).parent / "mapping" / "DJStudio.midi.xml"
-        # mixxx-src/build/mixxx-test → mixxx-src/res/controllers（common-controller-scripts.js 所在）
-        system = Path(binary).resolve().parents[1] / "res" / "controllers"
-        env = {**os.environ, "DJSTUDIO_MAPPING": str(mapping_xml), "DJSTUDIO_SPEED": str(speed),
-               "DJSTUDIO_SYSTEM_MAPPINGS": str(system),
-               "QT_QPA_PLATFORM": "offscreen", "QT_LOGGING_RULES": "*.debug=false"}
-        super().__init__(library, speed, cmd=[str(binary), "--gtest_filter=DJStudioHarness.Run"], env=env)
+        env = {**engine_env(Path(binary)), "DJSTUDIO_MAPPING": str(mapping_xml), "DJSTUDIO_SPEED": str(speed),
+               "DJSTUDIO_AUDIO": "1" if audio else "0"}
+        super().__init__(library, speed, cmd=[str(binary)], env=env)
+
+    def audio(self) -> dict[str, Any]:
+        """声音输出的情况：on、device、latency_ms、underruns、error。"""
+        r = self.sim({"cmd": "audio"})
+        r.pop("_id", None)
+        return r
 
     @property
     def name(self) -> str:
-        return "mixxx-2.5.6-harness"
+        return "mixxx-engine"

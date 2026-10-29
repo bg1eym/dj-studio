@@ -19,7 +19,7 @@ from .engine.conductor import Conductor, Progress
 from .engine.link import Link, LinkError, RtMidiLink, SimLink
 from .grid import Grid
 from .library.analysis import downbeat_from_bar1
-from .library.audio import AUDIO_EXTS, AudioError, have_ffmpeg, probe
+from .library.audio import AUDIO_EXTS, AudioError, have_decoder, probe
 from .library.importer import Library
 from .library.store import Store, Track
 from .mixxx import process
@@ -51,8 +51,25 @@ def _duration(path: Path) -> float:
         return -1.0
 
 
-def _sim_rehearsal_link(rows: list[dict[str, Any]], speed: float) -> Link:
+def _default_engine_link(rows: list[dict[str, Any]], speed: float, audio: bool = False) -> Link:
+    """内置引擎：有 DJ Studio 声音引擎（Mixxx 2.5.6 的引擎核心）就用它，audio=True 时出声；
+    没有就退回 Node 模拟器（同一份 DJStudio.js，没有声音）。"""
+    from .engine.bundled import engine_binary
+    from .engine.link import EngineLink
+
+    binary = engine_binary()
+    if binary:
+        return EngineLink(binary, rows, speed=speed, audio=audio)
     return SimLink(rows, speed=speed)
+
+
+def _engine_missing() -> str | None:
+    """内置引擎跑不起来的原因（既没有声音引擎，也没有 Node.js）。"""
+    from .engine.bundled import engine_binary
+
+    if engine_binary() or shutil.which("node"):
+        return None
+    return "找不到 DJ Studio 声音引擎（应用没装完整？重新下载 DJ Studio）"
 
 
 class StudioError(RuntimeError):
@@ -119,7 +136,7 @@ class Studio:
         self._rehearsal: dict[str, Any] | None = None
         self._plan_cache: tuple[Any, Any] | None = None
         # 预演用的引擎：默认 Node 模拟器；开发时可以换成真 Mixxx 测试台（HarnessLink，同一套行协议）
-        self.rehearsal_link_factory: Callable[[list[dict[str, Any]], float], Link] = _sim_rehearsal_link
+        self.rehearsal_link_factory: Callable[..., Link] = _default_engine_link
         self.job: Job | None = None
         self._job_lock = threading.Lock()
         # 按打碟谱在电脑里找曲子（网页显示进度）；一键分析自动开始过的「打碟谱 + 曲目」组合
@@ -160,6 +177,17 @@ class Studio:
                 self._client.add_listener(lambda m: self.emit("engine", m) if m.get("t") != "st" else None)
             return self._client
 
+    def shutdown(self) -> None:
+        """退出前：停掉演出 / 预演，关掉引擎进程。"""
+        if self.conductor and self.conductor.running:
+            self.conductor.request_stop()
+            self.conductor.join(3)
+        r = self._rehearsal
+        if r:
+            r["client"].link.close()
+            self._rehearsal = None
+        self.disconnect()
+
     def disconnect(self) -> None:
         with self._client_lock:
             if self._client:
@@ -172,7 +200,7 @@ class Studio:
             c = r["client"]
             return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
                     "status": c.status, "link": c.link.name, "rehearsal": True, "speed": r["speed"],
-                    "set": r["set"], "from": r["from"], "builtin": r.get("builtin", False)}
+                    "set": r["set"], "from": r["from"], "builtin": r.get("builtin", False), "audio": r.get("audio")}
         if self.builtin:
             return {"connected": False, "online": False, "builtin": True}
         c = self._client
@@ -275,14 +303,18 @@ class Studio:
         def add(name: str, level: str, detail: str) -> None:
             out.append({"name": name, "level": level, "detail": detail})
 
-        add("ffmpeg", "ok" if have_ffmpeg() else "error",
-            "已安装" if have_ffmpeg() else "没有 ffmpeg / ffprobe：brew install ffmpeg")
+        from .engine.bundled import engine_binary
+
+        binary = engine_binary()
+        add("解码", "ok" if have_decoder() else "error",
+            ("声音引擎（Mixxx 的解码器）" if binary else "ffmpeg") if have_decoder() else "没有解码器：找不到声音引擎，也没有 ffmpeg")
         add("托管曲库", "ok", str(self.cfg.library))
         if self.builtin:
-            node = shutil.which("node")
-            add("Node.js", "ok" if node else "error", node or "没有 Node.js（内置引擎要用）：brew install node")
-            add("引擎", "ok", f"内置引擎：DJStudio.js {mapping_version()} 在内置的模拟 Mixxx 里运行，不连本机的 Mixxx，没有声音"
-                               "（要用 Mixxx：DJSTUDIO_ENGINE=mixxx djstudio）")
+            if binary:
+                add("引擎", "ok", f"内置声音引擎（Mixxx 2.5.6 的引擎核心）：{binary}；DJStudio.js {mapping_version()}，不连本机的 Mixxx")
+            else:
+                miss = _engine_missing()
+                add("引擎", "error" if miss else "warn", miss or "没有声音引擎，用 Node 模拟器代替（看得到旋钮，没有声音）")
             return out
         if not self.mixxx.exists():
             add("Mixxx 曲库", "error", f"找不到 {self.cfg.mixxx_db}（先正常打开一次 Mixxx；或设置 DJSTUDIO_MIXXX_DIR）")
@@ -426,6 +458,11 @@ class Studio:
             return self.start_job(f"准备 {set_id}", lambda job: self._prepare_builtin(job, set_id))
         return self.start_job(f"准备 {set_id}", lambda job: self._prepare(job, set_id, settle))
 
+    def _engine_link(self, rows: list[dict[str, Any]], speed: float, audio: bool = False) -> Link:
+        if self.rehearsal_link_factory is _default_engine_link:
+            return _default_engine_link(rows, speed, audio=audio)
+        return self.rehearsal_link_factory(rows, speed)  # 测试 / 开发换上的（两个参数）
+
     def _sim_rows(self, s: SetFile, c: Compiled) -> list[dict[str, Any]]:
         """内置引擎（模拟器）里的曲目：时长 / BPM / 网格用编译时同一份结果，小节和过渡时刻与编译出的程序一致。"""
         rows = []
@@ -442,14 +479,21 @@ class Studio:
         errs = [str(i) for i in c.issues if i.level == "error"]
         if errs:
             raise StudioError("set 校验没通过：\n" + "\n".join(errs))
-        if self.rehearsal_link_factory is _sim_rehearsal_link and shutil.which("node") is None:
-            raise StudioError("内置引擎要用 Node.js：在终端运行 brew install node，然后点「重新分析」")
-        link = self.rehearsal_link_factory(self._sim_rows(s, c), 1.0)
+        miss = _engine_missing() if self.rehearsal_link_factory is _default_engine_link else None
+        if miss:
+            raise StudioError(miss)
+        link = self._engine_link(self._sim_rows(s, c), 1.0, audio=True)
         try:
             client = EngineClient(link)
-            if not client.wait_until(client.online, 10):
-                raise StudioError("内置引擎没有启动起来（Node.js 版本太旧？）")
-            job.say(f"内置引擎就绪（DJStudio.js {client.version}，不连 Mixxx，没有声音）")
+            if not client.wait_until(client.online, 15):
+                raise StudioError("内置引擎没有启动起来")
+            audio = link.audio() if hasattr(link, "audio") else None
+            if audio and audio.get("on"):
+                job.say(f"内置引擎就绪（Mixxx 2.5.6 引擎 + DJStudio.js {client.version}），声音从「{audio.get('device')}」出")
+            elif audio:
+                job.say(f"!! 内置引擎就绪，但没有声音：{audio.get('error') or '打不开声音输出'}")
+            else:
+                job.say(f"内置引擎就绪（模拟器 + DJStudio.js {client.version}，没有声音）")
         finally:
             link.close()
         state = {"set": set_id, "at": time.time(), "engine": "builtin"}
@@ -998,19 +1042,23 @@ class Studio:
             raise StudioError("正在播放或预演，先停下")
         if self.job and self.job.state == "running":
             raise StudioError(f"任务进行中：{self.job.name}")
-        if self.rehearsal_link_factory is _sim_rehearsal_link and shutil.which("node") is None:
-            raise StudioError("内置引擎 / 预演要用 Node.js（brew install node）")
+        miss = _engine_missing() if self.rehearsal_link_factory is _default_engine_link else None
+        if miss:
+            raise StudioError(miss)
         s = self.rehearsal_set(self.load(set_id), from_transition)
         c = self.compile(s)
         if not c.ok:
             raise StudioError("set 校验没通过")
-        link = self.rehearsal_link_factory(self._sim_rows(s, c), speed)
+        # 演出（内置引擎、原速）出声；预演和倍速不出声
+        link = self._engine_link(self._sim_rows(s, c), speed, audio=builtin and speed == 1.0)
         link.sim({"cmd": "queue", "ids": [t.id for t in s.tracks]})
         client = EngineClient(link)
-        if not client.wait_until(client.online, 5):
+        if not client.wait_until(client.online, 15):
             link.close()
-            raise StudioError("模拟器没有启动")
-        self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin}
+            raise StudioError("内置引擎没有启动起来")
+        audio = link.audio() if hasattr(link, "audio") else None
+        self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
+                           "audio": audio}
         log_path = self.cfg.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{set_id}.log" if builtin else None
 
         def on_log(line: str) -> None:

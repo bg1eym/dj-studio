@@ -36,6 +36,13 @@ def version_text() -> str:
             rev = _git("rev-parse", "--short", "HEAD", timeout=5).stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             rev = ""
+    else:
+        try:  # 打包好的应用：构建时写进去的提交号
+            from ._build import COMMIT
+
+            rev = COMMIT[:7]
+        except ImportError:
+            rev = ""
     return f"{__version__} · {rev}" if rev else __version__
 
 
@@ -86,7 +93,7 @@ def free_port(host: str, port: int) -> bool:
             cmd = subprocess.run(["ps", "-ww", "-p", pid, "-o", "command="], capture_output=True, text=True, timeout=5).stdout
         except (OSError, subprocess.TimeoutExpired):
             continue
-        if "djstudio" in cmd and int(pid) != os.getpid():
+        if "djstudio" in cmd.lower().replace(" ", "") and int(pid) != os.getpid():  # 也认 DJ Studio.app
             ours.append(int(pid))
     if not ours:
         print(f"✗ 端口 {port} 被别的程序占用了。换一个端口：DJSTUDIO_PORT=8432 djstudio")

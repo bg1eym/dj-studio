@@ -72,7 +72,7 @@ def test_builtin_engine_does_not_touch_mixxx(client):
         body = r.json()
         assert r.status_code == 400 and "内置引擎" in (body.get("error") or body.get("detail")), url
     names = [r["name"] for r in client.get("/api/doctor").json()]
-    assert "Node.js" in names and not any("Mixxx" in n or "IAC" in n for n in names)
+    assert "引擎" in names and not any("Mixxx" in n or "IAC" in n for n in names)
 
 
 def test_audio_only_for_known_tracks(client):
