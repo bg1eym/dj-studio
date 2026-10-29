@@ -7,13 +7,13 @@
 - 过渡手法：**长交接**（longhand）/ **瞬时切换**（instant）/ **自定义**（custom，逐小节旋钮位）。
 - 只绑 `127.0.0.1`，只在本机浏览器使用。
 
-> 当前状态：所有逻辑在模拟器里端到端测过（真正的 `DJStudio.js` 跑在假 Mixxx 里），**还没有在真 Mixxx 上跑过**。
-> 首次上机请按 [docs/DEVICE_TEST.md](docs/DEVICE_TEST.md) 一步步来，把「真机探测」的结果发给 Claude。
+> 当前状态：所有逻辑在模拟器里端到端测过，也在真 Mixxx 2.5.6 的引擎代码（测试台，见 `tools/mixxx-harness`）上跑过整套 set；
+> **还没有在 Mac 上的 Mixxx 程序里跑过**（IAC / CoreMIDI、进程控制要真机验证）。首次上机请按 [docs/DEVICE_TEST.md](docs/DEVICE_TEST.md) 一步步来。
 
 ## 安装（Mac）
 
 ```bash
-brew install python ffmpeg
+brew install python ffmpeg node
 ```
 
 ```bash
@@ -28,7 +28,7 @@ cd ~/dj-studio && python3 -m venv ~/.venvs/djstudio && ~/.venvs/djstudio/bin/pip
 ~/.venvs/djstudio/bin/djstudio
 ```
 
-浏览器会打开 http://127.0.0.1:8430/ 。代码放在 iCloud 之外（例如 `~/dj-studio`），别放进「文稿」。
+浏览器会打开 http://127.0.0.1:8430/ 。node 用于「预演」和演示模式（`djstudio demo`，http://127.0.0.1:8431/）。代码放在 iCloud 之外（例如 `~/dj-studio`），别放进「文稿」。
 
 ### 默认位置（可用环境变量覆盖）
 
