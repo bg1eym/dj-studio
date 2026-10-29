@@ -352,7 +352,9 @@ def _slug(s: str) -> str:
     return s or "plan"
 
 
-def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | None = None) -> Converted:
+def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | None = None,
+            keylock_note: bool = True) -> Converted:
+    """keylock_note：谱上要求 Key Lock 时提醒为什么先关（只和真 Mixxx 有关；内置引擎没有声音，不提醒）。"""
     notes: list[Note] = [Note("warn", "打碟谱", w) for w in plan.warnings]
     matches, mnotes = match_tracks(plan, lib)
     notes += mnotes
@@ -375,7 +377,7 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
                               "谱的作者测起音的位置和这里不完全一样；同步按网格走，两个 kick 照样对齐"))
 
     keylocked = [pt for pt in plan.tracks if pt.keylock]
-    if keylocked:
+    if keylocked and keylock_note:
         notes.append(Note("warn", ", ".join(f"#{pt.no:02d}" for pt in keylocked),
                           "谱上要求 Key Lock 开。Mixxx 的时间拉伸会让这首比引擎位置晚 17–29ms，叠放时两个 kick 会出双击，"
                           "所以先关 Key Lock（音高随速度变化）。要开的话把 set 的 keylock 改成 true"))

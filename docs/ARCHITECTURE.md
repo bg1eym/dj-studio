@@ -17,6 +17,14 @@ Mixxx + DJStudio.js（控制器映射）
   20ms 时间线 · 自动化曲线 · B 起播 + 相位校正 · AutoDJ 装载器 · 100ms 状态回传
 ```
 
+## 两种引擎（`Config.engine`，`DJSTUDIO_ENGINE`）
+
+- **builtin（默认）**：不连本机的 Mixxx——`Studio._mixxx_tracks()` 返回空（不读 Mixxx 曲库），连 Mixxx 的操作（同步、校正 Mixxx 网格、
+  真机探测、IAC 连接）直接报错。网格用自己分析的 `own_grid`；一键分析只有 音频分析 → 读打碟谱 → 生成 set → 准备内置引擎 四步；
+  「开始演出」= 在 Node 模拟器（`sim/fake_mixxx.mjs`）里跑同一份 `DJStudio.js` 和同一个 conductor（和预演同一套，`Studio.rehearse(builtin=True)`），
+  可以倍速、从第 k 段过渡开始。没有声音。
+- **mixxx**：下面的结构图——`DJStudio.js` 作为控制器映射跑在本机的 Mixxx 里，经 IAC 通信。
+
 ## 分工：快的在引擎，慢的在 Python
 
 | 层 | 做什么 | 不做什么 |

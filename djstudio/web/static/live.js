@@ -1,6 +1,6 @@
 // 演出页的实时混音台：两条滚动波形 + 两通道混音台 + 过渡时间线。
 //
-// 旋钮、推子、电平表显示的是引擎从 Mixxx 读回的控件值（状态帧 d / m / x / mv，每 100ms 一帧），
+// 旋钮、推子、电平表显示的是引擎从 Mixxx（或内置引擎里的模拟 Mixxx）读回的控件值（状态帧 d / m / x / mv，每 100ms 一帧），
 // 不是计划值——Mixxx 里旋钮在哪，这里就画在哪。计划值（编译出的自动化曲线）画在过渡时间线上，
 // 游标走到哪里，旋钮应该就在曲线的那个位置。波形与游标在两帧之间按播放速度外推，每个画面帧重画。
 
@@ -255,7 +255,7 @@ class DeckView {
 
   setTrack(t) {
     this.track = t;
-    this.title.textContent = t ? `#${t.idx + 1} ${t.title}` : "（空）";
+    this.title.textContent = t ? `#${t.no} ${t.title}` : "（空）";
   }
 
   setRole(text) { this.role.textContent = text || ""; this.role.style.display = text ? "" : "none"; }
@@ -587,7 +587,7 @@ export class LiveView {
         el("div", { class: "master" }, el("div", { class: "ch-name" }, "MASTER"), this.mvu.root, el("div", { class: "kl" }, "主输出")),
         this.ch[2].root),
       el("div", { class: "xfader" }, el("span", { class: "kl" }, "1"), el("div", { class: "xf-track" }, this.xcap), el("span", { class: "kl" }, "2")),
-      el("div", { class: "mixer-note dim" }, "旋钮 / 推子 / 电平都是从 Mixxx 读回的实际值"));
+      el("div", { class: "mixer-note dim" }, "旋钮 / 推子 / 电平都是从引擎读回的实际值"));
     root.append(this.banner,
       el("div", { class: "live-decks" }, this.decks[1].root, this.decks[2].root),
       el("div", { class: "live-bottom" }, this.mixer, this.timeline.root));
@@ -670,7 +670,7 @@ export class LiveView {
       if (k === null || !comp) { if (dv.track) dv.setTrack(null); }
       else if (!dv.track || dv.track.idx !== k || dv.track.prog !== prog) {
         const ct = comp.tracks[k], stt = comp.set.tracks[k];
-        const t = { idx: k, id: ct.id, title: stt.title || ct.id, bpm: ct.bpm, bar1: ct.bar1_time, prog, markers: this._markers(k, prog), wave: null, sections: [] };
+        const t = { idx: k, no: k + 1 + (comp._offset || 0), id: ct.id, title: stt.title || ct.id, bpm: ct.bpm, bar1: ct.bar1_time, prog, markers: this._markers(k, prog), wave: null, sections: [] };
         dv.setTrack(t);
         this._trackData(ct.id).then((x) => { if (dv.track === t) { t.wave = x.wave || null; t.sections = x.sections || []; } });
       }
@@ -690,9 +690,10 @@ export class LiveView {
     if (prog && comp && progress && !["done", "stopped", "error", "idle"].includes(progress.stage)) {
       const tr = prog.id === "end" ? null : comp.set.transitions[prog.idx];
       const ta = comp.set.tracks[prog.idx], tb = comp.set.tracks[prog.idx + 1];
-      const title = prog.id === "end" ? "终曲淡出" : `过渡 ${prog.idx + 1} / ${comp.programs.length} · ${tr.label || TECH_LABEL[tr.technique] || tr.technique}`;
-      const sub = prog.id === "end" ? ` #${prog.idx + 1} ${ta.title || ta.id}`
-        : ` A = Deck ${prog.a.deck} #${prog.idx + 1} ${ta.title || ta.id}（第 ${tr.start} 小节起）→ B = Deck ${prog.b.deck} #${prog.idx + 2} ${tb.title || tb.id}（从第 ${tr.b_in} 小节进）`;
+      const off = comp._offset || 0; // 从第 k 段过渡开始：编号照原来的
+      const title = prog.id === "end" ? "终曲淡出" : `过渡 ${prog.idx + 1 + off} / ${comp.programs.length + off} · ${tr.label || TECH_LABEL[tr.technique] || tr.technique}`;
+      const sub = prog.id === "end" ? ` #${prog.idx + 1 + off} ${ta.title || ta.id}`
+        : ` A = Deck ${prog.a.deck} #${prog.idx + 1 + off} ${ta.title || ta.id}（第 ${tr.start} 小节起）→ B = Deck ${prog.b.deck} #${prog.idx + 2 + off} ${tb.title || tb.id}（从第 ${tr.b_in} 小节进）`;
       this.timeline.setProgram(prog, { key: prog.id + ":" + (comp._id || ""), title, sub });
       if (pg && pg.id.replace("!", "") === prog.id) {
         const bpm = st.d[prog.a.deck - 1][1] ? st.d[prog.a.deck - 1][4] : prog.b ? st.d[prog.b.deck - 1][4] : 120;

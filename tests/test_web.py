@@ -9,13 +9,17 @@ from djstudio.studio import Studio
 from djstudio.web.app import create_app
 
 
-@pytest.fixture
-def client(tmp_path):
+def make_client(tmp_path, engine="builtin"):
     mixxx = tmp_path / "mixxx"
     mixxx.mkdir()
     fakedb.create(mixxx / "mixxxdb.sqlite")
-    cfg = Config(home=tmp_path / "home", library=tmp_path / "lib", mixxx_dir=mixxx, browse_roots=[tmp_path])
+    cfg = Config(home=tmp_path / "home", library=tmp_path / "lib", mixxx_dir=mixxx, browse_roots=[tmp_path], engine=engine)
     return TestClient(create_app(Studio(cfg)))
+
+
+@pytest.fixture
+def client(tmp_path):
+    return make_client(tmp_path)
 
 
 def test_index_and_state(client):
@@ -51,11 +55,24 @@ def test_browse_outside_roots_forbidden(client):
     assert client.get("/api/browse").status_code == 200
 
 
-def test_play_unprepared_rejected(client):
+def test_play_unprepared_rejected(tmp_path):
+    client = make_client(tmp_path, engine="mixxx")
     body = {"schema": "djset/2", "id": "x2", "tracks": [], "transitions": []}
     client.put("/api/sets/x2", json=body)
     r = client.post("/api/sets/x2/play")
     assert r.status_code == 400 and "准备" in r.json()["error"]
+
+
+def test_builtin_engine_does_not_touch_mixxx(client):
+    """内置引擎（默认）：不连 Mixxx。状态里标明；连 Mixxx 的操作直接报清楚的错。"""
+    st = client.get("/api/state").json()
+    assert st["engine_mode"] == "builtin" and st["engine"] == {"connected": False, "online": False, "builtin": True}
+    for url in ("/api/sync", "/api/grids/fix", "/api/probe", "/api/engine/reconnect"):
+        r = client.post(url, json={})
+        body = r.json()
+        assert r.status_code == 400 and "内置引擎" in (body.get("error") or body.get("detail")), url
+    names = [r["name"] for r in client.get("/api/doctor").json()]
+    assert "Node.js" in names and not any("Mixxx" in n or "IAC" in n for n in names)
 
 
 def test_audio_only_for_known_tracks(client):

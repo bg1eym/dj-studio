@@ -65,6 +65,8 @@ const fmt = (t) => {
 };
 const fmtBar = (b) => (b === null || b === undefined || isNaN(b) ? "–" : b.toFixed(1));
 const deckFor = (i) => (i % 2 === 0 ? 1 : 2);
+// 内置引擎（默认）：DJStudio.js 在内置的模拟 Mixxx 里跑，不连本机的 Mixxx，没有声音
+const isBuiltin = () => !S.state || S.state.engine_mode !== "mixxx";
 
 // ------------------------------------------------------------------ 全局状态
 
@@ -189,8 +191,10 @@ function updateEngineBadge() {
   const e = S.engine || {};
   const lost = S.progress && S.progress.stage !== "done" && S.progress.engine_ok === false;
   b.className = "engine" + (e.online ? " online" : (e.connected || lost ? " lost" : ""));
-  $(".txt", b).textContent = e.rehearsal ? `预演中（模拟器 ${e.speed}×）` : e.online ? "Mixxx 已连接" : (e.connected ? "引擎失联" : "Mixxx 未连接");
-  b.title = e.online ? `引擎脚本 DJStudio.js ${e.version || ""}` : "引擎状态";
+  b.title = e.builtin ? "内置引擎：DJStudio.js 在内置的模拟 Mixxx 里运行，不连本机的 Mixxx，没有声音" : "引擎状态";
+  $(".txt", b).textContent = e.rehearsal ? (e.builtin ? `内置引擎运行中（${e.speed}×）` : `预演中（模拟器 ${e.speed}×）`)
+    : e.builtin ? "内置引擎" : e.online ? "Mixxx 已连接" : (e.connected ? "引擎失联" : "Mixxx 未连接");
+  if (!e.builtin && e.online) b.title = `引擎脚本 DJStudio.js ${e.version || ""}`;
   $("#ver").textContent = (S.state && S.state.version) || "";
   const al = $("#alarm");
   const playing = S.state && S.state.playing;
@@ -414,7 +418,8 @@ function renderHomeJob() {
         h("span", { class: "grow" }, job.state === "error" ? ""
           : nStages ? `第 ${Math.min(job.stage + 1, nStages)} / ${nStages} 步：${job.stages[job.stage] || ""}` : job.name),
         h("span", { class: "dim" }, job.state === "error" ? "" : job.detail || "")));
-    if (job.state === "running") el.append(h("div", { class: "dim", style: "margin-top:8px" }, "分析中会重启 Mixxx。不用管，大概几分钟。"));
+    if (job.state === "running") el.append(h("div", { class: "dim", style: "margin-top:8px" },
+      isBuiltin() ? "不用管，大概几分钟。不会动你的 Mixxx。" : "分析中会重启 Mixxx。不用管，大概几分钟。"));
   }
   if (job.state === "error") {
     const errs = job.log.filter((l) => l.includes("!!")).slice(-3).map((l) => l.replace(/^\S+ !! /, ""));
@@ -425,17 +430,26 @@ function renderHomeJob() {
   const r = job.state === "ok" ? job.result : null;
   if (r) {
     const warns = (r.notes || []).filter((n) => n.level === "warn");
+    const builtin = isBuiltin();
+    const nTr = (p && !p.error && p.n_transitions) || 0;
+    // 内置引擎：可以从第 k 段过渡前开始、倍速看
+    const opts = builtin ? h("div", { class: "row play-opts" },
+      h("label", {}, "从 ", h("select", { id: "play-from" }, h("option", { value: 0 }, "头"),
+        Array.from({ length: nTr }, (_, i) => h("option", { value: i + 1 }, `过渡 ${i + 1} 前 8 小节（#${i + 1} → #${i + 2}）`))), " 开始"),
+      h("label", {}, "速度 ", h("select", { id: "play-speed" }, [1, 2, 4, 8].map((v) => h("option", { value: v }, `${v}×`))))) : null;
     el.append(h("div", { class: "ready" },
       h("div", { class: "grow" }, h("div", { class: "ready-big" }, "可以演出了"),
-        h("div", { class: "dim" }, `约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好。`)),
+        h("div", { class: "dim" }, builtin ? `约 ${Math.round(r.duration / 60)} 分钟。用内置引擎：不连 Mixxx，看得到每个旋钮怎么动，没有声音。`
+          : `约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好。`), opts),
       h("button", { class: "primary huge", onclick: () => guard(async () => {
-        await api("POST", `/api/sets/${r.set}/play`);
+        const body = builtin ? { from: +$("#play-from").value, speed: +$("#play-speed").value } : {};
+        await api("POST", `/api/sets/${r.set}/play`, body);
         S.showSetId = r.set; S.showCompiled = null; S.homeDone = null;
         await loadState();
         renderHome(true);
       }) }, "▶ 开始演出")));
     if (warns.length) el.append(h("div", { class: "warn-box" }, h("b", {}, "需要注意"), warns.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
-    el.append(h("div", { class: "row dim", style: "margin-top:10px" },
+    el.append(h("div", { class: "row dim", style: "margin-top:10px" }, builtin ? null :
       h("a", { href: "#home", onclick: (e) => { e.preventDefault(); guard(async () => {
         await api("POST", `/api/sets/${r.set}/rehearse`, { speed: 1, from: 0 });
         S.showSetId = r.set; S.showCompiled = null; S.homeDone = null;
@@ -1033,7 +1047,8 @@ async function loadShowCompiled() {
   const want = showKey();
   if (S.showSetId && (!S.showCompiled || S.showCompiled._key !== want.key)) {
     const r = await api("GET", want.url).catch(() => null);
-    S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, _key: want.key, set: r.set } : null;
+    // _offset：从第 k 段过渡开始时，截短的 set 里第 1 首其实是原来的第 k 首（编号照原来的显示）
+    S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, _key: want.key, _offset: want.offset || 0, set: r.set } : null;
   }
 }
 
@@ -1041,7 +1056,7 @@ async function loadShowCompiled() {
 function showKey() {
   const e = S.engine || {};
   if (e.rehearsal && e.set === S.showSetId && e.from) {
-    return { key: `${e.set}~${e.from}`, url: `/api/sets/${e.set}?rehearse_from=${e.from}` };
+    return { key: `${e.set}~${e.from}`, url: `/api/sets/${e.set}?rehearse_from=${e.from}`, offset: e.from - 1 };
   }
   return { key: S.showSetId, url: "/api/sets/" + S.showSetId };
 }
@@ -1062,7 +1077,7 @@ function setStrip(p) {
   const curIdx = p.stage === "transition" ? (p.program === "end" ? -1 : p.index) : p.index;
   return h("div", { class: "timeline", style: "margin-top:6px" }, comp.schedule.map((sg) => {
     const on = !["done", "stopped", "error", "idle"].includes(p.stage) && sg.kind === curKind && sg.index === curIdx;
-    const label = sg.kind === "solo" ? `#${sg.index + 1}` : sg.kind === "ending" ? "终曲" : `↗ ${TECH_LABEL[sg.label] || sg.label}`;
+    const label = sg.kind === "solo" ? `#${sg.index + 1 + (comp._offset || 0)}` : sg.kind === "ending" ? "终曲" : `↗ ${TECH_LABEL[sg.label] || sg.label}`;
     return h("div", { class: sg.kind + (on ? " now" : ""), style: `width:${((sg.t1 - sg.t0) / total) * 100}%`,
       title: `${label} ${fmt(sg.t0)}–${fmt(sg.t1)}` }, label);
   }));
@@ -1082,14 +1097,16 @@ function renderShowStatus() {
   else {
     const set = S.showCompiled && S.showCompiled.set;
     const cur = set && set.tracks[p.index];
+    const off = (S.showCompiled && S.showCompiled._offset) || 0;
     const e = S.engine || {};
     put(el,
       h("div", { class: "row status-line" },
         h("span", { class: "stage", style: p.stage === "error" ? "color:var(--err)" : "" }, STAGE_LABEL[p.stage] || p.stage),
-        e.rehearsal ? h("span", { class: "badge ok", title: "模拟器里跑的是真正的引擎脚本，旋钮 / 推子是模拟器里 Mixxx 控件的值" }, `预演 · 模拟器 ${e.speed}× · 没有声音`) : null,
+        e.rehearsal ? h("span", { class: "badge ok", title: "内置的模拟 Mixxx 里跑的是真正的引擎脚本 DJStudio.js，旋钮 / 推子是它里面 Mixxx 控件的值" },
+          `${e.builtin ? "内置引擎" : "预演 · 模拟器"} ${e.speed}× · 没有声音`) : null,
         h("span", { class: "dim" }, p.message || ""),
         h("span", { class: "grow" }),
-        h("span", {}, `第 ${p.index + 1} / ${p.n_tracks} 首`, cur ? ` · ${cur.title || cur.id}` : "")),
+        h("span", {}, `第 ${p.index + 1 + off} / ${p.n_tracks + off} 首`, cur ? ` · ${cur.title || cur.id}` : "")),
       p.error ? h("div", { style: "color:var(--err);margin-top:6px" }, p.error) : null,
       setStrip(p),
     );

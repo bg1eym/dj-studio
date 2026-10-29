@@ -37,7 +37,7 @@ def env(tmp_path, monkeypatch):
     mixxx_dir.mkdir()
     lib = tmp_path / "Music" / "DJStudio"
     fake_mixxxdb.create(mixxx_dir / "mixxxdb.sqlite", [lib])
-    cfg = Config(home=tmp_path / "home", library=lib, mixxx_dir=mixxx_dir, browse_roots=[tmp_path])
+    cfg = Config(home=tmp_path / "home", library=lib, mixxx_dir=mixxx_dir, browse_roots=[tmp_path], engine="mixxx")
 
     state = {"running": False, "sim": None}
     monkeypatch.setattr(process, "mixxx_running", lambda: state["running"])
@@ -167,7 +167,7 @@ def test_sync_mixxx_analysis_loads_each_track_once(tmp_path, monkeypatch):
     mixxx_dir = tmp_path / "mixxx"
     mixxx_dir.mkdir()
     fdb.create(mixxx_dir / "mixxxdb.sqlite", [lib])
-    cfg = Config(home=tmp_path / "home", library=lib, mixxx_dir=mixxx_dir, browse_roots=[tmp_path])
+    cfg = Config(home=tmp_path / "home", library=lib, mixxx_dir=mixxx_dir, browse_roots=[tmp_path], engine="mixxx")
     state = {"running": False, "link": None}
     monkeypatch.setattr(process, "mixxx_running", lambda: state["running"])
     monkeypatch.setattr(process, "launch_mixxx", lambda: state.update(running=True))
@@ -400,3 +400,70 @@ def test_drop_plan_only_finds_tracks_and_starts_analysis(env, monkeypatch):
     assert job.state == "ok", "\n".join(job.log)
     assert [t.id for t in studio.load(job.result["set"]).tracks] == [r["track"] for r in studio.plan_status()["tracks"]]
     assert studio.maybe_auto() is None  # 同一份谱 + 同一组歌不再自动重来
+
+
+def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
+    """内置引擎（默认）：打碟谱 + 曲子 → 分析（没有 Mixxx 那几步）→ 开始演出 = 模拟器里跑 DJStudio.js。
+    本机的 Mixxx 一次都不碰：不读它的曲库、不启动 / 退出它、不连 MIDI。"""
+    from djstudio.plan.cdw import Knobs, Plan, PlanRow, PlanTrack, PlanTransition
+    from djstudio.studio import StudioError
+
+    def boom(*a, **k):
+        raise AssertionError("内置引擎不该碰 Mixxx")
+
+    for name in ("mixxx_running", "launch_mixxx", "quit_mixxx"):
+        monkeypatch.setattr(process, name, boom)
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a.wav", "b.wav"):
+        bpm, fb, db = SPECS[name]
+        write_wav(src / name, techno(bpm, fb, db, LAYOUT, seed=hash(name) % 100))
+    cfg = Config(home=tmp_path / "home", library=tmp_path / "Music" / "DJStudio", mixxx_dir=tmp_path / "no-mixxx",
+                 browse_roots=[tmp_path], find_dirs=[src])
+    assert cfg.engine == "builtin"
+    studio = Studio(cfg, link_factory=boom)
+    monkeypatch.setattr(studio.mixxx, "exists", boom)
+    ba, fa, da = SPECS["a.wav"]
+    bb, fb_, db_ = SPECS["b.wav"]
+    K = lambda lo=0, v=10: Knobs(lo, 0, 0, 0, v)  # noqa: E731
+    plan = Plan("测试谱", [
+        PlanTrack(1, "A", ba, ba, False, None, None, None, "a.wav", fa + da * 60 / ba),
+        PlanTrack(2, "B", bb, ba, False, None, 25, "longhand", "b.wav", fb_ + db_ * 60 / bb),
+    ], [PlanTransition(1, "A", "B", "longhand", 25, ba, ba, None, [
+        PlanRow(21, None, False, K(), None),
+        PlanRow(25, 1, False, K(), K(lo=-5, v=5)),
+        PlanRow(41, 17, True, K(lo=-5), K()),
+    ])])
+    (studio.plans_dir).mkdir(parents=True, exist_ok=True)
+    (studio.plans_dir / "测试谱.pdf").write_bytes(b"%PDF-1.4 stub")
+    monkeypatch.setattr(studio, "load_plan", lambda path: plan)
+
+    studio.find_plan_tracks()  # 找到曲子 → 自动开始分析
+    t0 = time.time()
+    while (studio.finder.get("state") == "running" or not studio.job) and time.time() - t0 < 30:
+        time.sleep(0.1)
+    job = wait_job(studio.job, 120)
+    assert job.state == "ok", "\n".join(job.log)
+    # 以前连 Mixxx 时按 Mixxx 网格切的段落：再分析一次时按自己的网格重切
+    t = studio.store.get(studio.load(job.result["set"]).tracks[0].id)
+    studio.store.update(t.id, analysis={**t.analysis, "grid_source": "mixxx"})
+    studio._auto_key = None
+    job = wait_job(studio.auto_prepare(), 120)
+    assert job.state == "ok" and any("重切" in line for line in job.log), "\n".join(job.log)
+    assert studio.store.get(t.id).analysis["grid_source"] == "own"
+    assert job.stages == studio.BUILTIN_STAGES and job.progress == 1.0
+    sid = job.result["set"]
+    # 网格用自己分析的
+    c = studio.compile(studio.load(sid))
+    own = [studio.store.get(t.id).analysis["own_grid"] for t in studio.load(sid).tracks]
+    assert c.ok and [round(t.grid.bpm, 3) for t in c.tracks] == [round(o["bpm"], 3) for o in own]
+    with pytest.raises(StudioError):
+        studio.client()
+
+    studio.play(sid, speed=40)
+    es = studio.engine_state()
+    assert es["builtin"] and es["rehearsal"] and es["link"] == "sim"
+    studio.conductor.join(60)
+    p = studio.conductor.progress
+    assert p.stage == "done", "\n".join(p.log) + f"\n{p.error}"
+    assert any(studio.cfg.logs_dir.glob(f"*-{sid}.log"))  # 演出日志照常写

@@ -52,6 +52,9 @@ class Config:
     library: Path = field(default_factory=lambda: _env_path("DJSTUDIO_LIBRARY", "~/Music/DJStudio"))
     mixxx_dir: Path = field(default_factory=find_mixxx_dir)
     midi_port: str = field(default_factory=lambda: os.environ.get("DJSTUDIO_MIDI_PORT", "IAC"))
+    # 引擎：builtin = 内置引擎（DJStudio.js 在内置的模拟 Mixxx 里跑，不碰本机的 Mixxx，没有声音）；
+    #       mixxx = 通过 IAC 控制本机的 Mixxx。DJSTUDIO_ENGINE=mixxx 切换
+    engine: str = field(default_factory=lambda: os.environ.get("DJSTUDIO_ENGINE", "builtin"))
     # 网页里允许浏览 / 导入的根目录（防止网页读到任意路径）
     browse_roots: list[Path] = field(default_factory=lambda: [Path.home(), Path("/Volumes")])
     # 只放进打碟谱时，去这些文件夹里按谱上的文件名找曲子（DJSTUDIO_FIND_DIRS 用冒号分隔可改）

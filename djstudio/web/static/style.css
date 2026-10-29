@@ -234,3 +234,4 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .job-log { margin-top: 10px; }
 .job-log summary { cursor: pointer; color: var(--dim); font-size: 12px; }
 .home-live-bar b { font-size: 15px; }
+.play-opts { margin-top: 10px; font-size: 13px; color: var(--dim); }

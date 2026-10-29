@@ -102,7 +102,7 @@ def test_configure_controller_replaces_agentmcp(tmp_path):
     (mixxx / "mixxx.cfg").write_text(
         "[Config]\nVersion 2.5.6\n\n[Controller]\nIAC驱动程序_总线1 1\n\n[ControllerPreset]\n"
         f"IAC驱动程序_总线1 {mixxx}/controllers/AgentMCP.midi.xml\n\n[Library]\nRescanOnStartup 0\n", encoding="utf-8")
-    st = Studio(Config(home=tmp_path / "home", library=tmp_path / "lib", mixxx_dir=mixxx, browse_roots=[tmp_path]))
+    st = Studio(Config(home=tmp_path / "home", library=tmp_path / "lib", mixxx_dir=mixxx, browse_roots=[tmp_path], engine="mixxx"))
     job = Job("t")
     st._configure_controller(job)
     cfg = process.read_cfg(mixxx / "mixxx.cfg")

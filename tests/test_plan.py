@@ -141,6 +141,8 @@ def test_keylock_request_is_reported_not_silently_applied():
     conv = convert(plan, make_lib())
     assert conv.ok and not conv.set.keylock
     assert any("Key Lock" in n.msg and n.level == "warn" for n in conv.notes)
+    # 内置引擎没有声音：不提醒
+    assert not any("Key Lock" in n.msg for n in convert(plan, make_lib(), keylock_note=False).notes)
 
 
 PDF = os.environ.get("DJSTUDIO_PLAN_PDF")

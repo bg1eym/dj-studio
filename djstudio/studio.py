@@ -130,6 +130,15 @@ class Studio:
         self.listeners: list[Callable[[str, Any], None]] = []  # (kind, payload) → 网页 SSE
         self.library.on_change = lambda tid: self.emit("track", tid)
 
+    @property
+    def builtin(self) -> bool:
+        """内置引擎：不连本机的 Mixxx（不读它的曲库、不启动它、不发 MIDI），过渡在内置的模拟 Mixxx 里跑。"""
+        return self.cfg.engine != "mixxx"
+
+    def _need_mixxx(self, what: str) -> None:
+        if self.builtin:
+            raise StudioError(f"现在用的是内置引擎，不连 Mixxx，不能{what}（要用 Mixxx：DJSTUDIO_ENGINE=mixxx djstudio）")
+
     # ------------------------------------------------------------ 事件广播
 
     def emit(self, kind: str, payload: Any) -> None:
@@ -142,6 +151,8 @@ class Studio:
     # ------------------------------------------------------------ 引擎连接
 
     def client(self, connect: bool = True) -> EngineClient | None:
+        if connect:
+            self._need_mixxx("连接 Mixxx 的引擎")
         with self._client_lock:
             if self._client is None and connect:
                 link = self.link_factory()
@@ -161,7 +172,9 @@ class Studio:
             c = r["client"]
             return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
                     "status": c.status, "link": c.link.name, "rehearsal": True, "speed": r["speed"],
-                    "set": r["set"], "from": r["from"]}
+                    "set": r["set"], "from": r["from"], "builtin": r.get("builtin", False)}
+        if self.builtin:
+            return {"connected": False, "online": False, "builtin": True}
         c = self._client
         if not c:
             return {"connected": False, "online": False}
@@ -171,7 +184,7 @@ class Studio:
     # ------------------------------------------------------------ 曲目解析
 
     def _mixxx_tracks(self, tracks: list[Track]) -> dict[str, MixxxTrack]:
-        if not self.mixxx.exists():
+        if self.builtin or not self.mixxx.exists():
             return {}
         try:
             by_loc = self.mixxx.tracks_by_location([t.path for t in tracks])
@@ -204,10 +217,14 @@ class Studio:
             if t is None:
                 return None
             m = mx.get(t.id)
-            if m is None or m.grid is None or not m.analyzed:
+            own = (t.analysis or {}).get("own_grid")
+            if self.builtin and own:  # 内置引擎：用自己分析的网格
+                g = Grid(own["bpm"], own["first_beat"], 0, t.duration)
+            elif m is None or m.grid is None or not m.analyzed:
                 # 不在 Mixxx 库 / 没分析：返回空网格让编译器报「没分析」
                 return TrackInfo(t.id, t.display, Grid(0.0 if m is None else m.bpm or 0.0, 0.0, 0, 0.0))
-            g = Grid(m.grid.bpm, m.grid.first_beat, 0, m.duration or t.duration)
+            else:
+                g = Grid(m.grid.bpm, m.grid.first_beat, 0, m.duration or t.duration)
             db = downbeat_from_bar1(g, t.bar1) if t.bar1 is not None else 0
             return TrackInfo(t.id, t.display, Grid(g.bpm, g.first_beat, db, g.duration))
 
@@ -261,6 +278,12 @@ class Studio:
         add("ffmpeg", "ok" if have_ffmpeg() else "error",
             "已安装" if have_ffmpeg() else "没有 ffmpeg / ffprobe：brew install ffmpeg")
         add("托管曲库", "ok", str(self.cfg.library))
+        if self.builtin:
+            node = shutil.which("node")
+            add("Node.js", "ok" if node else "error", node or "没有 Node.js（内置引擎要用）：brew install node")
+            add("引擎", "ok", f"内置引擎：DJStudio.js {mapping_version()} 在内置的模拟 Mixxx 里运行，不连本机的 Mixxx，没有声音"
+                               "（要用 Mixxx：DJSTUDIO_ENGINE=mixxx djstudio）")
+            return out
         if not self.mixxx.exists():
             add("Mixxx 曲库", "error", f"找不到 {self.cfg.mixxx_db}（先正常打开一次 Mixxx；或设置 DJSTUDIO_MIXXX_DIR）")
         else:
@@ -399,7 +422,39 @@ class Studio:
 
     def prepare(self, set_id: str, settle: float | None = None) -> Job:
         settle = float(settle if settle is not None else 15.0)
+        if self.builtin:
+            return self.start_job(f"准备 {set_id}", lambda job: self._prepare_builtin(job, set_id))
         return self.start_job(f"准备 {set_id}", lambda job: self._prepare(job, set_id, settle))
+
+    def _sim_rows(self, s: SetFile, c: Compiled) -> list[dict[str, Any]]:
+        """内置引擎（模拟器）里的曲目：时长 / BPM / 网格用编译时同一份结果，小节和过渡时刻与编译出的程序一致。"""
+        rows = []
+        for t, info in zip(s.tracks, c.tracks):
+            tr = self.store.get(t.id)
+            rows.append({"id": t.id, "dur": info.grid.duration, "bpm": info.grid.bpm, "first_beat": info.grid.first_beat,
+                         "path": tr.path if tr else None})
+        return rows
+
+    def _prepare_builtin(self, job: Job, set_id: str) -> dict[str, Any]:
+        """内置引擎：校验 set，试启动一次模拟器确认能跑。不碰本机的 Mixxx。"""
+        s = self.load(set_id)
+        c = self.compile(s)
+        errs = [str(i) for i in c.issues if i.level == "error"]
+        if errs:
+            raise StudioError("set 校验没通过：\n" + "\n".join(errs))
+        if self.rehearsal_link_factory is _sim_rehearsal_link and shutil.which("node") is None:
+            raise StudioError("内置引擎要用 Node.js：在终端运行 brew install node，然后点「重新分析」")
+        link = self.rehearsal_link_factory(self._sim_rows(s, c), 1.0)
+        try:
+            client = EngineClient(link)
+            if not client.wait_until(client.online, 10):
+                raise StudioError("内置引擎没有启动起来（Node.js 版本太旧？）")
+            job.say(f"内置引擎就绪（DJStudio.js {client.version}，不连 Mixxx，没有声音）")
+        finally:
+            link.close()
+        state = {"set": set_id, "at": time.time(), "engine": "builtin"}
+        (self.cfg.home / "prepared.json").write_text(json.dumps(state))
+        return state
 
     def _prepare(self, job: Job, set_id: str, settle: float) -> dict[str, Any]:
         s = self.load(set_id)
@@ -441,6 +496,7 @@ class Studio:
     # ------------------------------------------------------------ 同步到 Mixxx（扫描 + 分析）
 
     def sync_mixxx(self, track_ids: list[str] | None = None, settle: float = 15.0) -> Job:
+        self._need_mixxx("同步到 Mixxx")
         return self.start_job("同步到 Mixxx", lambda job: self._sync(job, track_ids, settle))
 
     def _sync(self, job: Job, track_ids: list[str] | None, settle: float) -> dict[str, Any]:
@@ -582,6 +638,7 @@ class Studio:
         return plan
 
     def fix_grids(self, track_ids: list[str] | None = None) -> Job:
+        self._need_mixxx("校正 Mixxx 的网格")
         return self.start_job("校正网格", lambda job: self._fix_grids(job, track_ids))
 
     def _fix_grids(self, job: Job, track_ids: list[str] | None) -> dict[str, Any]:
@@ -610,6 +667,8 @@ class Studio:
 
     AUTO_STAGES = ["音频分析", "读打碟谱", "Mixxx 分析", "网格核对", "生成 set", "准备 Mixxx"]
     AUTO_WEIGHTS = [0.25, 0.03, 0.40, 0.07, 0.05, 0.20]
+    BUILTIN_STAGES = ["音频分析", "读打碟谱", "生成 set", "准备内置引擎"]  # 内置引擎：没有 Mixxx 那几步
+    BUILTIN_WEIGHTS = [0.85, 0.03, 0.08, 0.04]
 
     @property
     def plans_dir(self) -> Path:
@@ -786,20 +845,25 @@ class Studio:
         path = plan_path or self.current_plan()
         if not path:
             raise StudioError("还没有打碟谱：把 PDF 拖进来")
+        if self.builtin:
+            return self.start_job("分析", lambda job: self._auto(job, path, settle), self.BUILTIN_STAGES, self.BUILTIN_WEIGHTS)
         return self.start_job("分析", lambda job: self._auto(job, path, settle), self.AUTO_STAGES, self.AUTO_WEIGHTS)
 
     def _auto(self, job: Job, path: Path, settle: float) -> dict[str, Any]:
         from .plan.convert import convert, match_tracks
 
+        def step(name: str, detail: str = "") -> None:
+            job.step(job.stages.index(name), detail)
+
         # 1 音频分析：等托管曲库里排队的分析做完
-        job.step(0)
+        step("音频分析")
         self._wait_analysis(job, 0.0, 1.0, "音频分析")
         bad = [t.display for t in self.store.all() if t.analysis_error]
         if bad:
             job.say("!! 这些文件分析失败（不影响别的）：" + "、".join(bad))
 
         # 2 读打碟谱 + 对上曲库里的文件
-        job.step(1, path.name)
+        step("读打碟谱", path.name)
         plan = self.load_plan(path)
         job.say(f"「{plan.title}」：{len(plan.tracks)} 首，{len(plan.transitions)} 段过渡")
         matches, notes = match_tracks(plan, self.lib_tracks())
@@ -807,26 +871,35 @@ class Studio:
         if missing:
             raise StudioError("这些歌还没放进来：" + "、".join(missing))
         ids = [m.id for m in matches if m]
+        if self.builtin:
+            # 以前连 Mixxx 时按 Mixxx 的网格切的段落：内置引擎用自己的网格，重切一遍
+            stale = [i for i in ids if ((t := self.store.get(i)) and (t.analysis or {}).get("grid_source") == "mixxx")]
+            if stale:
+                job.say(f"{len(stale)} 首以前按 Mixxx 的网格切的段落，按自己的网格重切 …")
+                for i in stale:
+                    self.library.enqueue(i)
+                self._wait_analysis(job, 0.3, 1.0, "按自己的网格重切段落")
 
-        # 3 Mixxx 扫描 + 分析（Mixxx 的网格是同步的依据）
-        job.step(2)
-        self._sync(job, ids, settle)
-        self._wait_analysis(job, 0.8, 1.0, "按 Mixxx 的网格重新切小节")
+        if not self.builtin:
+            # 3 Mixxx 扫描 + 分析（Mixxx 的网格是同步的依据）
+            step("Mixxx 分析")
+            self._sync(job, ids, settle)
+            self._wait_analysis(job, 0.8, 1.0, "按 Mixxx 的网格重新切小节")
 
-        # 4 网格核对：Mixxx 把网格放在反拍上的，换成自估网格并锁定
-        job.step(3)
-        fix = self.grid_fix_plan(ids)
-        if fix:
-            job.say(f"{len(fix)} 首的 Mixxx 网格对不上 kick，自动校正（先备份 Mixxx 曲库）")
-            self._fix_grids(job, ids)
-        else:
-            job.say("网格都对得上")
-        job.sub(1.0)
+            # 4 网格核对：Mixxx 把网格放在反拍上的，换成自估网格并锁定
+            step("网格核对")
+            fix = self.grid_fix_plan(ids)
+            if fix:
+                job.say(f"{len(fix)} 首的 Mixxx 网格对不上 kick，自动校正（先备份 Mixxx 曲库）")
+                self._fix_grids(job, ids)
+            else:
+                job.say("网格都对得上")
+            job.sub(1.0)
 
         # 5 打碟谱 → set，并校验。谱上的第 1 小节就是你在 Engine DJ 里打 Hot Cue 1 的位置：
         #   小节相位和这里自动估的不同时，按谱写回曲库（确认过的小节线），重新切段落后再转一次
-        job.step(4)
-        conv = convert(plan, self.lib_tracks(ids), source=path.name)
+        step("生成 set")
+        conv = convert(plan, self.lib_tracks(ids), source=path.name, keylock_note=not self.builtin)
         moved = []
         for pt, lt, al in zip(plan.tracks, conv.matches, conv.alignments):
             if lt and al and al.rephase:
@@ -839,7 +912,7 @@ class Studio:
         if moved:
             job.say(f"小节线按谱定：{'、'.join(moved)}；重新切段落 …")
             self._wait_analysis(job, 0.1, 0.9, "按谱的小节线重新切段落")
-            conv = convert(plan, self.lib_tracks(ids), source=path.name)
+            conv = convert(plan, self.lib_tracks(ids), source=path.name, keylock_note=not self.builtin)
         for n in conv.notes:
             job.say(("!! " if n.level == "error" else "提示 " if n.level == "warn" else "  ") + str(n))
         if not conv.ok or conv.set is None:
@@ -852,16 +925,22 @@ class Studio:
             raise StudioError("生成的 set 校验没通过：\n" + "\n".join(errs))
         job.say(f"set「{s.name}」已生成（{s.id}），约 {c.duration / 60:.1f} 分钟")
 
-        # 6 准备 Mixxx：部署引擎、写 AutoDJ 队列、启动 Mixxx、等引擎上线
-        job.step(5)
-        self._prepare(job, s.id, settle)
+        if self.builtin:
+            step("准备内置引擎")
+            self._prepare_builtin(job, s.id)
+        else:
+            # 6 准备 Mixxx：部署引擎、写 AutoDJ 队列、启动 Mixxx、等引擎上线
+            step("准备 Mixxx")
+            self._prepare(job, s.id, settle)
         return {"set": s.id, "duration": c.duration,
                 "notes": [vars(n) for n in conv.notes if n.level != "info"],
                 "issues": [{"level": i.level, "where": i.where, "msg": i.msg} for i in c.issues]}
 
     # ------------------------------------------------------------ 播放
 
-    def play(self, set_id: str) -> Progress:
+    def play(self, set_id: str, speed: float = 1.0, from_transition: int = 0) -> Progress:
+        if self.builtin:  # 内置引擎：倍速、从第 k 段过渡开始都可以
+            return self.rehearse(set_id, speed, from_transition, builtin=True)
         if self.conductor and self.conductor.running:
             raise StudioError("正在播放或预演，先停下")
         self._rehearsal = None
@@ -912,7 +991,7 @@ class Studio:
         tracks[0] = tracks[0].model_copy(update={"start": max(1.0, s.transitions[k].start - self.REHEARSAL_LEAD_BARS)})
         return s.model_copy(update={"id": f"{s.id}-from{from_transition}", "tracks": tracks, "transitions": s.transitions[k:]})
 
-    def rehearse(self, set_id: str, speed: float = 1.0, from_transition: int = 0) -> Progress:
+    def rehearse(self, set_id: str, speed: float = 1.0, from_transition: int = 0, builtin: bool = False) -> Progress:
         """在 Node 模拟器里按这套 set 跑一遍（真正的 DJStudio.js，假 Mixxx，没有声音），网页演出页照常显示。
         曲目的时长 / BPM / 网格用和真机一样的解析结果，所以小节、过渡时刻和旋钮动作与真机一致。"""
         if self.conductor and self.conductor.running:
@@ -920,25 +999,27 @@ class Studio:
         if self.job and self.job.state == "running":
             raise StudioError(f"任务进行中：{self.job.name}")
         if self.rehearsal_link_factory is _sim_rehearsal_link and shutil.which("node") is None:
-            raise StudioError("预演需要 Node.js（brew install node）")
+            raise StudioError("内置引擎 / 预演要用 Node.js（brew install node）")
         s = self.rehearsal_set(self.load(set_id), from_transition)
         c = self.compile(s)
         if not c.ok:
             raise StudioError("set 校验没通过")
-        rows = []
-        for t, info in zip(s.tracks, c.tracks):
-            tr = self.store.get(t.id)
-            rows.append({"id": t.id, "dur": info.grid.duration, "bpm": info.grid.bpm, "first_beat": info.grid.first_beat,
-                         "path": tr.path if tr else None})
-        link = self.rehearsal_link_factory(rows, speed)
+        link = self.rehearsal_link_factory(self._sim_rows(s, c), speed)
         link.sim({"cmd": "queue", "ids": [t.id for t in s.tracks]})
         client = EngineClient(link)
         if not client.wait_until(client.online, 5):
             link.close()
             raise StudioError("模拟器没有启动")
-        self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition}
-        cond = Conductor(client, c, on_progress=lambda p: self.emit("progress", p.to_dict()),
-                         on_log=lambda line: self.emit("log", line))
+        self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin}
+        log_path = self.cfg.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{set_id}.log" if builtin else None
+
+        def on_log(line: str) -> None:
+            if log_path:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            self.emit("log", line)
+
+        cond = Conductor(client, c, on_progress=lambda p: self.emit("progress", p.to_dict()), on_log=on_log)
         self.conductor = cond
 
         def reap() -> None:  # 预演结束后留几秒最后画面，再关模拟器
@@ -957,4 +1038,5 @@ class Studio:
     def probe(self) -> Job:
         from .probe import run_probe
 
+        self._need_mixxx("真机探测")
         return self.start_job("真机探测", lambda job: run_probe(self, job))

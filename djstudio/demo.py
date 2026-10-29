@@ -34,7 +34,7 @@ def setup_demo(root: Path, speed: float = 8.0) -> Studio:
     mixxx_dir = root / "mixxx"
     mixxx_dir.mkdir(exist_ok=True)
     lib = root / "Music" / "DJStudio"
-    cfg = Config(home=root / "home", library=lib, mixxx_dir=mixxx_dir, browse_roots=[root, Path.home()])
+    cfg = Config(home=root / "home", library=lib, mixxx_dir=mixxx_dir, browse_roots=[root, Path.home()], engine="mixxx")
     fresh_db = not cfg.mixxx_db.exists()
     if fresh_db:
         fakedb.create(cfg.mixxx_db, [lib])

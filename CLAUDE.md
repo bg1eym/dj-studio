@@ -2,6 +2,8 @@
 
 - 用户 Qiang 用**中文**交流；在学 techno DJ，现场碟机 Denon Prime 4+。界面文案、日志、文档都用中文。
 - 这是 Mixxx 驱动的自动打碟 Web App。先读 README.md 和 docs/ARCHITECTURE.md。
+- **默认是内置引擎**（`DJSTUDIO_ENGINE=builtin`）：DJStudio.js 在内置的模拟 Mixxx 里跑，不碰用户本机的 Mixxx。用户明确说过：
+  现在只要看 EQ / 效果器怎么变，不要调用本机的 Mixxx（不稳定）。连 Mixxx 的模式保留（`DJSTUDIO_ENGINE=mixxx`），别改回默认。
 - **运行时零 AI 依赖**是硬约束：分析、编译、执行必须是确定性代码，结果能在网页上手动改。
 
 ## 开发

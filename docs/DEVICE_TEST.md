@@ -1,5 +1,8 @@
 # 第一次上机（Mac + Mixxx）
 
+**只有连 Mixxx 时（`DJSTUDIO_ENGINE=mixxx djstudio`）才需要这份文档。** 默认的内置引擎不碰 Mixxx，只要装了 node（`brew install node`）：
+放进打碟谱 → 等进度条 → ▶ 开始演出。
+
 这些在云端 / 模拟器里都无法验证，需要在真机上逐条确认。每一步做完把输出发给 Claude。
 
 ## 0. 安装并体检

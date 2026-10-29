@@ -64,6 +64,7 @@ def create_app(studio: Studio) -> FastAPI:
             "analysis": studio.library.queue_state(),
             "mapping_version": mapping_version(),
             "version": version_text(),
+            "engine_mode": "builtin" if studio.builtin else "mixxx",
         }
 
     @app.get("/api/state")
@@ -337,8 +338,12 @@ def create_app(studio: Studio) -> FastAPI:
         return studio.prepare(sid, body.get("settle")).to_dict()
 
     @app.post("/api/sets/{sid}/play")
-    def api_play(sid: str) -> dict[str, Any]:
-        return studio.play(sid).to_dict()
+    def api_play(sid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        # 内置引擎可以倍速、从第 k 段过渡开始；连 Mixxx 时只能从头按原速
+        speed = float(body.get("speed") or 1.0)
+        if not 0.25 <= speed <= 16:
+            raise HTTPException(400, "倍速应在 0.25–16 之间")
+        return studio.play(sid, speed, int(body.get("from") or 0)).to_dict()
 
     @app.post("/api/stop")
     def api_stop() -> dict[str, Any]:
