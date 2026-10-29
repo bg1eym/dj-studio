@@ -1,0 +1,23 @@
+name: probe
+on:
+  push:
+    branches: [ci-probe]
+permissions:
+  contents: write
+jobs:
+  probe:
+    strategy:
+      matrix:
+        os: [macos-15-intel, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: info
+        run: |
+          { uname -a; sw_vers; sysctl -n hw.ncpu; df -h /; xcodebuild -version; which python3; python3 --version; } > info-${{ matrix.os }}.txt 2>&1
+          cat info-${{ matrix.os }}.txt
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ci-probe -R ${{ github.repository }} >/dev/null 2>&1 || gh release create ci-probe -R ${{ github.repository }} --prerelease --title "CI probe" --notes "CI probe" --target ci-probe
+          gh release upload ci-probe info-${{ matrix.os }}.txt -R ${{ github.repository }} --clobber
