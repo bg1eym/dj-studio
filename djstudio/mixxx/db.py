@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .beats import MixxxGrid, camelot, decode, is_metadata_grid
+from .beats import MixxxGrid, camelot, decode, encode_grid_v2, is_metadata_grid
 
 AUTODJ_NAME = "Auto DJ"  # trackschema.h AUTODJ_TABLE；Mixxx 按名字找这张表
 AUTODJ_HIDDEN = 1  # PlaylistDAO::PLHT_AUTO_DJ（2 = 历史记录 PLHT_SET_LOG）
@@ -173,6 +173,21 @@ class MixxxDB:
                     c.execute("INSERT INTO PlaylistTracks (playlist_id, track_id, position, pl_datetime_added)"
                               " VALUES (?, ?, ?, CURRENT_TIMESTAMP)", (pid, tid, pos))
                 c.execute("UPDATE Playlists SET date_modified = CURRENT_TIMESTAMP WHERE id = ?", (pid,))
+
+    # ------------------------------------------------------------ 网格校正
+
+    def write_grid(self, track_id: int, bpm: float, first_beat_s: float) -> None:
+        """把恒定网格写进库并锁定 BPM（bpm_lock=1：Mixxx 的分析器不会再改它，analyzerbeats.cpp:130）。
+        调用方必须保证 Mixxx 已退出。sub_version 保留原值（空的话写 djstudio），免得被当成 BPM 标签网格。"""
+        with closing(self._rw()) as c:
+            with c:
+                r = c.execute("SELECT samplerate, beats_sub_version FROM library WHERE id = ?", (track_id,)).fetchone()
+                if r is None or not r["samplerate"]:
+                    raise MixxxDBError(f"Mixxx 库里没有曲目 {track_id} 或缺采样率")
+                blob = encode_grid_v2(bpm, first_beat_s, int(r["samplerate"]))
+                c.execute("UPDATE library SET beats = ?, beats_version = 'BeatGrid-2.0', beats_sub_version = ?, "
+                          "bpm = ?, bpm_lock = 1 WHERE id = ?",
+                          (blob, r["beats_sub_version"] or "djstudio", bpm, track_id))
 
     # ------------------------------------------------------------ 备份
 

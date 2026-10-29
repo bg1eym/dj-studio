@@ -19,7 +19,7 @@ import numpy as np
 
 from ..grid import BEATS_PER_BAR, Grid
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 N_FFT = 1024
 HOP = 256
 PEAK_RATE = 50  # 波形每秒点数
@@ -183,6 +183,64 @@ def estimate_grid(fr: Frames, bpm_range: tuple[float, float] = (100.0, 160.0)) -
     return float(bpm), float(t0), conf
 
 
+# ---------------------------------------------------------------- kick 相位精修
+
+KICK_BAND = (30.0, 150.0)   # kick 的音高从一两百 Hz 扫到 50Hz 左右；上限太低会漏掉起音（偏晚 15–40ms）
+KICK_ONSET_FRAC = 0.2       # 起音点 = 包络从谷底升到峰值 20% 处（与 Mixxx 自己放对的网格相差 ≈6ms）
+
+
+def kick_phase(x: np.ndarray, sr: int, bpm: float, first_beat: float) -> tuple[float, float]:
+    """kick 起音相对网格拍点的位置（拍）与显著度（峰 / 谷）。
+
+    STFT 帧（11.6ms）对拍网格来说太粗：不同曲子的网格会因此差出十几毫秒，叠两个 kick 时听得出。
+    做法：低频带（软边带通）的解析信号包络（Hilbert，没有 2f 纹波），按网格把每拍前后 1/4 拍切出来，
+    取有 kick 的拍求平均；在网格线 -50..+60ms 内找 kick 峰，往回找包络升到 20% 的位置 = 起音点。
+    Mixxx 自己放对的网格也在起音点上（RW2023 #10 / #14 实测差 +6.5 / -6.1ms），所以校正后的网格与没校正的一致。
+    找不到明显的 kick（显著度 < 1.5）就返回 0，不动网格。
+    """
+    n = len(x)
+    nfft = 1 << (n - 1).bit_length()  # 2 的幂，长度是大质数时 FFT 会慢几十倍
+    X = np.fft.rfft(x, nfft)
+    f = np.fft.rfftfreq(nfft, 1.0 / sr)
+    edge = 10.0  # 带通两侧 20Hz 的余弦过渡，减轻砖墙滤波的前振铃
+    w = (np.sin(0.5 * np.pi * np.clip((f - KICK_BAND[0] + edge) / (2 * edge), 0, 1)) ** 2
+         * np.sin(0.5 * np.pi * np.clip((KICK_BAND[1] + edge - f) / (2 * edge), 0, 1)) ** 2)
+    Z = np.zeros(nfft, dtype=complex)
+    Z[: len(X)] = X * w
+    Z[1: nfft // 2] *= 2
+    lo = np.abs(np.fft.ifft(Z)[:n])
+    hop = max(1, int(round(sr * 0.0005)))
+    env = lo[: len(lo) // hop * hop].reshape(-1, hop).mean(axis=1)
+    dt = hop / sr
+    beat = 60.0 / bpm
+    half = int(0.25 * beat / dt)
+    segs = []
+    for k in range(int(np.ceil(-first_beat / beat)) + 1, int((n / sr - first_beat) / beat)):
+        c = int(round((first_beat + k * beat) / dt))
+        if c - half >= 0 and c + half < len(env):
+            segs.append(env[c - half:c + half])
+    if len(segs) < 16:
+        return 0.0, 0.0
+    S = np.array(segs)
+    pk = S.max(axis=1)
+    m = S[pk > np.percentile(pk, 40)].mean(axis=0)  # 只取有 kick 的拍（breakdown 不算）
+    t = (np.arange(-half, half) + 0.5) * dt
+    sel = np.nonzero((t > -0.05) & (t < 0.06))[0]
+    i = int(sel[np.argmax(m[sel])])
+    j0 = max(1, i - int(0.08 / dt))
+    base = float(m[j0:i + 1].min())
+    sharp = float(m[i] / base) if base > 0 else 0.0
+    if sharp < 1.5:
+        return 0.0, sharp
+    thr = base + KICK_ONSET_FRAC * (m[i] - base)
+    j = i
+    while j > j0 and m[j - 1] > thr:
+        j -= 1
+    a, b = m[j - 1], m[j]
+    tj = t[j] - dt * ((b - thr) / (b - a) if b != a else 0.0)
+    return float(tj / beat), sharp
+
+
 # ---------------------------------------------------------------- 小节特征与段落
 
 def beat_features(fr: Frames, grid: Grid) -> np.ndarray:
@@ -290,7 +348,10 @@ def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = Non
     bar1 = 用户确认过的第 1 小节起点（秒）；给了就不用自估的小节相位。"""
     fr = stft_bands(x, sr)
     wf = waveform(x, fr)
-    own_bpm, own_first, own_conf = estimate_grid(fr)
+    own_bpm, own_first_raw, own_conf = estimate_grid(fr)
+    # 精修：把自估网格线放到 kick 起音点上（与其他曲子同一标准）
+    own_kick, own_kick_sharp = kick_phase(x, sr, own_bpm, own_first_raw)
+    own_first = (own_first_raw + own_kick * 60.0 / own_bpm) % (60.0 / own_bpm)
     if mixxx_grid and mixxx_grid[0] > 0:
         bpm, first, src = mixxx_grid[0], mixxx_grid[1], "mixxx"
     else:
@@ -311,7 +372,8 @@ def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = Non
         "downbeat_est": db_est,
         "downbeat_conf": round(db_conf, 3),
         "bar1": round(g.bar_time(1), 5),
-        "own_grid": {"bpm": round(own_bpm, 3), "first_beat": round(own_first, 5), "conf": round(own_conf, 3)},
+        "own_grid": {"bpm": round(own_bpm, 3), "first_beat": round(own_first, 5), "conf": round(own_conf, 3),
+                     "kick_sharpness": round(own_kick_sharp, 2)},
         "bars": bars,
         "sections": secs,
         "cues": cues,
@@ -334,12 +396,18 @@ def grid_agreement(mixxx: tuple[float, float], own: tuple[float, float]) -> dict
     beat = 60.0 / mb
     ph = ((of - mf) / beat) % 1.0
     ph = ph - 1 if ph > 0.5 else ph
-    ok = abs(ratio - 1) < 0.01 and abs(ph) < 0.1
+    # 两个 kick 相差超过约 0.04 拍（135 BPM 时 ≈18ms）叠在一起就听得出来
+    ok = abs(ratio - 1) < 0.01 and abs(ph) < 0.04
     note = ""
     for r, name in ((2 / 3, "Mixxx 判成了 2/3"), (1.5, "Mixxx 判成了 1.5 倍"), (0.5, "Mixxx 判成了一半"),
                     (2.0, "Mixxx 判成了两倍")):
         if abs(ratio - r) < 0.02:
             note = name
     if not ok and not note:
-        note = "BPM 或相位与自估不一致" if abs(ratio - 1) >= 0.01 else f"相位差 {ph:+.2f} 拍"
+        if abs(ratio - 1) >= 0.01:
+            note = "BPM 与自估不一致"
+        elif abs(ph) > 0.35:
+            note = f"Mixxx 网格在反拍上（差 {ph:+.2f} 拍）：同步时两个 kick 会错开半拍"
+        else:
+            note = f"Mixxx 网格与 kick 差 {ph:+.2f} 拍"
     return {"ok": ok, "ratio": round(ratio, 4), "phase": round(ph, 3), "note": note}

@@ -189,6 +189,14 @@ def create_app(studio: Studio) -> FastAPI:
             raise HTTPException(404, "文件不存在")
         return FileResponse(p)
 
+    @app.get("/api/grids/plan")
+    def api_grid_plan() -> list[dict[str, Any]]:
+        return studio.grid_fix_plan()
+
+    @app.post("/api/grids/fix")
+    def api_grid_fix(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        return studio.fix_grids(body.get("track_ids")).to_dict()
+
     @app.post("/api/sync")
     def api_sync(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         return studio.sync_mixxx(body.get("track_ids")).to_dict()

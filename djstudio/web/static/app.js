@@ -210,6 +210,9 @@ function renderLibrary() {
       h("button", { onclick: () => guard(async () => { await api("POST", "/api/sync", {}); toast("已开始同步到 Mixxx（见下方任务日志）"); }) },
         "同步到 Mixxx"),
       h("span", { class: "dim" }, "同步 = 让 Mixxx 扫描托管曲库并分析新歌（会重启 Mixxx）"),
+      S.tracks.some((t) => t.grid_check && !t.grid_check.ok)
+        ? h("button", { class: "danger", onclick: () => fixGrids(null) },
+          `校正 ${S.tracks.filter((t) => t.grid_check && !t.grid_check.ok).length} 首存疑网格`) : null,
       h("span", { class: "grow" }),
       aq && (aq.busy || aq.queued.length) ? h("span", { class: "dim" }, `分析中… 还有 ${aq.queued.length + (aq.busy ? 1 : 0)} 首`) : null,
       h("input", { placeholder: "搜索", id: "track-q", oninput: renderTrackTable }),
@@ -335,6 +338,7 @@ async function renderTrackDetail(keepView = false) {
       g ? h("label", { class: "dim" }, h("input", { type: "checkbox", checked: t.bar1_confirmed,
         onchange: (e) => guard(() => api("PATCH", "/api/tracks/" + t.id, { bar1_confirmed: e.target.checked })) }), " 小节线已确认") : null,
       h("button", { class: "small", onclick: () => guard(async () => { await api("POST", `/api/tracks/${t.id}/reanalyze`); toast("已排队重新分析"); }) }, "重新分析"),
+      t.grid_check && !t.grid_check.ok ? h("button", { class: "small danger", onclick: () => fixGrids([t.id]) }, "校正网格") : null,
     ),
     h("div", { class: "dim", style: "margin-top:6px" },
       g ? `网格：${g.bpm.toFixed(3)} BPM（${g.source === "mixxx" ? "Mixxx" : "自估，Mixxx 分析后以 Mixxx 为准"}），共 ${g.bars} 小节。` : "还没有网格。",
@@ -360,6 +364,17 @@ async function renderTrackDetail(keepView = false) {
     requestAnimationFrame(tick);
   };
   tick();
+}
+
+async function fixGrids(ids) {
+  await guard(async () => {
+    const plan = (await api("GET", "/api/grids/plan")).filter((p) => !ids || ids.includes(p.id));
+    if (!plan.length) { toast("没有需要校正的网格"); return; }
+    const msg = plan.map((p) => `· ${p.title}：${p.note}`).join("\n");
+    if (!confirm(`把这些歌的 Mixxx 网格换成自估网格（网格线对准 kick，并锁定 BPM）？会退出 Mixxx 并先备份曲库。\n\n${msg}`)) return;
+    await api("POST", "/api/grids/fix", { track_ids: ids });
+    toast("校正中…（见任务日志）");
+  });
 }
 
 // ------------------------------------------------------------------ 任务面板

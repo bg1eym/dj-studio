@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .compiler import Compiled, TrackInfo, compile_set
+from .compiler import Compiled, Issue, TrackInfo, compile_set
 from .config import Config, get_config
 from .engine.client import EngineClient, EngineError
 from .engine.conductor import Conductor, Progress
@@ -150,6 +150,12 @@ class Studio:
             return TrackInfo(t.id, t.display, Grid(g.bpm, g.first_beat, db, g.duration))
 
         c = compile_set(s, resolve)
+        # Mixxx 网格与 kick 对不上：同步会对齐网格而不是 kick，过渡里两个 kick 会错开
+        for k, (st, t) in enumerate(zip(s.tracks, tracks)):
+            gc = (t.analysis or {}).get("grid_check") if t else None
+            if t and t.id in mx and mx[t.id].analyzed and gc and not gc.get("ok"):
+                c.issues.append(Issue("error", f"#{k + 1} {st.title or t.display}",
+                                      f"网格存疑：{gc.get('note')}。在曲库页点「校正网格」"))
         # 把「不在 Mixxx 库」说清楚
         for k, (st, t) in enumerate(zip(s.tracks, tracks)):
             if t is not None and t.id not in mx:
@@ -483,6 +489,51 @@ class Studio:
         ch = process.set_cfg_value(cfg_path, "[ControllerPreset]", key, want)
         ch |= process.set_cfg_value(cfg_path, "[Controller]", key, "1")
         job.say(f"控制器 {key}：映射 = DJ Studio" + ("（已更新 mixxx.cfg）" if ch else "（已是）"))
+
+    # ------------------------------------------------------------ 网格校正
+
+    def grid_fix_plan(self, track_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        """哪些歌的 Mixxx 网格需要换成自估网格（自估网格的线放在 kick 起音上，见 analysis.kick_phase）。"""
+        tracks = [t for t in self.store.all() if track_ids is None or t.id in track_ids]
+        mx = self._mixxx_tracks(tracks)
+        plan = []
+        for t in tracks:
+            m = mx.get(t.id)
+            a = t.analysis or {}
+            gc = a.get("grid_check")
+            if not m or not m.analyzed or not gc or gc.get("ok"):
+                continue
+            own = a["own_grid"]
+            # BPM 一致（比值 ≈1）就保留 Mixxx 的 BPM 只换相位；Mixxx 判错倍数时整个换成自估
+            bpm = m.bpm if abs(gc["ratio"] - 1) < 0.01 else own["bpm"]
+            plan.append({"id": t.id, "mixxx_id": m.id, "title": t.display, "note": gc.get("note"),
+                         "bpm": bpm, "first_beat": own["first_beat"]})
+        return plan
+
+    def fix_grids(self, track_ids: list[str] | None = None) -> Job:
+        return self.start_job("校正网格", lambda job: self._fix_grids(job, track_ids))
+
+    def _fix_grids(self, job: Job, track_ids: list[str] | None) -> dict[str, Any]:
+        plan = self.grid_fix_plan(track_ids)
+        if not plan:
+            job.say("没有需要校正的网格")
+            return {"fixed": 0}
+        self._ensure_quit(job)
+        bk = self.mixxx.backup(self.cfg.home / "backups")
+        job.say(f"已备份 Mixxx 曲库 → {bk.name}")
+        for p in plan:
+            self.mixxx.write_grid(p["mixxx_id"], p["bpm"], p["first_beat"])
+            job.say(f"  {p['title']}：{p['note']} → {p['bpm']:.3f} BPM，首拍 {p['first_beat']:.4f}s（已锁定）")
+            t = self.store.get(p["id"])
+            if t and t.bar1_confirmed and t.bar1 is not None:
+                # 在旧网格上确认的小节线可能正好落在新网格两拍中间：取整会偏一拍，只能请用户重新确认
+                off = (t.bar1 - p["first_beat"]) * p["bpm"] / 60.0
+                if abs(off - round(off)) > 0.25:
+                    self.store.update(p["id"], bar1_confirmed=False)
+                    job.say("    ⚠ 之前确认的小节线不在新网格的拍点上，已取消确认，请在曲库页重新核对小节线")
+            self.library.enqueue(p["id"])  # 按新网格重新切小节、重新核对
+        self.library.wait_idle(600)
+        return {"fixed": len(plan)}
 
     # ------------------------------------------------------------ 播放
 

@@ -1,6 +1,6 @@
 """服务层集成测试：导入音频 → 分析 → （假）Mixxx 库 → 编译 → 准备 → 在模拟器里播完整套。"""
 import json
-import sqlite3  # noqa: F401
+import sqlite3
 from pathlib import Path
 import shutil
 import time
@@ -234,3 +234,46 @@ def test_sync_mixxx_analysis_loads_each_track_once(tmp_path, monkeypatch):
     mx = studio._mixxx_tracks(tracks)
     assert all(m.analyzed for m in mx.values())
     studio.disconnect()
+
+
+def test_offbeat_mixxx_grid_detected_and_fixed(env):
+    """Mixxx 把网格放到反拍（真曲上实测到的情况）→ 网格存疑 → 校验报错 → 校正写库并锁定 → 通过。"""
+    from djstudio.mixxx.beats import decode
+
+    studio, src, state = env
+    studio.library.import_paths([str(src)])
+    assert studio.library.wait_idle(60)
+    by_name = {t.path.split("/")[-1]: t for t in studio.store.all()}
+    db = studio.cfg.mixxx_db
+    ids = {}
+    for name, t in by_name.items():
+        bpm, fb, _ = SPECS[name]
+        off = fb + 0.5 * 60 / bpm if name == "b.wav" else fb  # b 的 Mixxx 网格偏半拍
+        ids[name] = fake_mixxxdb.add_track(db, t.path, t.duration, bpm, off, samplerate=22050, title=name)
+    for t in by_name.values():
+        studio.library.enqueue(t.id)
+    assert studio.library.wait_idle(60)
+    b = studio.store.get(by_name["b.wav"].id)
+    gc = b.analysis["grid_check"]
+    assert not gc["ok"] and "反拍" in gc["note"], gc
+    assert studio.store.get(by_name["a.wav"].id).analysis["grid_check"]["ok"]
+
+    s = SetFile.model_validate({"schema": "djset/2", "id": "g", "tracks": [{"id": by_name["a.wav"].id},
+                                {"id": by_name["b.wav"].id}], "transitions": [{"technique": "instant", "start": 41}]})
+    assert any("网格存疑" in i.msg for i in studio.compile(s).issues)
+
+    studio.store.update(b.id, bar1_confirmed=True)  # 用户在反拍网格上确认过小节线
+    plan = studio.grid_fix_plan()
+    assert [p["title"] for p in plan] == [b.display]
+    job = wait_job(studio.fix_grids(), 60)
+    assert job.state == "ok", "\n".join(job.log)
+    assert not studio.store.get(b.id).bar1_confirmed and any("重新核对小节线" in x for x in job.log)
+    m = studio.mixxx.tracks_by_location([b.path])[b.path]
+    assert m.bpm_lock and m.analyzed
+    g = decode(sqlite3.connect(db).execute("SELECT beats FROM library WHERE id=?", (ids["b.wav"],)).fetchone()[0],
+               "BeatGrid-2.0", 22050)
+    beat = 60 / SPECS["b.wav"][0]
+    ph = ((g.first_beat - SPECS["b.wav"][1]) / beat + 0.5) % 1 - 0.5
+    assert abs(ph) < 0.05, ph  # 校正后网格线回到 kick 上
+    assert studio.store.get(b.id).analysis["grid_check"]["ok"]
+    assert not any("网格存疑" in i.msg for i in studio.compile(s).issues)

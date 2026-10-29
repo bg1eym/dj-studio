@@ -114,7 +114,7 @@ class SimLink(Link):
         self.stderr_lines: list[str] = []
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._read_err, daemon=True).start()
-        self.sim({"cmd": "library", "tracks": library})
+        self.sim({"cmd": "library", "tracks": library}, timeout=60)  # 真 Mixxx 测试台冷启动要几秒
 
     def _read(self) -> None:
         assert self._p.stdout
