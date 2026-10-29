@@ -65,15 +65,18 @@ jobs:
           key: engine-${{ matrix.arch }}-${{ github.run_number }}-${{ github.run_attempt }}
           restore-keys: engine-${{ matrix.arch }}-
       - name: 编引擎
-        run: |
-          set -o pipefail
-          ccache --max-size=2G
-          tools/mixxx-engine/build.sh "$RUNNER_TEMP/mixxx" 2>&1 | tee engine-build.log
-          ccache --show-stats
         env:
+          GH_TOKEN: ${{ github.token }}
           CMAKE_ARGS_EXTRA: >-
             -DCOREAUDIO=ON -DQT6=ON -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: |
+          set -o pipefail
+          ccache --max-size=2G
+          # 每 5 分钟把编译进度传到 ci-logs（这边看不到 Actions 的日志）
+          ( while sleep 300; do { echo "== $GITHUB_SHA engine-${{ matrix.arch }} building $(date -u)"; tail -n 40 engine-build.log; } > engine-${{ matrix.arch }}.log; gh release upload ci-logs engine-${{ matrix.arch }}.log --clobber >/dev/null 2>&1; done ) &
+          tools/mixxx-engine/build.sh "$RUNNER_TEMP/mixxx" 2>&1 | tee engine-build.log
+          ccache --show-stats
       - uses: actions/cache/save@v4
         if: always()
         with:
