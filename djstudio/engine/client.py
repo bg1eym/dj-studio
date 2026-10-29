@@ -34,6 +34,23 @@ class DeckState:
                    int(a[7]) if len(a) > 7 else 0)
 
 
+@dataclass
+class MixerState:
+    """一个通道的旋钮读数（Mixxx 原生值，引擎 0.4.0 起）。"""
+
+    hi: float
+    mid: float
+    lo: float
+    filter: float
+    echo: float
+    reverb: float
+    vu: float
+
+    @classmethod
+    def from_list(cls, a: list[Any]) -> "MixerState":
+        return cls(*(float(v) for v in a[:7]))
+
+
 class EngineClient:
     STATUS_TIMEOUT = 1.5  # 秒没有状态帧 → 视为失联
 
@@ -129,6 +146,12 @@ class EngineClient:
         if not st:
             return None
         return DeckState.from_list(st["d"][d - 1])
+
+    def mixer(self, d: int) -> MixerState | None:
+        st = self.status
+        if not st or "m" not in st:
+            return None
+        return MixerState.from_list(st["m"][d - 1])
 
     def program(self) -> dict[str, Any] | None:
         return self.status.get("pg") if self.status else None

@@ -102,10 +102,31 @@ function getValue(group, key) {
       case "bpm": return t ? t.bpm * d.rate : 0;
       case "beat_distance": { if (!t) return 0; const b = beatPos(d); return b - Math.floor(b); } // 每个 buffer 更新
       case "loop_enabled": return d.loop ? 1 : 0;
+      case "vu_meter": return simLevel(d);
     }
+  }
+  if ((group === "[Master]" || group === "[Main]") && key === "vu_meter") {
+    const e = [1, 2].reduce((a, n) => a + storeGet(`[Channel${n}]`, "volume") * simEnergy(decks[n]), 0);
+    return Math.min(1, 0.85 * Math.sqrt(e));
   }
   return storeGet(group, key);
 }
+
+// 电平表：模拟器没有音频，按 EQ / 滤波 / 拍内位置（kick）合成一个看起来合理的值。
+// 真 Mixxx 的 [ChannelN],vu_meter 在推子前、EQ 与滤波之后（enginedeck.cpp:69-81）；这里同样不乘推子。
+function simEnergy(d) {
+  if (!d.track || !d.playing) return 0;
+  const eq = `[EqualizerRack1_[Channel${d.n}]_Effect1]`;
+  let lo = 0.5 * Math.min(4, storeGet(eq, "parameter1"));
+  let mid = 0.3 * Math.min(4, storeGet(eq, "parameter2"));
+  let hi = 0.2 * Math.min(4, storeGet(eq, "parameter3"));
+  const f = storeGet(`[QuickEffectRack1_[Channel${d.n}]]`, "super1");
+  const k = Math.min(1, Math.abs(f - 0.5) * 2);
+  if (f < 0.5) { hi *= 1 - k; mid *= 1 - 0.7 * k; } else { lo *= 1 - k; mid *= 1 - 0.7 * k; }
+  const b = beatPos(d), frac = b - Math.floor(b);
+  return (lo * (0.35 + 0.65 * Math.exp(-frac * 7)) + mid + hi);
+}
+function simLevel(d) { return Math.min(1, 0.85 * Math.sqrt(simEnergy(d))); }
 
 // EngineBuffer::processSeek + BpmControl::getBeatMatchPosition：把 d 的相位对齐到另一个在播 deck，就近 ±0.5 拍
 function applyPhaseSync(d) {

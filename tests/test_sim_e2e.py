@@ -11,7 +11,7 @@ from djstudio.engine.conductor import Conductor
 from djstudio.engine.link import SimLink
 from djstudio.setfile import SetFile
 
-from .conftest import make_info
+from .conftest import lanes_mismatch, make_info
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="需要 node")
 
@@ -121,6 +121,27 @@ def test_status_lags_behind_done(rig):
     run(cond, 90)
     log = "\n".join(cond.progress.log)
     assert cond.progress.stage == "done", log + f"\n{cond.progress.error}"
+
+
+def test_status_reports_mixer_following_lanes(rig):
+    """引擎 0.4.0：状态里的旋钮读数（从控件读回）跟着自动化曲线走——网页混音台显示的就是这些值。"""
+    link, client = rig
+    compiled = make_compiled()
+    p1 = compiled.programs[0]
+    sts = []
+    client.add_listener(lambda m: sts.append(m) if m.get("t") == "st" else None)
+    cond = Conductor(client, compiled)
+    run(cond, 90)
+    assert cond.progress.stage == "done", "\n".join(cond.progress.log)
+    checked, bad = lanes_mismatch(sts, p1)
+    assert checked > 50 and bad <= checked * 0.03, (checked, bad)
+    # 电平表：在播的 deck 有电平，停着的为 0；主输出有电平
+    live = [st for st in sts if st["d"][0][1] and not st["d"][1][1]]
+    assert live and all(st["m"][0][6] > 0 and st["m"][1][6] == 0 for st in live[:20])
+    assert any(st["mv"] > 0 for st in live)
+    # 装载时 AutoDJ 会把 crossfader 甩向在播一侧（引擎随后拨回）；两边都在播时必须在中间
+    both = [st for st in sts if st["d"][0][1] and st["d"][1][1]]
+    assert both and all(st["x"] == 0 for st in both)
 
 
 def test_engine_lost(rig):

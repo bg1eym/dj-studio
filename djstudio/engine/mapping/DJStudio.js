@@ -23,7 +23,7 @@
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.3.0";
+DJStudio.VERSION = "0.4.0";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -218,6 +218,28 @@ DJStudio.deckStatus = function (d) {
         Math.round(DJStudio.get(g, "file_bpm") * 100) / 100,
         Math.round(DJStudio.get(g, "volume") * 1000) / 1000,
         DJStudio.loadSeq[d]
+    ];
+};
+
+// 混音台读数（网页上画旋钮用）：[hi, mid, lo, filter, echo, reverb, vu]，都是 Mixxx 控件的原生值。
+// EQ 0..4（1 = 0dB），filter 0..1（0.5 = 关），echo / reverb = 效果单元对这个通道开着时的 mix，否则 0；
+// vu = [ChannelN],vu_meter（推子前、EQ / 滤波之后，enginedeck.cpp:69-81，0..1）
+DJStudio.r3 = function (v) { return Math.round(v * 1000) / 1000; };
+DJStudio.fxSend = function (d, name) {
+    var g = DJStudio.fxGroup(DJStudio.FX_UNIT[name]);
+    return DJStudio.get(g, "enabled") > 0 && DJStudio.get(g, "group_" + DJStudio.ch(d) + "_enable") > 0
+        ? DJStudio.r3(DJStudio.get(g, "mix")) : 0;
+};
+DJStudio.mixerStatus = function (d) {
+    var eq = DJStudio.eqGroup(d);
+    return [
+        DJStudio.r3(DJStudio.get(eq, "parameter3")),
+        DJStudio.r3(DJStudio.get(eq, "parameter2")),
+        DJStudio.r3(DJStudio.get(eq, "parameter1")),
+        DJStudio.r3(DJStudio.get(DJStudio.qfxGroup(d), "super1")),
+        DJStudio.fxSend(d, "echo"),
+        DJStudio.fxSend(d, "reverb"),
+        DJStudio.r3(DJStudio.get(DJStudio.ch(d), "vu_meter"))
     ];
 };
 
@@ -535,6 +557,9 @@ DJStudio.tick = function () {
             n: DJStudio.tickCount,
             up: DJStudio.now(),
             d: [DJStudio.deckStatus(1), DJStudio.deckStatus(2)],
+            m: [DJStudio.mixerStatus(1), DJStudio.mixerStatus(2)],
+            x: DJStudio.r3(DJStudio.get("[Master]", "crossfader")),
+            mv: DJStudio.r3(DJStudio.get("[Main]", "vu_meter")), // 主输出电平在 [Main]（[Master] 只有旧名 VuMeter 的别名，enginevumeter.cpp:20-29）
             pg: pr ? { id: pr.p.id, st: pr.st, tl: Math.round(pr.tl * 1000) / 1000, b: pr.bStarted ? 1 : 0 } : null,
             ld: DJStudio.loader ? DJStudio.loader.deck : 0,
             ad: DJStudio.get("[AutoDJ]", "enabled") > 0 ? 1 : 0

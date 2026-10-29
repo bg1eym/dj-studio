@@ -42,6 +42,8 @@
 | ✅ | 推子 `[Master],crossfader`（-1..1）；deck 朝向 `[ChannelN],orientation` 0=左 1=中 2=右。 | `engine/enginemixer.cpp:104`；`channels/enginechannel.h:15-19` |
 | ❌ | **推子模式必须是「加性」**：加性模式居中时两边增益都是 1，推到一侧时这一侧仍是 1；恒功率模式居中时两边都小于 1。AutoDJ 装载时会把推子甩到在播 deck 那一侧——恒功率下在播的 A 会突然变响。引擎 `init` 里把 `[Mixer Profile],xFaderMode` 设为 0（加性），`shutdown` 恢复。 | `enginexfader.cpp:6, 16-60`；`enginexfader.h:6-7`；`enginemixer.cpp:170-182` |
 | ⚠️ | 推钮类控件（ControlPushButton）不忽略重复写入：写两次 1 会触发两次。 | `control/controlpushbutton.cpp:10`；`control/control.cpp:293` |
+| ✅ | 电平表：通道 `[ChannelN],vu_meter` 在 pregain 与推子前效果（EQ、QuickEffect 滤波）之后、**推子之前**计算，0..1，每秒更新 30 次；主输出是 **`[Main],vu_meter`**——`[Master]` 下只有旧名 `VuMeter` 的别名，`[Master],vu_meter` 不存在（读出来恒为 0，测试台抓到的）。crossfader 仍是 `[Master],crossfader`（EngineMixer 用 `[Master]` 构造）。 | `engine/channels/enginedeck.cpp:69-81`；`engine/enginevumeter.cpp:10, 20-29`；`engine/enginemixer.cpp:104, 120`；`coreservices.cpp:491-496` |
+| ⚠️ | **ReplayGain 默认开启**（`[ReplayGain] ReplayGainEnabled` 缺省为真，分析器也默认开）：EnginePregain 把每首按 ReplayGain 值缩放到参考响度，没有 RG 值时用 DefaultBoost（默认 -6 dB）。现在的 techno 母带峰值都到满幅，测试台里没开 RG，长交接两首满音量叠加时主输出每 30 秒有上千个满幅样本；真机上开着 RG 就有余量。体检会检查这一项。 | `preferences/replaygainsettings.cpp:18, 45-48`；`engine/enginepregain.cpp:66-80` |
 
 ## 弹出与装载
 

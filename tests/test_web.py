@@ -50,3 +50,17 @@ def test_play_unprepared_rejected(client):
 def test_audio_only_for_known_tracks(client):
     assert client.get("/api/tracks/../../etc/passwd/audio").status_code == 404
     assert client.get("/api/tracks/deadbeef/audio").status_code == 404
+
+
+def test_live_view_assets_and_rehearsal_api(client):
+    assert "class LiveView" in client.get("/static/live.js").text
+    body = {"schema": "djset/2", "id": "x3", "tracks": [{"id": "a"}, {"id": "b"}],
+            "transitions": [{"technique": "instant", "start": 33, "b_in": 17}]}
+    client.put("/api/sets/x3", json=body)
+    # 预演从第 1 段过渡开始：截短的那份，A 从过渡前 8 小节起播
+    r = client.get("/api/sets/x3", params={"rehearse_from": 1}).json()
+    assert r["set"]["tracks"][0]["start"] == 25 and r["set"]["id"] == "x3-from1"
+    assert client.get("/api/sets/x3", params={"rehearse_from": 5}).status_code == 400
+    assert client.post("/api/sets/x3/rehearse", json={"speed": 100}).status_code == 400
+    r = client.post("/api/sets/x3/rehearse", json={"speed": 2})
+    assert r.status_code == 400 and "校验" in r.json()["error"]  # 曲目不在曲库：和真播一样先过校验

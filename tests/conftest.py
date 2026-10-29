@@ -20,3 +20,36 @@ def lib():
 @pytest.fixture
 def resolver(lib):
     return lambda t: lib.get(t.id)
+
+
+def lane_value(pts, x):
+    """与 DJStudio.interp 相同：分段线性，同一拍两点 = 阶跃。"""
+    if x < pts[0][0]:
+        return pts[0][1]
+    i = len(pts) - 1
+    while i > 0 and pts[i][0] > x:
+        i -= 1
+    if i == len(pts) - 1:
+        return pts[i][1]
+    (a, va), (b, vb) = pts[i][:2], pts[i + 1][:2]
+    return va + (vb - va) * (x - a) / (b - a)
+
+
+MIXER_INDEX = {"hi": 0, "mid": 1, "lo": 2, "filter": 3, "echo": 4, "reverb": 5}
+
+
+def lanes_mismatch(statuses, prog, tol=0.01):
+    """程序运行中每个状态帧：读回的旋钮值 vs 曲线在该帧时间线位置的值。返回 (核对数, 超差数)。"""
+    checked = bad = 0
+    for st in statuses:
+        pg = st.get("pg")
+        if not pg or pg["id"] != prog["id"] or pg["st"] != "running" or not 0 <= pg["tl"] <= prog["len"]:
+            continue
+        for name, pts in prog["lanes"].items():
+            side, param = name.split(".")
+            if param not in MIXER_INDEX:
+                continue
+            d = prog["a"]["deck"] if side == "A" else prog["b"]["deck"]
+            checked += 1
+            bad += abs(st["m"][d - 1][MIXER_INDEX[param]] - lane_value(pts, pg["tl"])) > tol
+    return checked, bad

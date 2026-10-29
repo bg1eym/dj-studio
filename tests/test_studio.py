@@ -277,3 +277,38 @@ def test_offbeat_mixxx_grid_detected_and_fixed(env):
     assert abs(ph) < 0.05, ph  # 校正后网格线回到 kick 上
     assert studio.store.get(b.id).analysis["grid_check"]["ok"]
     assert not any("网格存疑" in i.msg for i in studio.compile(s).issues)
+
+
+def test_rehearsal_runs_set_in_simulator_without_mixxx(env):
+    """预演：不准备、不碰 Mixxx（不启动、不写队列），模拟器里按 set 跑；可以从第 k 段过渡前开始。"""
+    studio, src, state = env
+    studio.library.import_paths([str(src)])
+    assert studio.library.wait_idle(60)
+    by_name = {t.path.split("/")[-1]: t for t in studio.store.all()}
+    for name, t in by_name.items():
+        bpm, fb, _ = SPECS[name]
+        fake_mixxxdb.add_track(studio.cfg.mixxx_db, t.path, t.duration, bpm, fb, title=name)
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": "rh", "tracks": [{"id": by_name[n].id, "title": n} for n in ("a.wav", "b.wav", "c.wav")],
+        "transitions": [{"technique": "longhand", "start": 25, "b_in": 1, "bars": 24},
+                        {"technique": "instant", "start": 41, "b_in": 33}],
+        "ending": {"mode": "fade", "bar": 45, "bars": 8},
+    })
+    studio.save(s)
+    cut = studio.rehearsal_set(s, 2)
+    assert [t.id for t in cut.tracks] == [by_name["b.wav"].id, by_name["c.wav"].id] and cut.tracks[0].start == 33
+    assert studio.compile(cut).ok
+
+    studio.rehearse("rh", speed=40, from_transition=2)
+    es = studio.engine_state()
+    assert es["rehearsal"] and es["from"] == 2 and es["link"] == "sim"
+    with pytest.raises(Exception):
+        studio.play("rh")  # 预演中不能开播
+    studio.conductor.join(60)
+    p = studio.conductor.progress
+    assert p.stage == "done", "\n".join(p.log) + f"\n{p.error}"
+    assert not state["running"] and studio.mixxx.autodj_queue() == []  # Mixxx 没被碰过
+    t0 = time.time()
+    while studio.engine_state().get("rehearsal") and time.time() - t0 < 10:
+        time.sleep(0.2)
+    assert not studio.engine_state().get("rehearsal")

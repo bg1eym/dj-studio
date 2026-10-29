@@ -53,7 +53,7 @@
 
 | t | 内容 |
 |---|---|
-| `st`（每 100ms） | `d: [[loaded, playing, pos_ms, dur_ms, bpm, file_bpm, vol], …×2]`，`pg: {id, st, tl, b}`，`ld`（装载中的 deck），`ad`（AutoDJ），`n`，`up` |
+| `st`（每 100ms） | `d: [[loaded, playing, pos_ms, dur_ms, bpm, file_bpm, vol, load_seq], …×2]`，`m: [[hi, mid, lo, filter, echo, reverb, vu], …×2]`（0.4.0 起：从 Mixxx 读回的旋钮原生值，网页混音台用；echo / reverb = 效果单元对该通道开着时的 mix，否则 0；vu = `[ChannelN],vu_meter`，推子前），`x`（crossfader），`mv`（`[Main],vu_meter`），`pg: {id, st, tl, b}`，`ld`（装载中的 deck），`ad`（AutoDJ），`n`，`up` |
 | `hello` | `v`，`boot: 1`（映射刚加载 = 状态已丢失） |
 | `ev` | `started` / `b_play`（`over` 拍）/ `fired`（事件）/ `phase_fix` / `bar_slip` / `done` / `loaded`（`deck, dur, fbpm`）/ `load_failed` |
 | `err` | `m` |

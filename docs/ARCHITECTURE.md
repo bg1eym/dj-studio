@@ -26,6 +26,15 @@ Mixxx + DJStudio.js（控制器映射）
 
 过渡程序在 B 装载完成后就下发（通常提前几分钟），**即使 Python 卡住，这一段也会按谱面执行完**。
 
+### 网页怎么「看见」旋钮
+
+引擎每 100ms 的状态帧里带 `m`（每个通道从 Mixxx **读回**的 hi / mid / lo / filter / echo / reverb / vu_meter）、`x`（crossfader）、
+`mv`（主输出电平），以及 deck 位置和程序时间线位置 `pg.tl`。Python 原样经 SSE 每 100ms 推给网页；`web/static/live.js` 画两条滚动波形、
+混音台和过渡时间线，两帧之间按播放速度外推位置。计划（编译出的曲线）和实际（读回的旋钮）分开画：时间线上是计划，旋钮是实际。
+
+**预演**：同一套 conductor + `DJStudio.js`，换成 Node 模拟器（`Studio.rehearsal_link_factory`，开发时也可以换成真 Mixxx 测试台）。
+从第 k 段开始时用截短的 set（`Studio.rehearsal_set`：第 k 首从过渡前 8 小节起播）。
+
 ## 关键设计决定
 
 - **小节号**：网格来自 Mixxx（sync / quantize 都基于它）。第 1 小节 = 曲中最早的小节起点（网格向前延伸），

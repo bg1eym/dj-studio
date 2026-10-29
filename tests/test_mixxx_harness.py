@@ -18,6 +18,8 @@ from djstudio.grid import Grid
 from djstudio.setfile import SetFile
 from djstudio.synth import techno, write_wav
 
+from .conftest import lanes_mismatch
+
 BIN = os.environ.get("DJSTUDIO_MIXXX_HARNESS")
 pytestmark = pytest.mark.skipif(not BIN or not Path(BIN).exists(), reason="没有构建真 Mixxx 测试台")
 
@@ -66,6 +68,8 @@ def run_set(tracks, record: str | None = None):
         link.sim({"cmd": "record", "path": record})
     cond = Conductor(client, compiled, stall_timeout=8 * SPEED)
     samples: list[float] = []
+    statuses: list[dict] = []
+    client.add_listener(lambda m: statuses.append(m) if m.get("t") == "st" else None)
 
     def sampler():
         p1 = compiled.programs[0]
@@ -87,7 +91,7 @@ def run_set(tracks, record: str | None = None):
     link.sim({"cmd": "quit"})
     time.sleep(0.5)
     link.close()
-    return cond, samples, state, link
+    return cond, samples, state, link, statuses, compiled
 
 
 def kick_flams(wav: Path, t0: float, t1: float) -> tuple[int, int]:
@@ -109,7 +113,7 @@ def kick_flams(wav: Path, t0: float, t1: float) -> tuple[int, int]:
 
 def test_full_set_on_real_mixxx(tracks, tmp_path):
     record = os.environ.get("DJSTUDIO_HARNESS_RECORD") or str(tmp_path / "set.wav")
-    cond, samples, state, link = run_set(tracks, record)
+    cond, samples, state, link, statuses, compiled = run_set(tracks, record)
     log = "\n".join(cond.progress.log)
     assert cond.progress.stage == "done", log + f"\n{cond.progress.error}\n" + "\n".join(link.stderr_lines[-20:])
     assert "装错" not in log and "失联" not in log and "小节错位" not in log, log
@@ -118,6 +122,13 @@ def test_full_set_on_real_mixxx(tracks, tmp_path):
     assert max(abs(x) for x in samples) < 0.05, samples
     assert not any(d["playing"] for d in state["decks"])
     assert state["xFaderMode"] == 0
+    # 网页混音台的读数：真 Mixxx 控件读回的 EQ / 滤波跟着曲线走；电平表是 Mixxx 按真实音频算的
+    checked, bad = lanes_mismatch(statuses, compiled.programs[0])
+    assert checked > 50 and bad <= checked * 0.03, (checked, bad)
+    solo = [st for st in statuses if st["d"][0][1] and not st["d"][1][1]]
+    idle_vu = sorted(st["m"][1][6] for st in solo)
+    assert solo and max(st["m"][0][6] for st in solo) > 0.2 and idle_vu[len(idle_vu) // 2] < 0.01, idle_vu[-30:]
+    assert max(st["mv"] for st in solo) > 0.2
     # 真正听到的声音：过渡 1 两个 kick 都响的那一段（A 第 41 小节起 + 6..18 小节）不能有双击
     a_bar = 60 * 4 / SPECS["a"][0]
     t0 = SPECS["a"][1] + 40 * 4 * 60 / SPECS["a"][0] + 6 * a_bar

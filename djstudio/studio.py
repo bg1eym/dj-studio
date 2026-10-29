@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 import traceback
@@ -13,7 +14,7 @@ from .compiler import Compiled, Issue, TrackInfo, compile_set
 from .config import Config, get_config
 from .engine.client import EngineClient, EngineError
 from .engine.conductor import Conductor, Progress
-from .engine.link import Link, LinkError, RtMidiLink
+from .engine.link import Link, LinkError, RtMidiLink, SimLink
 from .grid import Grid
 from .library.analysis import downbeat_from_bar1
 from .library.audio import have_ffmpeg
@@ -33,6 +34,10 @@ def mapping_version() -> str:
         if line.startswith("DJStudio.VERSION"):
             return line.split('"')[1]
     return "?"
+
+
+def _sim_rehearsal_link(rows: list[dict[str, Any]], speed: float) -> Link:
+    return SimLink(rows, speed=speed)
 
 
 class StudioError(RuntimeError):
@@ -69,6 +74,9 @@ class Studio:
         self._client: EngineClient | None = None
         self._client_lock = threading.Lock()
         self.conductor: Conductor | None = None
+        self._rehearsal: dict[str, Any] | None = None
+        # 预演用的引擎：默认 Node 模拟器；开发时可以换成真 Mixxx 测试台（HarnessLink，同一套行协议）
+        self.rehearsal_link_factory: Callable[[list[dict[str, Any]], float], Link] = _sim_rehearsal_link
         self.job: Job | None = None
         self._job_lock = threading.Lock()
         self.listeners: list[Callable[[str, Any], None]] = []  # (kind, payload) → 网页 SSE
@@ -100,6 +108,12 @@ class Studio:
                 self._client = None
 
     def engine_state(self) -> dict[str, Any]:
+        r = self._rehearsal
+        if r:  # 预演中：网页看的是模拟器里的引擎
+            c = r["client"]
+            return {"connected": True, "online": c.online(), "version": c.version, "age": round(c.status_age(), 2),
+                    "status": c.status, "link": c.link.name, "rehearsal": True, "speed": r["speed"],
+                    "set": r["set"], "from": r["from"]}
         c = self._client
         if not c:
             return {"connected": False, "online": False}
@@ -214,6 +228,11 @@ class Studio:
             ok, msg = process.mapping_status(cfg)
             add("控制器映射", "ok" if ok else "warn",
                 msg if ok else msg + "：Mixxx → 偏好设置 → 控制器 → IAC 总线 → 映射选「DJ Studio」并启用")
+            # ReplayGain 默认开（replaygainsettings.cpp）：把响的母带统一压到参考响度，两首叠加才有余量
+            rg = cfg.get("[ReplayGain]", {}).get("ReplayGainEnabled", "1").strip()
+            add("ReplayGain", "ok" if rg != "0" else "warn",
+                "已开启（两首叠加时主输出有余量）" if rg != "0" else
+                "关着：现在的母带都很响，长交接两首满音量叠加时主输出会削波。Mixxx → 偏好设置 → Normalization（标准化）→ 勾选 ReplayGain")
         deployed = all((self.cfg.mixxx_controllers / f).exists() and
                        (self.cfg.mixxx_controllers / f).read_bytes() == (MAPPING_DIR / f).read_bytes()
                        for f in MAPPING_FILES)
@@ -539,7 +558,8 @@ class Studio:
 
     def play(self, set_id: str) -> Progress:
         if self.conductor and self.conductor.running:
-            raise StudioError("已经在播了")
+            raise StudioError("正在播放或预演，先停下")
+        self._rehearsal = None
         if self.job and self.job.state == "running":
             raise StudioError(f"任务进行中：{self.job.name}")
         prep = self.prepared()
@@ -571,6 +591,61 @@ class Studio:
     def stop(self) -> None:
         if self.conductor and self.conductor.running:
             self.conductor.request_stop()
+
+    # ------------------------------------------------------------ 预演（模拟器里跑，不碰 Mixxx）
+
+    REHEARSAL_LEAD_BARS = 8  # 从第 k 段过渡开始预演时，提前几小节起播
+
+    def rehearsal_set(self, s: SetFile, from_transition: int = 0) -> SetFile:
+        """from_transition = k（从 1 起）：只留第 k 首起的部分，第 k 首从过渡前 REHEARSAL_LEAD_BARS 小节起播。"""
+        if not from_transition:
+            return s
+        k = from_transition - 1
+        if not 0 <= k < len(s.transitions):
+            raise StudioError(f"没有第 {from_transition} 段过渡")
+        tracks = [t.model_copy() for t in s.tracks[k:]]
+        tracks[0] = tracks[0].model_copy(update={"start": max(1.0, s.transitions[k].start - self.REHEARSAL_LEAD_BARS)})
+        return s.model_copy(update={"id": f"{s.id}-from{from_transition}", "tracks": tracks, "transitions": s.transitions[k:]})
+
+    def rehearse(self, set_id: str, speed: float = 1.0, from_transition: int = 0) -> Progress:
+        """在 Node 模拟器里按这套 set 跑一遍（真正的 DJStudio.js，假 Mixxx，没有声音），网页演出页照常显示。
+        曲目的时长 / BPM / 网格用和真机一样的解析结果，所以小节、过渡时刻和旋钮动作与真机一致。"""
+        if self.conductor and self.conductor.running:
+            raise StudioError("正在播放或预演，先停下")
+        if self.job and self.job.state == "running":
+            raise StudioError(f"任务进行中：{self.job.name}")
+        if self.rehearsal_link_factory is _sim_rehearsal_link and shutil.which("node") is None:
+            raise StudioError("预演需要 Node.js（brew install node）")
+        s = self.rehearsal_set(self.load(set_id), from_transition)
+        c = self.compile(s)
+        if not c.ok:
+            raise StudioError("set 校验没通过")
+        rows = []
+        for t, info in zip(s.tracks, c.tracks):
+            tr = self.store.get(t.id)
+            rows.append({"id": t.id, "dur": info.grid.duration, "bpm": info.grid.bpm, "first_beat": info.grid.first_beat,
+                         "path": tr.path if tr else None})
+        link = self.rehearsal_link_factory(rows, speed)
+        link.sim({"cmd": "queue", "ids": [t.id for t in s.tracks]})
+        client = EngineClient(link)
+        if not client.wait_until(client.online, 5):
+            link.close()
+            raise StudioError("模拟器没有启动")
+        self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition}
+        cond = Conductor(client, c, on_progress=lambda p: self.emit("progress", p.to_dict()),
+                         on_log=lambda line: self.emit("log", line))
+        self.conductor = cond
+
+        def reap() -> None:  # 预演结束后留几秒最后画面，再关模拟器
+            cond.join(None)
+            time.sleep(3)
+            if self._rehearsal and self._rehearsal["client"] is client:
+                self._rehearsal = None
+            link.close()
+
+        cond.start()
+        threading.Thread(target=reap, name="rehearsal-reaper", daemon=True).start()
+        return cond.progress
 
     # ------------------------------------------------------------ 真机探测
 

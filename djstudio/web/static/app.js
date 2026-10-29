@@ -1,5 +1,6 @@
 // DJ Studio 前端（原生 JS，无构建步骤）
 import { Wave } from "./wave.js";
+import { LiveView } from "./live.js";
 
 // ------------------------------------------------------------------ 工具
 
@@ -122,10 +123,12 @@ function connectEvents() {
     if (S.tab === "show") updateDecks();
   });
   es.addEventListener("progress", (e) => {
+    const was = S.progress && S.progress.finished_at;
     S.progress = JSON.parse(e.data);
     S.log = S.progress.log || [];
     if (S.tab === "show") renderShowStatus();
     updateEngineBadge();
+    if (S.progress.finished_at && !was) setTimeout(() => loadState().then(() => { if (S.tab === "show") renderShow(); }), 300);
   });
   es.addEventListener("job", (e) => {
     S.job = JSON.parse(e.data);
@@ -170,7 +173,7 @@ function updateEngineBadge() {
   const e = S.engine || {};
   const lost = S.progress && S.progress.stage !== "done" && S.progress.engine_ok === false;
   b.className = "engine" + (e.online ? " online" : (e.connected || lost ? " lost" : ""));
-  $(".txt", b).textContent = e.online ? `引擎在线 ${e.version || ""}` : (e.connected ? "引擎失联" : "引擎未连接");
+  $(".txt", b).textContent = e.rehearsal ? `预演中（模拟器 ${e.speed}×）` : e.online ? `引擎在线 ${e.version || ""}` : (e.connected ? "引擎失联" : "引擎未连接");
   const al = $("#alarm");
   const playing = S.state && S.state.playing;
   if (lost || (playing && !e.online)) {
@@ -379,13 +382,18 @@ async function fixGrids(ids) {
 
 // ------------------------------------------------------------------ 任务面板
 
-function jobPanel() {
+function jobPanel(compact = false) {
   const j = S.job;
   if (!j) return null;
   const color = j.state === "error" ? "var(--err)" : j.state === "ok" ? "var(--ok)" : "var(--accent)";
-  return h("div", { class: "panel" },
-    h("div", { class: "row" }, h("b", {}, j.name), h("span", { style: `color:${color}` }, { running: "进行中…", ok: "完成", error: "失败" }[j.state])),
-    h("div", { class: "log", style: "margin-top:6px;max-height:220px" }, j.log.join("\n")));
+  const head = h("div", { class: "row" }, h("b", {}, j.name), h("span", { style: `color:${color}` }, { running: "进行中…", ok: "完成", error: "失败" }[j.state]));
+  const log = h("div", { class: "log", style: "margin-top:6px;max-height:220px" }, j.log.join("\n"));
+  if (compact && j.state === "ok") {
+    // 演出页：完成的任务只留一行，点开看日志（别把混音台挤到屏幕外）
+    const d = h("details", { class: "panel job-mini" }, h("summary", {}, head), log);
+    return d;
+  }
+  return h("div", { class: "panel" }, head, log);
 }
 
 function renderJobPanels() {
@@ -393,7 +401,7 @@ function renderJobPanels() {
     const el = document.getElementById(id);
     if (!el) continue;
     el.innerHTML = "";
-    const p = jobPanel();
+    const p = jobPanel(id === "job-show");
     if (p) el.append(p);
     const log = el.querySelector(".log");
     if (log) log.scrollTop = log.scrollHeight;
@@ -715,12 +723,15 @@ async function renderShow() {
   if (!S.sets.length) S.sets = await api("GET", "/api/sets").catch(() => []);
   const prepared = S.state && S.state.prepared;
   if (!S.showSetId) S.showSetId = (prepared && prepared.set) || S.setId || (S.sets[0] && S.sets[0].id);
-  if (S.showSetId && (!S.showCompiled || S.showCompiled._id !== S.showSetId)) {
-    const r = await api("GET", "/api/sets/" + S.showSetId).catch(() => null);
-    S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, set: r.set } : null;
+  const want = showKey();
+  if (S.showSetId && (!S.showCompiled || S.showCompiled._key !== want.key)) {
+    const r = await api("GET", want.url).catch(() => null);
+    S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, _key: want.key, set: r.set } : null;
   }
   const playing = S.state && S.state.playing;
+  const busy = playing || (S.job && S.job.state === "running");
   const isPrepared = prepared && prepared.set === S.showSetId;
+  const full = S.showCompiled && S.showCompiled.set;
   root.innerHTML = "";
   root.append(
     h("div", { class: "panel row" },
@@ -728,6 +739,16 @@ async function renderShow() {
         S.sets.map((s) => h("option", { value: s.id, selected: s.id === S.showSetId }, s.name || s.id))),
       h("span", { class: isPrepared ? "badge ok" : "badge warn" }, isPrepared ? `已准备 ${new Date(prepared.at * 1000).toLocaleTimeString()}` : "未准备"),
       h("span", { class: "grow" }),
+      h("span", { class: "dim", title: "在模拟器里跑这套 set：真正的引擎脚本，假 Mixxx，没有声音。不需要准备，也不碰 Mixxx。" }, "预演"),
+      h("select", { id: "rh-from", disabled: busy }, h("option", { value: 0 }, "从头"),
+        (full && !(S.engine || {}).rehearsal ? full.transitions : []).map((tr, i) => h("option", { value: i + 1, selected: S.rhFrom === i + 1 }, `过渡 ${i + 1} 前 8 小节`))),
+      h("select", { id: "rh-speed", disabled: busy }, [1, 2, 4, 8].map((v) => h("option", { value: v, selected: v === (S.rhSpeed || 1) }, `${v}×`))),
+      h("button", { disabled: busy || !S.showSetId, onclick: () => guard(async () => {
+        S.rhFrom = +$("#rh-from").value; S.rhSpeed = +$("#rh-speed").value;
+        await api("POST", `/api/sets/${S.showSetId}/rehearse`, { speed: S.rhSpeed, from: S.rhFrom });
+        await loadState(); renderShow();
+      }) }, "▶ 预演"),
+      h("span", { class: "sep" }),
       h("button", { disabled: playing || (S.job && S.job.state === "running"), onclick: () => guard(async () => {
         await api("POST", `/api/sets/${S.showSetId}/prepare`, {}); toast("准备中：会重启 Mixxx，约 1 分钟");
       }) }, "准备"),
@@ -738,12 +759,44 @@ async function renderShow() {
     ),
     h("div", { id: "job-show" }),
     h("div", { class: "panel", id: "show-status" }),
-    h("div", { class: "decks", id: "decks" }),
+    liveRoot,
     h("div", { class: "panel", style: "margin-top:14px" }, h("h3", {}, "运行日志"), h("div", { class: "log", id: "show-log" })),
   );
+  live.setSet(S.showCompiled);
   renderJobPanels();
   renderShowStatus();
   updateDecks();
+}
+
+// 演出页显示哪份编译结果：预演从第 k 段开始时是截短的那份（progress.index 按它算）
+function showKey() {
+  const e = S.engine || {};
+  if (e.rehearsal && e.set === S.showSetId && e.from) {
+    return { key: `${e.set}~${e.from}`, url: `/api/sets/${e.set}?rehearse_from=${e.from}` };
+  }
+  return { key: S.showSetId, url: "/api/sets/" + S.showSetId };
+}
+
+// 实时混音台（live.js）：页面切换时保留同一个实例，波形缓存不用重新下载
+const liveRoot = h("div", { class: "live", id: "live" });
+const live = new LiveView(liveRoot, async (id) => {
+  const [t, wave] = await Promise.all([api("GET", "/api/tracks/" + id), api("GET", `/api/tracks/${id}/waveform`).catch(() => null)]);
+  return { wave, sections: t.sections || [] };
+});
+
+// 整套时间表：独奏 / 过渡 / 终曲按时长排开，当前所在段高亮
+function setStrip(p) {
+  const comp = S.showCompiled;
+  if (!comp || !comp.schedule || !comp.schedule.length) return null;
+  const total = comp.duration || comp.schedule[comp.schedule.length - 1].t1 || 1;
+  const curKind = p.stage === "transition" ? "transition" : p.stage === "ending" ? "ending" : "solo";
+  const curIdx = p.stage === "transition" ? (p.program === "end" ? -1 : p.index) : p.index;
+  return h("div", { class: "timeline", style: "margin-top:6px" }, comp.schedule.map((sg) => {
+    const on = !["done", "stopped", "error", "idle"].includes(p.stage) && sg.kind === curKind && sg.index === curIdx;
+    const label = sg.kind === "solo" ? `#${sg.index + 1}` : sg.kind === "ending" ? "终曲" : `↗ ${TECH_LABEL[sg.label] || sg.label}`;
+    return h("div", { class: sg.kind + (on ? " now" : ""), style: `width:${((sg.t1 - sg.t0) / total) * 100}%`,
+      title: `${label} ${fmt(sg.t0)}–${fmt(sg.t1)}` }, label);
+  }));
 }
 
 const STAGE_LABEL = {
@@ -756,18 +809,20 @@ function renderShowStatus() {
   if (!el) return;
   const p = S.progress;
   el.innerHTML = "";
-  if (!p) { el.append(h("div", { class: "dim" }, "还没有开始播放。先「准备」（重启 Mixxx、部署引擎、写 AutoDJ 队列），再「开始」。")); }
+  if (!p) { el.append(h("div", { class: "dim" }, "还没有开始播放。真机：先「准备」（重启 Mixxx、部署引擎、写 AutoDJ 队列），再「开始」。不开 Mixxx 也可以「预演」：在模拟器里把这套 set 跑一遍看旋钮怎么动。")); }
   else {
     const set = S.showCompiled && S.showCompiled.set;
     const cur = set && set.tracks[p.index];
+    const e = S.engine || {};
     put(el,
-      h("div", { class: "row" },
+      h("div", { class: "row status-line" },
         h("span", { class: "stage", style: p.stage === "error" ? "color:var(--err)" : "" }, STAGE_LABEL[p.stage] || p.stage),
+        e.rehearsal ? h("span", { class: "badge ok", title: "模拟器里跑的是真正的引擎脚本，旋钮 / 推子是模拟器里 Mixxx 控件的值" }, `预演 · 模拟器 ${e.speed}× · 没有声音`) : null,
         h("span", { class: "dim" }, p.message || ""),
         h("span", { class: "grow" }),
         h("span", {}, `第 ${p.index + 1} / ${p.n_tracks} 首`, cur ? ` · ${cur.title || cur.id}` : "")),
       p.error ? h("div", { style: "color:var(--err);margin-top:6px" }, p.error) : null,
-      h("div", { id: "prog-bar", style: "margin-top:8px" }),
+      setStrip(p),
     );
   }
   const log = $("#show-log");
@@ -779,52 +834,17 @@ function renderShowStatus() {
   updateDecks();
 }
 
+let showReloading = false;
 function updateDecks() {
-  const el = $("#decks");
-  if (!el) return;
-  const st = S.engine && S.engine.status;
-  const comp = S.showCompiled;
-  const p = S.progress;
-  el.innerHTML = "";
-  for (const d of [1, 2]) {
-    const ds = st ? st.d[d - 1] : null;
-    // 推断 deck 上是哪首：当前主奏曲在 deckFor(index)，下一首在另一边
-    let idx = null;
-    if (p && comp) {
-      if (deckFor(p.index) === d) idx = p.index;
-      else if (p.index + 1 < comp.tracks.length) idx = p.index + 1;
-    }
-    const tinfo = comp && idx !== null ? comp.tracks[idx] : null;
-    const title = comp && idx !== null ? (comp.set.tracks[idx].title || comp.set.tracks[idx].id) : "";
-    const pos = ds ? ds[2] / 1000 : 0, dur = ds ? ds[3] / 1000 : 0;
-    let bar = null;
-    if (tinfo && tinfo.bar1_time !== undefined && tinfo.bpm) bar = (pos - tinfo.bar1_time) / (240 / tinfo.bpm) + 1;
-    el.append(h("div", { class: `deck deck${d}` + (ds && ds[1] ? " playing" : "") },
-      h("div", { class: "row" }, h("b", { style: `color:var(--deck${d === 1 ? "A" : "B"})` }, `Deck ${d}`),
-        h("span", { class: "name grow" }, ds && ds[0] ? (idx !== null ? `#${idx + 1} ${title}` : "（已装载）") : "（空）"),
-        ds && ds[1] ? h("span", { class: "badge ok" }, "播放中") : null),
-      h("div", { class: "row", style: "margin:6px 0" },
-        h("span", { class: "big" }, bar !== null ? `第 ${bar.toFixed(1)} 小节` : fmt(pos)),
-        h("span", { class: "grow" }),
-        h("span", { class: "mono" }, `${fmt(pos)} / ${fmt(dur)}`)),
-      h("div", { class: "bar" }, h("div", { style: `width:${dur ? (pos / dur) * 100 : 0}%` })),
-      h("div", { class: "row dim mono", style: "margin-top:6px" },
-        `BPM ${ds ? ds[4].toFixed(2) : "–"}（原生 ${ds ? ds[5].toFixed(2) : "–"}）`, h("span", { class: "grow" }), `音量 ${ds ? ds[6].toFixed(2) : "–"}`),
-    ));
+  if (!liveRoot.isConnected) return;
+  const e = S.engine || {};
+  if (S.showCompiled && S.showCompiled._key !== showKey().key && !showReloading) {
+    showReloading = true;
+    renderShow().finally(() => { showReloading = false; });
+    return;
   }
-  const pb = $("#prog-bar");
-  const pg = st && st.pg;
-  if (pb && pg && comp) {
-    const prog = pg.id === "end" ? comp.ending : comp.programs.find((x) => x.id === pg.id.replace("!", ""));
-    const len = prog ? prog.len : 0;
-    pb.innerHTML = "";
-    if (len) {
-      const tl = Math.max(0, pg.tl);
-      pb.append(h("div", { class: "row dim" }, `${pg.id} · ${pg.st}`, h("span", { class: "grow" }),
-        pg.tl < 0 ? `还有 ${(-pg.tl / 4).toFixed(1)} 小节开始` : `第 ${(tl / 4).toFixed(1)} / ${len / 4} 小节`),
-      h("div", { class: "bar" }, h("div", { style: `width:${Math.min(100, (tl / len) * 100)}%;background:var(--warn)` })));
-    }
-  }
+  live.setBanner(!e.rehearsal && e.connected && !e.online && S.state && S.state.playing ? "引擎失联：画面停在最后一帧" : "");
+  live.update(e, S.progress);
 }
 
 // ------------------------------------------------------------------ 体检

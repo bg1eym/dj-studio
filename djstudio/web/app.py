@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ from ..library.store import Track
 from ..mixxx.db import MixxxTrack
 from ..setfile import SetFile
 from ..studio import Studio, StudioError, mapping_version
+
+ENGINE_PUSH_S = 0.1
 
 STATIC = Path(__file__).parent / "static"
 
@@ -70,17 +73,21 @@ def create_app(studio: Studio) -> FastAPI:
             try:
                 yield f"event: state\ndata: {json.dumps(state(), ensure_ascii=False, default=str)}\n\n"
                 last_status = None
+                last_push = 0.0
                 while True:
                     if await request.is_disconnected():
                         break
                     try:
-                        kind, payload = await asyncio.wait_for(q.get(), timeout=0.2)
+                        kind, payload = await asyncio.wait_for(q.get(), timeout=0.05)
                         yield f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
                     except asyncio.TimeoutError:
-                        es = studio.engine_state()
-                        cur = json.dumps(es, default=str)
+                        pass
+                    # 引擎状态（含旋钮读数）每 100ms 一帧，和引擎上报同频：网页混音台靠它动
+                    now = time.monotonic()
+                    if now - last_push >= ENGINE_PUSH_S:
+                        cur = json.dumps(studio.engine_state(), default=str)
                         if cur != last_status:
-                            last_status = cur
+                            last_status, last_push = cur, now
                             yield f"event: engine_state\ndata: {cur}\n\n"
             finally:
                 if listener in studio.listeners:
@@ -228,9 +235,17 @@ def create_app(studio: Studio) -> FastAPI:
         return studio.list_sets()
 
     @app.get("/api/sets/{sid}")
-    def api_set(sid: str) -> dict[str, Any]:
-        s = studio.load(sid)
+    def api_set(sid: str, rehearse_from: int = 0) -> dict[str, Any]:
+        """rehearse_from = k：预演从第 k 段过渡开始时实际跑的那份（截掉前面的曲目）。"""
+        s = studio.rehearsal_set(studio.load(sid), rehearse_from)
         return {"set": json.loads(s.to_json()), "compiled": compiled_json(studio.compile(s))}
+
+    @app.post("/api/sets/{sid}/rehearse")
+    def api_rehearse(sid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        speed = float(body.get("speed") or 1.0)
+        if not 0.25 <= speed <= 16:
+            raise HTTPException(400, "预演倍速应在 0.25–16 之间")
+        return studio.rehearse(sid, speed, int(body.get("from") or 0)).to_dict()
 
     def parse_set(body: dict[str, Any]) -> SetFile:
         try:
