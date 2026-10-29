@@ -1,7 +1,7 @@
 # 在 GitHub 的 macOS 构建机上做出独立的 DJ Studio.app（Apple 芯片 / Intel 各一个）：
 #   1. 用 Mixxx 2.5.6 源码编声音引擎 djstudio-engine（只编这一个程序，见 tools/mixxx-engine）
 #   2. 用 PyInstaller 把网页服务（Python）和引擎打成一个 .app，在构建机上自检
-#   3. 放到 GitHub Release（main → mac-app-latest；mac-app 分支 → mac-app-test）
+#   3. 放到 GitHub Release「mac-app-latest」（README 里的一行安装命令从这里下载）
 # 失败时把日志传到 Release「ci-logs」。
 name: mac-app
 on:
@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 env:
   MIXXX_TAG: "2.5.6"
-  RELEASE_TAG: ${{ github.ref == 'refs/heads/main' && 'mac-app-latest' || 'mac-app-test' }}
+  RELEASE_TAG: mac-app-latest
 
 jobs:
   engine:
