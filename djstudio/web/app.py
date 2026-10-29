@@ -19,12 +19,24 @@ from ..library.audio import AUDIO_EXTS
 from ..library.importer import browse
 from ..library.store import Track
 from ..mixxx.db import MixxxTrack
+from ..selfupdate import version_text
 from ..setfile import SetFile
 from ..studio import Studio, StudioError, mapping_version
 
 ENGINE_PUSH_S = 0.1
 
 STATIC = Path(__file__).parent / "static"
+
+
+# 更新代码后浏览器一刷新就是新界面：网页文件每次都向服务确认是否有新版本（不用旧缓存）
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class _NoCacheStatic(StaticFiles):
+    def file_response(self, *args: Any, **kwargs: Any) -> Any:
+        resp = super().file_response(*args, **kwargs)
+        resp.headers.update(NO_CACHE)
+        return resp
 
 
 def create_app(studio: Studio) -> FastAPI:
@@ -51,6 +63,7 @@ def create_app(studio: Studio) -> FastAPI:
             "prepared": studio.prepared(),
             "analysis": studio.library.queue_state(),
             "mapping_version": mapping_version(),
+            "version": version_text(),
         }
 
     @app.get("/api/state")
@@ -170,17 +183,20 @@ def create_app(studio: Studio) -> FastAPI:
             if st and st.get("error"):
                 dest.rename(dest.with_suffix(".pdf.bad"))
                 raise HTTPException(422, f"读不了这份打碟谱：{st['error']}")
+            studio.find_plan_tracks()  # 谱上还缺的歌去电脑里找；齐了自动开始分析
             return {"kind": "plan", "plan": st}
         res = studio.library.import_paths([str(dest)], trusted=True)
         dest.unlink(missing_ok=True)  # 已复制进托管曲库
         if res.failed:
             raise HTTPException(422, f"{fname}：{res.failed[0][1]}")
         tid = (res.added or res.existing or [None])[0]
+        studio.maybe_auto()
         return {"kind": "audio", "track": tid, "existing": bool(res.existing)}
 
     @app.get("/api/plan")
     def api_plan() -> dict[str, Any] | None:
-        return studio.plan_status()
+        st = studio.plan_status()
+        return {**st, "finder": studio.finder} if st else None
 
     @app.post("/api/auto")
     def api_auto() -> dict[str, Any]:
@@ -350,10 +366,10 @@ def create_app(studio: Studio) -> FastAPI:
 
     # ------------------------------------------------------------ 前端
 
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.mount("/static", _NoCacheStatic(directory=STATIC), name="static")
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(STATIC / "index.html")
+        return FileResponse(STATIC / "index.html", headers=NO_CACHE)
 
     return app

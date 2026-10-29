@@ -8,21 +8,22 @@
 </head>
 <body>
   <header class="top">
-    <div class="brand">DJ Studio</div>
-    <nav id="tabs">
-      <a href="#start" data-tab="start">开始</a>
-      <a href="#show" data-tab="show">演出</a>
-      <span class="nav-adv">高级：
-        <a href="#library" data-tab="library">曲库</a>
-        <a href="#sets" data-tab="sets">Set</a>
-        <a href="#doctor" data-tab="doctor">体检</a>
-      </span>
+    <a class="brand" href="#home">DJ Studio</a>
+    <nav id="tabs" class="hidden">
+      <a href="#home" data-tab="home">← 回首页</a>
+      <a href="#show" data-tab="show">控制台</a>
+      <a href="#library" data-tab="library">曲库</a>
+      <a href="#sets" data-tab="sets">Set</a>
+      <a href="#doctor" data-tab="doctor">体检</a>
     </nav>
-    <div class="engine" id="engine-badge" title="引擎状态"><span class="dot"></span><span class="txt">引擎未连接</span></div>
+    <span class="grow"></span>
+    <div class="engine" id="engine-badge" title="引擎状态"><span class="dot"></span><span class="txt">Mixxx 未连接</span></div>
+    <span class="ver" id="ver"></span>
+    <a href="#show" id="adv-link" class="adv-link">高级</a>
   </header>
   <div id="alarm" class="alarm hidden"></div>
   <main>
-    <section id="tab-start" class="tab"></section>
+    <section id="tab-home" class="tab"></section>
     <section id="tab-library" class="tab"></section>
     <section id="tab-sets" class="tab"></section>
     <section id="tab-show" class="tab"></section>

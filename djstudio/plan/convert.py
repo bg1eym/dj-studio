@@ -112,6 +112,62 @@ def _lead_no(path: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def duration_ok(pt: PlanTrack, duration: float) -> bool:
+    """时长核对：谱上的小节数 × 原 BPM + 第 1 拍的秒数 ≈ 文件时长（容差 12 小节）。谱上没写就不核对。"""
+    if not (pt.bars and pt.bpm_orig):
+        return True
+    bar = BEATS_PER_BAR * 60.0 / pt.bpm_orig
+    return abs((pt.bar1_s or 0.0) + pt.bars * bar - duration) <= 12 * bar
+
+
+FILE_MATCH = 0.85  # 在电脑里按文件名找曲子：名字的相似度门槛
+
+
+def _words(s: str) -> frozenset[str]:
+    """文件名 / 曲名里的词（小写，去掉扩展名和前面的编号）。"""
+    s = Path(s).stem if s.lower().endswith((".mp3", ".wav", ".flac", ".aiff", ".aif", ".m4a", ".ogg")) else s
+    s = re.sub(r"^\s*\d{1,3}[\s_.\-]+", "", s.lower().replace("&", " "))
+    return frozenset(re.findall(r"[^\W_]+", s))
+
+
+def _name_sim(want: tuple[str, frozenset[str]], have: tuple[str, frozenset[str]]) -> float:
+    """两个名字有多像：字符相似度和「词的集合」相似度取大的。
+    词集合管得住艺人写法、顺序、重复不同的情况（「Push,Charlotte de Witte - … (Charlotte de Witte Rework)」
+    对「14_Push_-_…_Charlotte_de_Witte_Rework」）；多一个词（Edit / Remix）就到不了门槛。"""
+    words = len(want[1] & have[1]) / len(want[1] | have[1]) if want[1] and have[1] else 0.0
+    if words >= FILE_MATCH:
+        return words
+    sm = difflib.SequenceMatcher(None, want[0], have[0])
+    if sm.real_quick_ratio() < FILE_MATCH or sm.quick_ratio() < FILE_MATCH:
+        return words
+    return max(words, sm.ratio())
+
+
+def file_matches(plan: Plan, paths: list[str], want: list[int]) -> dict[int, str]:
+    """在一堆音频文件里按文件名找谱上的曲子（want = 要找的曲目下标）。只看名字；时长由调用方用 duration_ok 核对。
+    每首取最像的文件，一个文件只给一首。"""
+    names = [(p, (_norm(Path(p).name), _words(Path(p).name))) for p in paths]
+    scored: list[tuple[float, int, int]] = []
+    for i in want:
+        pt = plan.tracks[i]
+        targets = [(_norm(x), _words(x)) for x in (pt.file_name, pt.title.replace("—", " ")) if x]
+        for j, (p, have) in enumerate(names):
+            if not have[0]:
+                continue
+            best = max((_name_sim(w, have) for w in targets), default=0.0)
+            if best >= FILE_MATCH:
+                scored.append((best + (0.01 if _lead_no(p) == pt.no else 0.0), i, j))
+    scored.sort(reverse=True)
+    out: dict[int, str] = {}
+    used: set[int] = set()
+    for _, i, j in scored:
+        if i in out or j in used:
+            continue
+        out[i] = names[j][0]
+        used.add(j)
+    return out
+
+
 def match_tracks(plan: Plan, lib: list[LibTrack]) -> tuple[list[LibTrack | None], list[Note]]:
     notes: list[Note] = []
     scored: list[tuple[float, int, int]] = []
@@ -121,11 +177,8 @@ def match_tracks(plan: Plan, lib: list[LibTrack]) -> tuple[list[LibTrack | None]
             have = [_norm(lt.path), _norm(f"{lt.artist} {lt.title}"), _norm(lt.title)]
             sim = max(difflib.SequenceMatcher(None, w, h).ratio() for w in want if w for h in have if h)
             score = sim + (0.35 if _lead_no(lt.path) == pt.no else 0.0)
-            # 时长核对：谱上的小节数 × 原 BPM + 第 1 拍的秒数 ≈ 文件时长
-            if pt.bars and pt.bpm_orig and lt.duration:
-                est = (pt.bar1_s or 0.0) + pt.bars * BEATS_PER_BAR * 60.0 / pt.bpm_orig
-                if abs(est - lt.duration) > 12 * BEATS_PER_BAR * 60.0 / pt.bpm_orig:
-                    score -= 0.4
+            if lt.duration and not duration_ok(pt, lt.duration):
+                score -= 0.4
             scored.append((score, i, j))
     scored.sort(reverse=True)
     out: list[LibTrack | None] = [None] * len(plan.tracks)

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import shutil
 import threading
 import time
@@ -17,7 +19,7 @@ from .engine.conductor import Conductor, Progress
 from .engine.link import Link, LinkError, RtMidiLink, SimLink
 from .grid import Grid
 from .library.analysis import downbeat_from_bar1
-from .library.audio import have_ffmpeg
+from .library.audio import AUDIO_EXTS, AudioError, have_ffmpeg, probe
 from .library.importer import Library
 from .library.store import Store, Track
 from .mixxx import process
@@ -34,6 +36,19 @@ def mapping_version() -> str:
         if line.startswith("DJStudio.VERSION"):
             return line.split('"')[1]
     return "?"
+
+
+def _age(c: EngineClient) -> float | None:
+    """多久没收到引擎状态（秒）；还没收到过 = None（JSON 里不能有 Infinity，浏览器会解析失败）。"""
+    a = c.status_age()
+    return round(a, 2) if math.isfinite(a) else None
+
+
+def _duration(path: Path) -> float:
+    try:
+        return probe(path).duration
+    except AudioError:
+        return -1.0
 
 
 def _sim_rehearsal_link(rows: list[dict[str, Any]], speed: float) -> Link:
@@ -107,6 +122,11 @@ class Studio:
         self.rehearsal_link_factory: Callable[[list[dict[str, Any]], float], Link] = _sim_rehearsal_link
         self.job: Job | None = None
         self._job_lock = threading.Lock()
+        # 按打碟谱在电脑里找曲子（网页显示进度）；一键分析自动开始过的「打碟谱 + 曲目」组合
+        self.finder: dict[str, Any] = {"state": "idle"}
+        self._find_lock = threading.Lock()
+        self._auto_lock = threading.Lock()
+        self._auto_key: tuple[Any, ...] | None = None
         self.listeners: list[Callable[[str, Any], None]] = []  # (kind, payload) → 网页 SSE
         self.library.on_change = lambda tid: self.emit("track", tid)
 
@@ -139,13 +159,13 @@ class Studio:
         r = self._rehearsal
         if r:  # 预演中：网页看的是模拟器里的引擎
             c = r["client"]
-            return {"connected": True, "online": c.online(), "version": c.version, "age": round(c.status_age(), 2),
+            return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
                     "status": c.status, "link": c.link.name, "rehearsal": True, "speed": r["speed"],
                     "set": r["set"], "from": r["from"]}
         c = self._client
         if not c:
             return {"connected": False, "online": False}
-        return {"connected": True, "online": c.online(), "version": c.version, "age": round(c.status_age(), 2),
+        return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
                 "status": c.status, "link": c.link.name}
 
     # ------------------------------------------------------------ 曲目解析
@@ -674,6 +694,90 @@ class Studio:
         return {"file": path.name, "title": plan.title, "n_tracks": len(plan.tracks),
                 "n_transitions": len(plan.transitions), "tracks": rows,
                 "techniques": [tr.technique for tr in plan.transitions], "warnings": plan.warnings}
+
+    # ------------------------------------------------------------ 按打碟谱在电脑里找曲子
+
+    FIND_MAX_FILES = 50000
+    FIND_MAX_DEPTH = 8
+
+    def _audio_files(self) -> list[Path]:
+        """find_dirs 下的音频文件（跳过隐藏目录、托管曲库、Library、.app）。读不了的文件夹（macOS 没给权限）跳过。"""
+        skip = {p.resolve() for p in (self.cfg.library, self.cfg.home, self.cfg.mixxx_dir)}
+        out: list[Path] = []
+        stack = [(d, 0) for d in reversed(self.cfg.find_dirs) if d.is_dir()]
+        while stack and len(out) < self.FIND_MAX_FILES:
+            d, depth = stack.pop()
+            try:
+                entries = sorted(os.scandir(d), key=lambda e: e.name)
+            except OSError:
+                continue
+            for e in entries:
+                if e.name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        sub = Path(e.path)
+                        if depth < self.FIND_MAX_DEPTH and e.name not in ("Library", "node_modules") \
+                                and sub.suffix != ".app" and sub.resolve() not in skip:
+                            stack.append((sub, depth + 1))
+                    elif e.is_file() and Path(e.name).suffix.lower() in AUDIO_EXTS:
+                        out.append(Path(e.path))
+                except OSError:
+                    continue
+        return out
+
+    def find_plan_tracks(self) -> None:
+        """后台：谱上还没进曲库的歌，去 find_dirs 里按文件名找（时长核对），找到就导入。完了试着自动开始一键分析。"""
+        with self._find_lock:
+            if self.finder.get("state") == "running":
+                return
+            self.finder = {"state": "running"}
+        self.emit("plan", self.finder)
+        threading.Thread(target=self._find, daemon=True).start()
+
+    def _find(self) -> None:
+        from .plan.convert import duration_ok, file_matches
+
+        res: dict[str, Any] = {"state": "done", "dirs": [str(d) for d in self.cfg.find_dirs], "searched": 0, "found": []}
+        try:
+            path = self.current_plan()
+            st = self.plan_status()
+            if path and st and not st.get("error"):
+                want = [i for i, r in enumerate(st["tracks"]) if not r["track"]]
+                if want:
+                    files = self._audio_files()
+                    res["searched"] = len(files)
+                    plan = self.load_plan(path)
+                    picks = {i: f for i, f in file_matches(plan, [str(f) for f in files], want).items()
+                             if duration_ok(plan.tracks[i], _duration(Path(f)))}
+                    if picks:
+                        self.library.import_paths(list(picks.values()), trusted=True)
+                    res["found"] = [{"no": plan.tracks[i].no, "file": f} for i, f in sorted(picks.items())]
+        except Exception as e:  # noqa: BLE001
+            res = {"state": "error", "error": str(e)}
+        self.finder = res
+        self.emit("plan", res)
+        self.maybe_auto()
+
+    def maybe_auto(self) -> Job | None:
+        """打碟谱和谱上的歌都齐了 → 自动开始一键分析（同一份谱 + 同一组歌只自动开始一次）。"""
+        with self._auto_lock:
+            if (self.job and self.job.state == "running") or (self.conductor and self.conductor.running):
+                return None
+            if self.finder.get("state") == "running":
+                return None
+            st = self.plan_status()
+            if not st or st.get("error") or not all(r["track"] for r in st["tracks"]):
+                return None
+            key = (st["file"], tuple(r["track"] for r in st["tracks"]))
+            if key == self._auto_key:
+                return None
+            try:
+                job = self.auto_prepare()
+            except StudioError:
+                return None
+            self._auto_key = key
+            return job
 
     AUTO_SETTLE = 15.0  # Mixxx 启动后等它安定的秒数
 

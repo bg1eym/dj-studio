@@ -8,6 +8,13 @@ def make_info(id: str, bpm: float = 128.0, dur: float = 360.0, first_beat: float
     return TrackInfo(id=id, title=id, grid=Grid(bpm=bpm, first_beat=first_beat, downbeat=downbeat, duration=dur))
 
 
+@pytest.fixture(autouse=True)
+def _no_side_effects(monkeypatch):
+    """测试里不自动 git pull，也不去真的「下载 / 文稿」等文件夹里找曲子（要找的测试自己设 cfg.find_dirs）。"""
+    monkeypatch.setenv("DJSTUDIO_NO_UPDATE", "1")
+    monkeypatch.setenv("DJSTUDIO_FIND_DIRS", "")
+
+
 @pytest.fixture
 def lib():
     return {

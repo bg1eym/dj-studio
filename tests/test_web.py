@@ -2,6 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from djstudio import __version__
 from djstudio.config import Config
 from djstudio.mixxx import fakedb
 from djstudio.studio import Studio
@@ -18,9 +19,19 @@ def client(tmp_path):
 
 
 def test_index_and_state(client):
-    assert "DJ Studio" in client.get("/").text
+    r = client.get("/")
+    assert "DJ Studio" in r.text and 'id="tab-home"' in r.text and 'id="adv-link"' in r.text
     st = client.get("/api/state").json()
     assert st["engine"]["connected"] is False and st["playing"] is False
+    assert st["version"].startswith(__version__)
+    assert client.get("/api/plan").json() is None
+
+
+def test_pages_are_not_cached(client):
+    """更新代码后刷新就是新界面：首页和网页文件都要求浏览器每次确认。"""
+    for url in ("/", "/static/app.js", "/static/live.js", "/static/style.css"):
+        r = client.get(url)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-cache", url
 
 
 def test_set_roundtrip_and_validate(client):

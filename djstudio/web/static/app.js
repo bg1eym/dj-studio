@@ -69,7 +69,7 @@ const deckFor = (i) => (i % 2 === 0 ? 1 : 2);
 // ------------------------------------------------------------------ 全局状态
 
 const S = {
-  tab: "library",
+  tab: "home",
   engine: { connected: false, online: false },
   state: null,
   tracks: [],
@@ -92,11 +92,22 @@ const S = {
 
 // ------------------------------------------------------------------ 路由
 
+// 首页（#home）一页走完；高级（控制台 / 曲库 / Set / 体检）收在右上角
+const TABS = ["home", "show", "library", "sets", "doctor"];
 function route() {
-  S.tab = (location.hash.slice(1) || "start").split("/")[0];
+  let tab = (location.hash.slice(1) || "home").split("/")[0];
+  if (!TABS.includes(tab)) tab = "home"; // 旧链接 #start 等
+  S.tab = tab;
   for (const a of document.querySelectorAll("#tabs a")) a.classList.toggle("active", a.dataset.tab === S.tab);
-  for (const s of document.querySelectorAll(".tab")) s.classList.toggle("active", s.id === "tab-" + S.tab);
-  if (S.tab === "start") renderStart();
+  $("#tabs").classList.toggle("hidden", S.tab === "home");
+  $("#adv-link").classList.toggle("hidden", S.tab !== "home");
+  for (const s of document.querySelectorAll(".tab")) {
+    s.classList.toggle("active", s.id === "tab-" + S.tab);
+    // 演出画面（liveRoot、#show-status）只放在当前这一页里，别的页清空，免得重复 id
+    if (s.id !== "tab-" + S.tab && (s.id === "tab-home" || s.id === "tab-show")) s.innerHTML = "";
+  }
+  S.homeMode = null;
+  if (S.tab === "home") { renderHome(true); schedulePlanReload(); }
   if (S.tab === "library") renderLibrary();
   if (S.tab === "sets") renderSets();
   if (S.tab === "show") renderShow();
@@ -117,30 +128,33 @@ function connectEvents() {
     if (st.progress) S.log = st.progress.log || [];
     updateEngineBadge();
     if (S.tab === "show") renderShow();
+    if (S.tab === "home") renderHome();
   });
   es.addEventListener("engine_state", (e) => {
     S.engine = JSON.parse(e.data);
     updateEngineBadge();
-    if (S.tab === "show") updateDecks();
+    if (S.tab === "show" || S.tab === "home") updateDecks();
   });
   es.addEventListener("progress", (e) => {
     const was = S.progress && S.progress.finished_at;
     S.progress = JSON.parse(e.data);
     S.log = S.progress.log || [];
     if (S.tab === "show") renderShowStatus();
+    if (S.tab === "home") renderHome();
     updateEngineBadge();
-    if (S.progress.finished_at && !was) setTimeout(() => loadState().then(() => { if (S.tab === "show") renderShow(); }), 300);
+    if (S.progress.finished_at && !was) setTimeout(() => loadState().then(() => { if (S.tab === "show") renderShow(); if (S.tab === "home") renderHome(); }), 300);
   });
   es.addEventListener("job", (e) => {
     S.job = JSON.parse(e.data);
     renderJobPanels();
-    if (S.tab === "start") loadState().then(() => renderStart());
+    if (S.tab === "home") loadState().then(() => renderHome());
     if (S.job.state !== "running") {
       loadTracks();
-      loadState().then(() => { if (S.tab === "show") renderShow(); });
+      loadState().then(() => { if (S.tab === "show") renderShow(); if (S.tab === "home") renderHome(); });
     }
   });
-  es.addEventListener("track", () => { scheduleTracksReload(); if (S.tab === "start") schedulePlanReload(); });
+  es.addEventListener("track", () => { scheduleTracksReload(); if (S.tab === "home") schedulePlanReload(); });
+  es.addEventListener("plan", () => { if (S.tab === "home") schedulePlanReload(); });
   es.onerror = () => { S.engine = { connected: false, online: false }; updateEngineBadge(); };
 }
 
@@ -166,7 +180,7 @@ async function loadState() {
 setInterval(async () => {
   if (S.job && S.job.state === "running") {
     const st = await api("GET", "/api/state").catch(() => null);
-    if (st) { S.job = st.job; S.state = st; renderJobPanels(); if (S.tab === "start") renderStartJob(); }
+    if (st) { S.job = st.job; S.state = st; renderJobPanels(); if (S.tab === "home") renderHome(); }
   }
 }, 1000);
 
@@ -175,7 +189,9 @@ function updateEngineBadge() {
   const e = S.engine || {};
   const lost = S.progress && S.progress.stage !== "done" && S.progress.engine_ok === false;
   b.className = "engine" + (e.online ? " online" : (e.connected || lost ? " lost" : ""));
-  $(".txt", b).textContent = e.rehearsal ? `预演中（模拟器 ${e.speed}×）` : e.online ? `引擎在线 ${e.version || ""}` : (e.connected ? "引擎失联" : "引擎未连接");
+  $(".txt", b).textContent = e.rehearsal ? `预演中（模拟器 ${e.speed}×）` : e.online ? "Mixxx 已连接" : (e.connected ? "引擎失联" : "Mixxx 未连接");
+  b.title = e.online ? `引擎脚本 DJStudio.js ${e.version || ""}` : "引擎状态";
+  $("#ver").textContent = (S.state && S.state.version) || "";
   const al = $("#alarm");
   const playing = S.state && S.state.playing;
   if (lost || (playing && !e.online)) {
@@ -184,9 +200,10 @@ function updateEngineBadge() {
   } else al.classList.add("hidden");
 }
 
-// ------------------------------------------------------------------ 开始：放进曲子和打碟谱 → 分析 → 演出
+// ------------------------------------------------------------------ 首页：一页走完 放进打碟谱 → 分析 → 演出
 
 const UP = { files: [], busy: false };
+const UPLOAD_EXTS = ["pdf", "mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "opus"];
 
 function putFile(file, onprog) {
   return new Promise((resolve, reject) => {
@@ -204,33 +221,49 @@ function putFile(file, onprog) {
   });
 }
 
+// 拖进来的可以是文件，也可以是整个文件夹（里面的音频和 PDF 都收，别的跳过）
+function filesFromDrop(dt) {
+  const entries = [...(dt.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+  if (!entries.length) return Promise.resolve([...dt.files]);
+  const out = [];
+  const walk = async (entry) => {
+    if (entry.isFile) { out.push(await new Promise((res, rej) => entry.file(res, rej))); return; }
+    if (!entry.isDirectory) return;
+    const reader = entry.createReader();
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (!batch.length) break;
+      for (const e of batch) await walk(e).catch(() => {});
+    }
+  };
+  return Promise.all(entries.map((e) => walk(e).catch(() => {}))).then(() => out);
+}
+
 async function addFiles(list) {
   for (const f of list) {
     const ext = f.name.toLowerCase().split(".").pop();
-    if (!["pdf", "mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "opus"].includes(ext)) {
-      UP.files.push({ name: f.name, state: "err", msg: "不是音频文件或 PDF", frac: 0 });
-      continue;
-    }
+    if (f.name.startsWith(".") || !UPLOAD_EXTS.includes(ext)) continue; // 文件夹里的封面、文本之类直接跳过
     UP.files.push({ name: f.name, file: f, state: "queued", frac: 0 });
   }
-  renderStartUploads();
+  renderHomeUploads();
   if (UP.busy) return;
   UP.busy = true;
-  for (const u of UP.files) {
-    if (u.state !== "queued") continue;
+  // 打碟谱先传：一读到谱，就能开始在电脑里找曲子
+  const order = () => UP.files.filter((u) => u.state === "queued").sort((a, b) => (b.name.toLowerCase().endsWith(".pdf") ? 1 : 0) - (a.name.toLowerCase().endsWith(".pdf") ? 1 : 0));
+  for (let q = order(); q.length; q = order()) {
+    const u = q[0];
     u.state = "sending";
-    renderStartUploads();
+    renderHomeUploads();
     try {
-      const r = await putFile(u.file, (fr) => { u.frac = fr; renderStartUploads(); });
+      const r = await putFile(u.file, (fr) => { u.frac = fr; renderHomeUploads(); });
       u.state = "ok";
-      u.msg = r.kind === "plan" ? "打碟谱" : r.existing ? "曲库里已有" : "已放进曲库，分析中";
-      if (r.kind === "plan") { S.plan = r.plan; renderStartPlan(); }
+      if (r.kind === "plan") S.plan = r.plan;
     } catch (e) {
       u.state = "err";
       u.msg = e.message;
     }
     u.file = null;
-    renderStartUploads();
+    renderHomeUploads();
     schedulePlanReload();
   }
   UP.busy = false;
@@ -241,126 +274,175 @@ function schedulePlanReload() {
   clearTimeout(planReloadTimer);
   planReloadTimer = setTimeout(async () => {
     S.plan = await api("GET", "/api/plan").catch(() => S.plan);
-    renderStartPlan();
-    renderStartJob();
-  }, 500);
+    renderHome();
+  }, 400);
 }
 
-async function renderStart() {
-  const root = $("#tab-start");
-  if (!root) return;
-  S.plan = await api("GET", "/api/plan").catch(() => null);
-  const input = h("input", { type: "file", multiple: true, accept: "audio/*,.pdf,application/pdf", class: "hidden",
-    onchange: (e) => { addFiles([...e.target.files]); e.target.value = ""; } });
-  const drop = h("div", { class: "drop", onclick: () => input.click() },
-    h("div", { class: "drop-big" }, "把曲子和打碟谱 PDF 拖到这里"),
-    h("div", { class: "dim" }, "也可以点这里选文件。曲子会复制进托管曲库并开始分析；同一首放两次不会重复。"));
-  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
-  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files]); });
-  root.innerHTML = "";
-  root.append(
-    h("div", { class: "step" }, h("div", { class: "step-no" }, "1"), h("div", { class: "grow" },
-      h("h2", {}, "放进来"), drop, input, h("div", { id: "start-uploads" }))),
-    h("div", { class: "step" }, h("div", { class: "step-no" }, "2"), h("div", { class: "grow", id: "start-plan" })),
-    h("div", { class: "step" }, h("div", { class: "step-no" }, "3"), h("div", { class: "grow", id: "start-job" })),
-  );
-  renderStartUploads();
-  renderStartPlan();
-  renderStartJob();
-}
-
-function renderStartUploads() {
-  const el = $("#start-uploads");
-  if (!el) return;
-  el.innerHTML = "";
-  const shown = UP.files.slice(-40);
-  if (!shown.length) return;
-  const n = UP.files.length, done = UP.files.filter((u) => u.state === "ok").length;
-  el.append(h("div", { class: "dim", style: "margin:8px 0 4px" }, `已放进 ${done} / ${n} 个文件`));
-  for (const u of shown) {
-    el.append(h("div", { class: "up-row " + u.state },
-      h("span", { class: "up-name" }, u.name),
-      u.state === "sending" ? h("span", { class: "up-bar" }, h("span", { style: `width:${Math.round(u.frac * 100)}%` })) : null,
-      h("span", { class: "up-msg" }, u.state === "queued" ? "等待" : u.state === "sending" ? `${Math.round(u.frac * 100)}%` : u.msg || "")));
-  }
-}
-
-function renderStartPlan() {
-  const el = $("#start-plan");
-  if (!el) return;
+// 首页现在该显示哪一屏
+function homeMode() {
   const p = S.plan;
-  el.innerHTML = "";
-  el.append(h("h2", {}, "打碟谱"));
-  if (!p) { el.append(h("div", { class: "dim" }, "还没有打碟谱：把 PDF 拖到上面。")); return; }
-  if (p.error) { el.append(h("div", { class: "err-box" }, `「${p.file}」读不了：${p.error}`)); return; }
-  const nl = p.techniques.filter((t) => t === "longhand").length;
-  const missing = p.tracks.filter((t) => !t.track).length;
-  el.append(
-    h("div", { class: "row" }, h("b", {}, p.title), h("span", { class: "dim" }, p.file),
-      h("span", { class: "grow" }),
-      h("span", { class: missing ? "badge err" : "badge ok" }, missing ? `还缺 ${missing} 首` : `${p.n_tracks} 首都在`),
-      h("span", { class: "dim" }, `${p.n_transitions} 段过渡：${nl} 长交接 · ${p.n_transitions - nl} 瞬时切换`)),
-    h("div", { class: "plan-list" }, p.tracks.map((t) => h("div", { class: "plan-row" + (t.track ? "" : " missing") },
-      h("span", { class: "mono dim" }, String(t.no).padStart(2, "0")),
-      h("span", { class: "grow" }, t.title, t.track ? h("span", { class: "dim" }, `  ← ${t.display}`) : h("span", { class: "dim" }, `  （${t.file || "没有文件名"}）`)),
-      h("span", { class: "mono dim" }, `${t.bpm} BPM`),
-      !t.track ? h("span", { class: "badge err" }, "还没放进来")
-        : !t.analyzed ? h("span", { class: "badge warn" }, "分析中")
-          : t.mixxx ? h("span", { class: "badge ok" }, "就绪") : h("span", { class: "badge" }, "已分析")))),
-  );
+  const job = S.job && S.job.name === "分析" && S.job.started !== S.homeSkipJob ? S.job : null;
+  const prog = S.progress;
+  if (S.state && S.state.playing) return "live";
+  if (job && job.state === "running") return "job";
+  if (prog && prog.finished_at && S.homeDone !== prog.started_at) return "live"; // 播完 / 停下：先停在演出画面，点「回到开始」再回来
+  if (job && job.state === "error") return "error";
+  if (job && job.state === "ok") return "ready";
+  return p && !p.error ? "plan" : "drop";
 }
 
-function renderStartJob() {
-  const el = $("#start-job");
-  if (!el) return;
-  const p = S.plan;
-  const job = S.job && S.job.name === "分析" ? S.job : null;
-  const running = job && job.state === "running";
-  const otherJob = S.job && S.job.state === "running" && !job;
-  const playing = S.state && S.state.playing;
-  const canStart = p && !p.error && p.tracks.every((t) => t.track) && !running && !otherJob && !playing;
-  el.innerHTML = "";
-  el.append(h("div", { class: "row" }, h("h2", { class: "grow" }, "分析"),
-    h("button", { class: running ? "" : "primary", disabled: !canStart, onclick: () => guard(async () => {
-      S.job = await api("POST", "/api/auto"); renderStartJob();
-    }) }, job && job.state !== "running" ? "重新分析" : "开始分析")));
-  if (!job) {
-    el.append(h("div", { class: "dim" }, !p ? "放进打碟谱和曲子之后就可以开始。"
-      : p.tracks.every((t) => t.track) ? "会做：分析音频 → 读打碟谱 → 让 Mixxx 分析（会重启 Mixxx）→ 核对 / 校正网格 → 生成 set → 准备 Mixxx。不用你管，大概几分钟。"
-        : "曲子还没放齐。"));
+async function renderHome(force = false) {
+  const root = $("#tab-home");
+  if (!root || S.tab !== "home") return;
+  const mode = homeMode();
+  if (mode === S.homeMode && !force && root.childElementCount) {
+    if (mode === "drop" || mode === "plan") renderHomePlan();
+    else if (mode === "live") renderShowStatus();
+    else renderHomeJob();
     return;
   }
+  S.homeMode = mode;
+  root.innerHTML = "";
+  if (mode === "live") {
+    S.showSetId = ((S.engine || {}).rehearsal && S.engine.set) || (S.progress && S.progress.set_id) || S.showSetId;
+    await loadShowCompiled();
+    if (S.homeMode !== "live") return; // 等编译结果时状态变了
+    const prog = S.progress || {};
+    const playing = S.state && S.state.playing;
+    root.append(
+      h("div", { class: "panel row home-live-bar" },
+        h("b", {}, (S.showCompiled && S.showCompiled.set && S.showCompiled.set.name) || S.showSetId || ""),
+        h("span", { class: "grow" }),
+        playing ? h("button", { class: "danger", onclick: () => guard(async () => { await api("POST", "/api/stop"); toast("淡出停止中…"); }) }, "■ 停止")
+          : h("button", { onclick: () => { S.homeDone = prog.started_at; renderHome(true); } }, "回到开始")),
+      h("div", { class: "panel", id: "show-status" }),
+      liveRoot,
+      h("details", { class: "panel job-log" }, h("summary", {}, "运行日志"), h("div", { class: "log", id: "show-log" })),
+    );
+    live.setSet(S.showCompiled);
+    renderShowStatus();
+    return;
+  }
+  const card = h("div", { class: "home" });
+  root.append(card);
+  if (mode === "drop" || mode === "plan") {
+    const input = h("input", { type: "file", multiple: true, accept: "audio/*,.pdf,application/pdf", class: "hidden",
+      onchange: (e) => { addFiles([...e.target.files]); e.target.value = ""; } });
+    const drop = h("div", { class: "drop" + (mode === "plan" ? " small" : ""), onclick: () => input.click() },
+      h("div", { class: "drop-big" }, mode === "drop" ? "把打碟谱 PDF 拖到这里" : "缺的曲子拖到这里"),
+      h("div", { class: "dim" }, mode === "drop"
+        ? "曲子可以一起拖进来（文件或整个文件夹）。没拖进来的，会按谱上的文件名去「下载 / 桌面 / 文稿 / 音乐」里找。"
+        : "文件或整个文件夹都行；也可以点这里选文件。"));
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); filesFromDrop(e.dataTransfer).then(addFiles); });
+    card.append(h("div", { id: "home-plan" }), drop, input, h("div", { id: "home-uploads" }));
+    renderHomePlan();
+    renderHomeUploads();
+  } else {
+    card.append(h("div", { id: "home-job" }));
+    renderHomeJob();
+  }
+}
+
+function renderHomeUploads() {
+  const el = $("#home-uploads");
+  if (!el) return;
+  el.innerHTML = "";
+  const n = UP.files.length;
+  if (!n) return;
+  const done = UP.files.filter((u) => u.state === "ok" || u.state === "err").length;
+  const cur = UP.files.find((u) => u.state === "sending");
+  const frac = (done + (cur ? cur.frac : 0)) / n;
+  if (done < n) {
+    el.append(h("div", { class: "up-line" }, h("span", {}, `正在放进来 ${done} / ${n}`),
+      h("span", { class: "up-bar grow" }, h("span", { style: `width:${Math.round(frac * 100)}%` })),
+      h("span", { class: "dim up-name" }, cur ? cur.name : "")));
+  }
+  for (const u of UP.files.filter((x) => x.state === "err")) el.append(h("div", { class: "up-err" }, `${u.name}：${u.msg}`));
+}
+
+function planHeader(p) {
+  const nl = p.techniques.filter((t) => t === "longhand").length;
+  return h("div", { class: "home-title" },
+    h("h1", {}, p.title),
+    h("div", { class: "dim" }, `${p.n_tracks} 首 · ${p.n_transitions} 段过渡（${nl} 长交接 · ${p.n_transitions - nl} 瞬时切换）`));
+}
+
+function renderHomePlan() {
+  const el = $("#home-plan");
+  if (!el) return;
+  const p = S.plan;
+  el.innerHTML = "";
+  if (!p) return;
+  if (p.error) { el.append(h("div", { class: "err-box" }, `「${p.file}」读不了：${p.error}`)); return; }
+  const have = p.tracks.filter((t) => t.track).length;
+  const missing = p.tracks.filter((t) => !t.track);
+  const f = p.finder || {};
+  const job = S.job && S.job.state === "running" ? S.job : null;
+  el.append(planHeader(p),
+    h("div", { class: "home-count" }, h("span", { class: "big-pct" }, `${have} / ${p.n_tracks}`), h("span", {}, " 首曲子已就位")),
+    f.state === "running" ? h("div", { class: "dim" }, "正在电脑里按谱上的文件名找曲子…")
+      : f.state === "done" && f.found && f.found.length ? h("div", { class: "dim" }, `在电脑里找到 ${f.found.length} 首，已放进曲库`)
+        : f.state === "error" ? h("div", { class: "warn-box" }, `在电脑里找曲子时出错：${f.error}`) : null);
+  if (missing.length && f.state !== "running") {
+    el.append(h("div", { class: "missing" }, h("div", {}, "还缺这几首，把文件拖到下面："),
+      missing.map((t) => h("div", { class: "mono" }, `#${String(t.no).padStart(2, "0")} ${t.title}`, h("span", { class: "dim" }, t.file ? `  （${t.file}）` : "")))));
+  }
+  if (!missing.length && f.state !== "running") {
+    el.append(h("div", { class: "row", style: "margin-top:10px" },
+      h("button", { class: "primary", disabled: !!job, onclick: () => guard(async () => { S.job = await api("POST", "/api/auto"); S.homeSkipJob = null; renderHome(); }) },
+        job ? `「${job.name}」进行中…` : "开始分析")));
+  }
+}
+
+function renderHomeJob() {
+  const el = $("#home-job");
+  if (!el) return;
+  const job = S.job;
+  const p = S.plan;
+  el.innerHTML = "";
+  if (!job) return;
+  if (p && !p.error) el.append(planHeader(p));
   const pct = Math.round((job.progress || 0) * 100);
-  el.append(
-    h("div", { class: "big-bar" + (job.state === "error" ? " err" : job.state === "ok" ? " ok" : "") },
-      h("div", { style: `width:${job.state === "error" ? 100 : pct}%` })),
-    h("div", { class: "row", style: "margin-top:6px" },
-      h("span", { class: "big-pct" }, job.state === "error" ? "没完成" : `${pct}%`),
-      h("span", { class: "grow dim" }, job.state === "error" ? "" : job.detail || "")),
-    h("div", { class: "stages" }, (job.stages || []).map((name, i) => h("span", {
-      class: "stage-chip " + (job.state === "error" && i === job.stage ? "err" : i < job.stage || job.state === "ok" ? "done" : i === job.stage ? "now" : ""),
-    }, (i < job.stage || job.state === "ok" ? "✓ " : i === job.stage && job.state === "running" ? "● " : "") + name))),
-  );
+  const nStages = (job.stages || []).length;
+  if (job.state !== "ok") {
+    el.append(
+      h("div", { class: "big-bar" + (job.state === "error" ? " err" : "") }, h("div", { style: `width:${job.state === "error" ? 100 : pct}%` })),
+      h("div", { class: "row", style: "margin-top:6px" },
+        h("span", { class: "big-pct" }, job.state === "error" ? "没完成" : `${pct}%`),
+        h("span", { class: "grow" }, job.state === "error" ? ""
+          : nStages ? `第 ${Math.min(job.stage + 1, nStages)} / ${nStages} 步：${job.stages[job.stage] || ""}` : job.name),
+        h("span", { class: "dim" }, job.state === "error" ? "" : job.detail || "")));
+    if (job.state === "running") el.append(h("div", { class: "dim", style: "margin-top:8px" }, "分析中会重启 Mixxx。不用管，大概几分钟。"));
+  }
   if (job.state === "error") {
     const errs = job.log.filter((l) => l.includes("!!")).slice(-3).map((l) => l.replace(/^\S+ !! /, ""));
-    el.append(h("div", { class: "err-box" }, errs.join("\n") || "出错了，看下面的日志"));
+    el.append(h("div", { class: "err-box" }, errs.join("\n") || "出错了，看下面的日志"),
+      h("div", { class: "row" }, h("button", { class: "primary", onclick: () => guard(async () => { S.job = await api("POST", "/api/auto"); S.homeSkipJob = null; renderHome(); }) }, "重新分析"),
+        h("button", { onclick: () => { S.homeSkipJob = job.started; renderHome(true); } }, "换一份打碟谱 / 补曲子")));
   }
   const r = job.state === "ok" ? job.result : null;
   if (r) {
     const warns = (r.notes || []).filter((n) => n.level === "warn");
-    if (warns.length) el.append(h("div", { class: "warn-box" }, h("b", {}, "需要注意"), warns.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
     el.append(h("div", { class: "ready" },
-      h("div", {}, h("div", { class: "ready-big" }, "可以演出了"),
-        h("div", { class: "dim" }, `set「${r.set}」，约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好（队列、引擎都就位）。`)),
-      h("span", { class: "grow" }),
-      h("button", { class: "primary huge", disabled: playing, onclick: () => guard(async () => {
+      h("div", { class: "grow" }, h("div", { class: "ready-big" }, "可以演出了"),
+        h("div", { class: "dim" }, `约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好。`)),
+      h("button", { class: "primary huge", onclick: () => guard(async () => {
         await api("POST", `/api/sets/${r.set}/play`);
-        S.showSetId = r.set; S.showCompiled = null;
+        S.showSetId = r.set; S.showCompiled = null; S.homeDone = null;
         await loadState();
-        location.hash = "#show";
-      }) }, "▶ 开始演出"),
-      h("a", { href: "#show", onclick: () => { S.showSetId = r.set; S.showCompiled = null; } }, "先预演看看")));
+        renderHome(true);
+      }) }, "▶ 开始演出")));
+    if (warns.length) el.append(h("div", { class: "warn-box" }, h("b", {}, "需要注意"), warns.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
+    el.append(h("div", { class: "row dim", style: "margin-top:10px" },
+      h("a", { href: "#home", onclick: (e) => { e.preventDefault(); guard(async () => {
+        await api("POST", `/api/sets/${r.set}/rehearse`, { speed: 1, from: 0 });
+        S.showSetId = r.set; S.showCompiled = null; S.homeDone = null;
+        await loadState(); renderHome(true);
+      }); } }, "先在模拟器里预演（不碰 Mixxx，没有声音）"),
+      h("span", { class: "grow" }),
+      h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeSkipJob = job.started; renderHome(true); } }, "换一份打碟谱")));
   }
   el.append(h("details", { class: "job-log" }, h("summary", {}, "详细日志"), h("div", { class: "log" }, job.log.join("\n"))));
 }
@@ -906,11 +988,7 @@ async function renderShow() {
   if (!S.sets.length) S.sets = await api("GET", "/api/sets").catch(() => []);
   const prepared = S.state && S.state.prepared;
   if (!S.showSetId) S.showSetId = (prepared && prepared.set) || S.setId || (S.sets[0] && S.sets[0].id);
-  const want = showKey();
-  if (S.showSetId && (!S.showCompiled || S.showCompiled._key !== want.key)) {
-    const r = await api("GET", want.url).catch(() => null);
-    S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, _key: want.key, set: r.set } : null;
-  }
+  await loadShowCompiled();
   const playing = S.state && S.state.playing;
   const busy = playing || (S.job && S.job.state === "running");
   const isPrepared = prepared && prepared.set === S.showSetId;
@@ -949,6 +1027,14 @@ async function renderShow() {
   renderJobPanels();
   renderShowStatus();
   updateDecks();
+}
+
+async function loadShowCompiled() {
+  const want = showKey();
+  if (S.showSetId && (!S.showCompiled || S.showCompiled._key !== want.key)) {
+    const r = await api("GET", want.url).catch(() => null);
+    S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, _key: want.key, set: r.set } : null;
+  }
 }
 
 // 演出页显示哪份编译结果：预演从第 k 段开始时是截短的那份（progress.index 按它算）
@@ -1023,7 +1109,7 @@ function updateDecks() {
   const e = S.engine || {};
   if (S.showCompiled && S.showCompiled._key !== showKey().key && !showReloading) {
     showReloading = true;
-    renderShow().finally(() => { showReloading = false; });
+    (S.tab === "home" ? renderHome(true) : renderShow()).finally(() => { showReloading = false; });
     return;
   }
   live.setBanner(!e.rehearsal && e.connected && !e.online && S.state && S.state.playing ? "引擎失联：画面停在最后一帧" : "");

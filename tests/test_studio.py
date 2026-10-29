@@ -351,3 +351,52 @@ def test_auto_prepare_from_plan(env, monkeypatch):
     tr = s.transitions[0]
     assert tr.technique == "custom" and tr.label == "长交接" and tr.start == 21 and tr.play_at == 4
     assert studio.prepared()["set"] == s.id and len(studio.mixxx.autodj_queue()) == 2
+
+
+def test_drop_plan_only_finds_tracks_and_starts_analysis(env, monkeypatch):
+    """只放打碟谱：按谱上的文件名去 find_dirs 里找到曲子并导入，齐了自动开始一键分析（同一组只自动开始一次）。"""
+    from djstudio.plan.cdw import Knobs, Plan, PlanRow, PlanTrack, PlanTransition
+
+    studio, src, state = env
+    studio.cfg.find_dirs = [src.parent]
+    (src.parent / ".hidden").mkdir()
+    shutil.copy2(src / "c.wav", src.parent / ".hidden" / "a.wav")  # 隐藏目录里的不算
+
+    def launch():  # 「Mixxx 启动」= 扫描并分析托管曲库
+        state["running"] = True
+        have = studio._mixxx_tracks(studio.store.all())
+        for t in studio.store.all():
+            if t.id not in have:
+                bpm, fb, _ = SPECS[Path(t.source).name]
+                fake_mixxxdb.add_track(studio.cfg.mixxx_db, t.path, t.duration, bpm, fb, samplerate=22050, title=t.title)
+
+    monkeypatch.setattr(process, "launch_mixxx", launch)
+    ba, fa, da = SPECS["a.wav"]
+    bb, fb_, db_ = SPECS["b.wav"]
+    K = lambda lo=0, v=10: Knobs(lo, 0, 0, 0, v)  # noqa: E731
+    plan = Plan("测试谱", [
+        PlanTrack(1, "A", ba, ba, False, None, None, None, "Promo - a.wav", fa + da * 60 / ba),
+        PlanTrack(2, "B", bb, ba, False, None, 25, "longhand", "Promo - b.wav", fb_ + db_ * 60 / bb),
+    ], [PlanTransition(1, "A", "B", "longhand", 25, ba, ba, None, [
+        PlanRow(21, None, False, K(), None),
+        PlanRow(25, 1, False, K(), K(lo=-5, v=5)),
+        PlanRow(41, 17, True, K(lo=-5), K()),
+    ])])
+    pdf = studio.plans_dir / "测试谱.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"%PDF-1.4 stub")
+    monkeypatch.setattr(studio, "load_plan", lambda path: plan)
+    assert not any(r["track"] for r in studio.plan_status()["tracks"])
+
+    studio.find_plan_tracks()
+    t0 = time.time()
+    while studio.finder.get("state") == "running" and time.time() - t0 < 30:
+        time.sleep(0.1)
+    f = studio.finder
+    assert f["state"] == "done" and [Path(x["file"]).name for x in f["found"]] == ["a.wav", "b.wav"], f
+    assert all(Path(x["file"]).parent == src for x in f["found"])
+    assert studio.job and studio.job.name == "分析"  # 齐了自动开始
+    job = wait_job(studio.job, 120)
+    assert job.state == "ok", "\n".join(job.log)
+    assert [t.id for t in studio.load(job.result["set"]).tracks] == [r["track"] for r in studio.plan_status()["tracks"]]
+    assert studio.maybe_auto() is None  # 同一份谱 + 同一组歌不再自动重来

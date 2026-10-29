@@ -33,6 +33,14 @@ Mixxx + DJStudio.js（控制器映射）
 → 打碟谱转 set（`plan/convert.py`：曲目匹配、小节对齐、钟点位换算；小节相位按谱写回曲库后再转一次）→ 准备（`_prepare`）。
 网页上传走 `PUT /api/upload?name=…`（请求体就是文件），音频复制进托管曲库，PDF 存到 `~/DJStudio/plans/`（最新的就是当前打碟谱）。
 
+放进打碟谱后 `Studio.find_plan_tracks()` 在后台把谱上还缺的歌去 `Config.find_dirs`（默认 下载 / 桌面 / 文稿 / 音乐）里找：
+`plan/convert.py` 的 `file_matches` 按文件名比（去掉编号和标点后的字符相似度、词集合相似度取大的，门槛 0.85），
+`duration_ok` 核对时长，找到的导入托管曲库。之后（以及每个音频上传完）调 `Studio.maybe_auto()`：谱上的歌都齐了就自动开始一键分析，
+同一份谱 + 同一组歌只自动开始一次。网页首页（`app.js` 的 `renderHome`）按状态换屏：放打碟谱 → 进度条 → 可以演出 → 演出画面。
+
+启动（`selfupdate.py`）：从 git 仓库运行时先 `git pull --ff-only`，有新提交就（依赖变了先重装）`os.execv` 重启自己；
+端口被之前开着的 DJ Studio 占着就先关掉它。网页文件都带 `Cache-Control: no-cache`，右上角显示版本和提交号。
+
 ### 网页怎么「看见」旋钮
 
 引擎每 100ms 的状态帧里带 `m`（每个通道从 Mixxx **读回**的 hi / mid / lo / filter / echo / reverb / vu_meter）、`x`（crossfader）、

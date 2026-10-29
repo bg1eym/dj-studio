@@ -39,6 +39,13 @@ def find_mixxx_dir() -> Path:
     return Path(_MIXXX_CANDIDATES[0]).expanduser()
 
 
+def _find_dirs() -> list[Path]:
+    env = os.environ.get("DJSTUDIO_FIND_DIRS")
+    if env is not None:
+        return [Path(p).expanduser() for p in env.split(os.pathsep) if p]
+    return [Path.home() / d for d in ("Downloads", "Desktop", "Documents", "Music")]
+
+
 @dataclass
 class Config:
     home: Path = field(default_factory=lambda: _env_path("DJSTUDIO_HOME", "~/DJStudio"))
@@ -47,6 +54,8 @@ class Config:
     midi_port: str = field(default_factory=lambda: os.environ.get("DJSTUDIO_MIDI_PORT", "IAC"))
     # 网页里允许浏览 / 导入的根目录（防止网页读到任意路径）
     browse_roots: list[Path] = field(default_factory=lambda: [Path.home(), Path("/Volumes")])
+    # 只放进打碟谱时，去这些文件夹里按谱上的文件名找曲子（DJSTUDIO_FIND_DIRS 用冒号分隔可改）
+    find_dirs: list[Path] = field(default_factory=lambda: _find_dirs())
     host: str = "127.0.0.1"
     port: int = int(os.environ.get("DJSTUDIO_PORT", "8430"))
 

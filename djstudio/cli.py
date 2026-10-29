@@ -14,14 +14,17 @@ from pathlib import Path
 def _serve(studio, host: str, port: int, open_browser: bool) -> None:  # type: ignore[no-untyped-def]
     import uvicorn
 
+    from .selfupdate import free_port, version_text
     from .web.app import create_app
 
+    if not free_port(host, port):
+        raise SystemExit(1)
     app = create_app(studio)
     url = f"http://{host}:{port}/"
-    print(f"DJ Studio → {url}")
+    print(f"DJ Studio {version_text()} → {url}")
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning", timeout_graceful_shutdown=2)
 
 
 def _wait_job(job) -> int:  # type: ignore[no-untyped-def]
@@ -67,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
         studio = setup_demo(root, args.speed)
         _serve(studio, "127.0.0.1", args.port, not args.no_browser)
         return 0
+
+    if cmd == "serve":
+        from .selfupdate import self_update
+
+        self_update(sys.argv[1:] if argv is None else argv)  # 拉到新代码会重启自己
 
     from .studio import Studio
 

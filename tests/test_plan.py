@@ -9,7 +9,7 @@ import pytest
 
 from djstudio.grid import Grid
 from djstudio.plan.cdw import Knobs, Plan, PlanEffect, PlanError, PlanRow, PlanTrack, PlanTransition, clock, fader
-from djstudio.plan.convert import LibTrack, align, convert, eq_db, filter_val, match_tracks
+from djstudio.plan.convert import LibTrack, align, convert, duration_ok, eq_db, file_matches, filter_val, match_tracks
 from djstudio.setfile import SetFile
 
 
@@ -77,6 +77,29 @@ def test_match_by_number_name_and_duration():
     assert [t.id for t in m] == ["a", "b"] and not notes
     m, notes = match_tracks(plan, make_lib()[:2])  # 少了 A
     assert m[0] is None and notes and notes[0].level == "error" and "#01" in notes[0].where
+
+
+def test_find_files_by_plan_names():
+    """只放打碟谱时，按谱上的文件名在电脑里找曲子：编号、下划线、艺人写法不同都认；多一个 Edit / Remix 的词不认。"""
+    pts = [PlanTrack(n, t, 138, 138, False, None, None, None, f) for n, t, f in [
+        (1, "Overdrive (Edit) — Charlotte de Witte", "Charlotte de Witte - Overdrive (Edit).mp3"),
+        (4, "High Street — Charlotte de Witte", "Charlotte de Witte - High Street.mp3"),
+        (8, "Overdrive — Charlotte de Witte", "Charlotte de Witte - Overdrive.mp3"),
+        (14, "Universal Nation (CdW Rework) — Push", "Push,Charlotte de Witte - Universal Nation (Charlotte de Witte Rework).mp3"),
+    ]]
+    plan = Plan("谱", pts, [])
+    files = ["/m/RW/08_Charlotte_de_Witte_-_Overdrive.mp3", "/m/RW/01_Charlotte_de_Witte_-_Overdrive_Edit.mp3",
+             "/m/RW/05_Charlotte_de_Witte_-_High_Street_Astrix_Remix.mp3",
+             "/m/RW/14_Push_-_Universal_Nation_Charlotte_de_Witte_Rework.mp3", "/m/other/Totally Different.mp3"]
+    got = file_matches(plan, files, [0, 1, 2, 3])
+    assert got == {0: files[1], 2: files[0], 3: files[3]}  # High Street 只有 Remix 版：不认
+
+
+def test_duration_check_for_found_files():
+    pt = PlanTrack(1, "A", 128, 128, False, 96, None, None, "a.mp3", 0.5)
+    est = 0.5 + 96 * 4 * 60 / 128
+    assert duration_ok(pt, est + 10) and not duration_ok(pt, est + 30)
+    assert duration_ok(PlanTrack(1, "A", 128, 128, False, None, None, None), 1.0)  # 谱上没写小节数：不核对
 
 
 def test_align_phase_and_offset():

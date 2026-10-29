@@ -114,7 +114,7 @@ drop 对 drop：时间线 0..`pre_bars`（4）A 做扫频（`sweep`: hpf/lpf/non
 
 ## 从打碟谱自动生成
 
-网页「开始」页放进《打碟谱》PDF（ReportLab 生成、有文字层的那种模板，见 `djstudio/plan/cdw.py`），分析时自动转成 set
+网页首页放进《打碟谱》PDF（ReportLab 生成、有文字层的那种模板，见 `djstudio/plan/cdw.py`），分析时自动转成 set
 （`djstudio/plan/convert.py`，全是固定规则）：
 
 - **曲目**：按谱上的文件名 / 曲名 + 文件名前的编号匹配曲库，再用「小节数 × 原 BPM」核对时长；`play_bpm` = 谱上的「播放」。
