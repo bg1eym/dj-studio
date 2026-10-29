@@ -36,10 +36,12 @@
 #include <QMutex>
 #include <QTemporaryDir>
 #include <QThread>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <iostream>
@@ -76,6 +78,7 @@
 namespace {
 
 constexpr int kSampleRate = 44100;
+constexpr double kPi = 3.14159265358979323846;
 constexpr int kBufferSamples = 1024; // 每次处理 512 帧（立体声），和 Mixxx 自己的测试一样
 constexpr int kBufferFrames = kBufferSamples / 2;
 
@@ -891,8 +894,8 @@ std::vector<float> resample(const std::vector<float>& x, int srIn, int srOut) {
             double w = 0.0;
             if (std::abs(d) < width) {
                 const double t = d * cutoff;
-                const double sinc = t == 0.0 ? 1.0 : std::sin(M_PI * t) / (M_PI * t);
-                w = sinc * cutoff * (0.42 + 0.5 * std::cos(M_PI * d / width) + 0.08 * std::cos(2 * M_PI * d / width));
+                const double sinc = t == 0.0 ? 1.0 : std::sin(kPi * t) / (kPi * t);
+                w = sinc * cutoff * (0.42 + 0.5 * std::cos(kPi * d / width) + 0.08 * std::cos(2 * kPi * d / width));
             }
             table[static_cast<size_t>(p * 2 * H + (j + H - 1))] = static_cast<float>(w);
         }
