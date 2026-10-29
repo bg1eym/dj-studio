@@ -239,7 +239,17 @@ class Conductor:
             self.log(f"deck{d} 已装好 {self._title(k)}")
             return
         if ds and ds.playing:
-            raise ConductorError(f"要往 deck{d} 装 {self._title(k)}，但它还在播")
+            # 程序刚把这边停下时，「done」事件可能比反映停止的那次状态（每 100ms 一次）先到：等新状态再判断
+            t0, deadline = self.c.last_status_at, time.monotonic() + 2.0
+
+            def stopped() -> bool:
+                s = self.c.deck(d)
+                return (self.c.last_status_at > t0 and not (s and s.playing)) or time.monotonic() > deadline
+
+            self._wait(stopped, 5.0, f"deck{d} 停下")
+            ds = self.c.deck(d)
+            if ds and ds.playing:
+                raise ConductorError(f"要往 deck{d} 装 {self._title(k)}，但它还在播")
         cursor = [self.c.mark()]
         self.c.send({"t": "load", "deck": d})
         got: dict[str, Any] = {}

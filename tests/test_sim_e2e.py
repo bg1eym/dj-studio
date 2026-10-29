@@ -102,6 +102,27 @@ def test_full_set(rig):
     assert abs(bpms_d1[-1] - 132) < 0.01
 
 
+def test_status_lags_behind_done(rig):
+    """「done」事件比反映 A 已停的状态先到（状态每 100ms 一次；机器忙时真引擎测试台上出现过）：
+    conductor 不能因为缓存里 A 还在播就报错，要等新状态。"""
+    link, client = rig
+    orig = client._dispatch
+    hold = {"until": 0.0}
+
+    def lagging(msg):
+        if msg.get("t") == "ev" and msg.get("e") == "done":
+            hold["until"] = time.monotonic() + 0.3
+        if msg.get("t") == "st" and time.monotonic() < hold["until"]:
+            return
+        orig(msg)
+
+    client._dispatch = lagging
+    cond = Conductor(client, make_compiled())
+    run(cond, 90)
+    log = "\n".join(cond.progress.log)
+    assert cond.progress.stage == "done", log + f"\n{cond.progress.error}"
+
+
 def test_engine_lost(rig):
     link, client = rig
     compiled = make_compiled()
