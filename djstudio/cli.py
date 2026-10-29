@@ -72,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
 
     studio = Studio()
     if cmd == "serve":
-        _serve(studio, studio.cfg.host, args.port or studio.cfg.port, not args.no_browser)
+        # 不带子命令（直接 `djstudio`）时 serve 的参数不会被解析，取默认值
+        port = getattr(args, "port", None) or studio.cfg.port
+        _serve(studio, studio.cfg.host, port, not getattr(args, "no_browser", False))
         return 0
     if cmd == "doctor":
         rc = 0
