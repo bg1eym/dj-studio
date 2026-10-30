@@ -24,7 +24,8 @@ from ..selfupdate import version_text
 from ..setfile import SetFile
 from ..studio import Studio, StudioError, mapping_version
 
-ENGINE_PUSH_S = 0.1
+ENGINE_PUSH_S = 0.5    # 没有新状态帧时多久推一次（失联、age 这些要更新）
+ENGINE_POLL_S = 0.015  # 多久看一次有没有新状态帧：新帧到了马上推，旋钮 / 电平表别比声音慢太多
 
 STATIC = Path(__file__).parent / "static"
 
@@ -89,23 +90,22 @@ def create_app(studio: Studio) -> FastAPI:
         async def gen():  # type: ignore[no-untyped-def]
             try:
                 yield f"event: state\ndata: {json.dumps(state(), ensure_ascii=False, default=str)}\n\n"
-                last_status = None
+                last_at: Any = None
                 last_push = 0.0
                 while True:
                     if await request.is_disconnected():
                         break
                     try:
-                        kind, payload = await asyncio.wait_for(q.get(), timeout=0.05)
+                        kind, payload = await asyncio.wait_for(q.get(), timeout=ENGINE_POLL_S)
                         yield f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
                     except asyncio.TimeoutError:
                         pass
-                    # 引擎状态（含旋钮读数）每 100ms 一帧，和引擎上报同频：网页混音台靠它动
+                    # 引擎状态（含旋钮读数）每 100ms 一帧：新帧一到就推（网页混音台靠它动），没有新帧时每 0.5 秒推一次
                     now = time.monotonic()
-                    if now - last_push >= ENGINE_PUSH_S:
-                        cur = json.dumps(studio.engine_state(), default=str)
-                        if cur != last_status:
-                            last_status, last_push = cur, now
-                            yield f"event: engine_state\ndata: {cur}\n\n"
+                    es = studio.engine_state()
+                    if es.get("at") != last_at or now - last_push >= ENGINE_PUSH_S:
+                        last_at, last_push = es.get("at"), now
+                        yield f"event: engine_state\ndata: {json.dumps(es, default=str)}\n\n"
             finally:
                 if listener in studio.listeners:
                     studio.listeners.remove(listener)
