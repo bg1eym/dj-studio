@@ -662,7 +662,8 @@ export class LiveView {
     const now = performance.now();
     // 状态帧里的位置是什么时候「听到」的：服务器给了（收到时刻 + 声卡延迟，Unix 毫秒）就换算到页面时钟，
     // 否则只能当作现在（会比声音晚一个轮询间隔）
-    const tFrame = engine && engine.at ? engine.at - performance.timeOrigin : now;
+    let tFrame = engine && engine.at ? engine.at - performance.timeOrigin : now;
+    if (Math.abs(tFrame - now) > 2000) tFrame = now; // 两边时钟对不上（不该发生）：退回按收到的时刻
     const speed = (engine && engine.speed) || 1;
     this.progress = progress;
     const st = engine && engine.status;
