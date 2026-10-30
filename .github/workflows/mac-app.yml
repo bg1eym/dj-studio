@@ -162,12 +162,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$RELEASE_TAG" --prerelease --title "DJ Studio（Mac）" --notes "独立的 DJ Studio.app，Apple 芯片（M1 及以后）的 Mac。" 2>/dev/null || true
-          gh release edit "$RELEASE_TAG" --notes "独立的 DJ Studio.app，Apple 芯片（M1 及以后）的 Mac。" 2>/dev/null || true
+          VER=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          gh release create "$RELEASE_TAG" --title "DJ Studio $VER（Mac，Apple 芯片）" --notes "独立的 DJ Studio.app" 2>/dev/null || true
           # 不再做 Intel 版：把以前传的删掉
           gh release delete-asset "$RELEASE_TAG" DJ-Studio-mac-x64.zip -y 2>/dev/null || true
           gh release delete-asset "$RELEASE_TAG" selftest-x64.txt -y 2>/dev/null || true
           for i in 1 2 3 4 5 6; do gh release upload "$RELEASE_TAG" DJ-Studio-mac-${{ matrix.arch }}.zip selftest-${{ matrix.arch }}.txt --clobber && break; sleep 10; done
+          # 传好以后再改标题和说明：Release 页上看得到现在是哪一版
+          {
+            echo "独立的 DJ Studio.app，Apple 芯片（M1 及以后）的 Mac。当前版本 **$VER · ${GITHUB_SHA::7}**。"
+            echo
+            echo "安装 / 更新（终端里粘贴这一行，装进「应用程序」并打开）："
+            echo
+            echo '```bash'
+            echo 'curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-arm64.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"'
+            echo '```'
+          } > release-notes.md
+          gh release edit "$RELEASE_TAG" --title "DJ Studio $VER（Mac，Apple 芯片）" --notes-file release-notes.md --prerelease=false --latest || true
       - name: 上传日志（成功失败都传，Release「ci-logs」）
         if: always()
         env:
