@@ -6,6 +6,8 @@
 
 const NS = "http://www.w3.org/2000/svg";
 const DECK_HEX = { 1: "#ff9a3c", 2: "#46c2ff" };
+// EQ 三段的颜色，和波形一致：低 = 红、中 = 绿、高 = 蓝（波形每一竖条的颜色 = 三段能量的混合）
+const BAND_HEX = { lo: "#ff5d5d", mid: "#4cd97b", hi: "#4ea3ff" };
 const SPAN_S = 7; // 波形窗口：播放头两侧各 7 秒（真实时间，两边 deck 同一比例，拍对齐时小节线上下对齐）
 const MIX = { hi: 0, mid: 1, lo: 2, filter: 3, echo: 4, reverb: 5, vu: 6 };
 const PARAM_ORDER = ["vol", "hi", "mid", "lo", "filter", "echo", "reverb"];
@@ -117,7 +119,7 @@ function arcPath(cx, cy, r, a0, a1) {
 // ------------------------------------------------------------------ 混音台部件
 
 class Knob {
-  constructor(label, param, color, small = false) {
+  constructor(label, param, color, small = false, labelColor = null) {
     this.param = param;
     this.v = null;
     const S = small ? 32 : 42, c = S / 2, r = c - 4;
@@ -131,7 +133,8 @@ class Knob {
     this.c = c; this.r = r;
     this.val = el("div", { class: "kv" }, "–");
     this.sub = el("div", { class: "ks" });
-    this.root = el("div", { class: "knob" + (small ? " small" : "") }, this.svg, el("div", { class: "kl" }, label), this.val, this.sub);
+    this.root = el("div", { class: "knob" + (small ? " small" : "") }, this.svg,
+      el("div", { class: "kl" + (labelColor ? " band" : ""), style: labelColor ? `color:${labelColor}` : null }, label), this.val, this.sub);
   }
 
   set(v) {
@@ -202,7 +205,8 @@ class Channel {
   constructor(d) {
     const col = DECK_HEX[d];
     this.k = {
-      hi: new Knob("HIGH", "hi", col), mid: new Knob("MID", "mid", col), lo: new Knob("LOW", "lo", col),
+      hi: new Knob("HIGH", "hi", BAND_HEX.hi, false, BAND_HEX.hi), mid: new Knob("MID", "mid", BAND_HEX.mid, false, BAND_HEX.mid),
+      lo: new Knob("LOW", "lo", BAND_HEX.lo, false, BAND_HEX.lo),
       filter: new Knob("FILTER", "filter", "#c9a6ff"),
       echo: new Knob("ECHO", "echo", "#7ee0b5", true), reverb: new Knob("REVERB", "reverb", "#7ee0b5", true),
     };
@@ -473,19 +477,22 @@ class Timeline {
         svg("line", { x1: (prog.play / len) * W, x2: (prog.play / len) * W, y1: 0, y2: RH, stroke: DECK_HEX[deckOf("B")], "stroke-dasharray": "3 3", "vector-effect": "non-scaling-stroke" }, s);
       }
       draw(s, W, RH);
-      this.rows.append(el("div", { class: "tl-label", style: `color:${color}` }, label), s);
+      this.rows.append(label instanceof Node ? label : el("div", { class: "tl-label", style: `color:${color}` }, label), s);
     };
     for (const name of names) {
       const [side, param] = name.split(".");
       const d = deckOf(side);
       const pts = prog.lanes[name];
-      addRow(`${side}·${PARAM_LABEL[param] || param}`, DECK_HEX[d], (s) => {
+      const col = isEq(param) ? BAND_HEX[param] : DECK_HEX[d];
+      const label = el("div", { class: "tl-label" }, el("span", { style: `color:${DECK_HEX[d]}` }, side), "·",
+        el("span", { style: `color:${col}` }, PARAM_LABEL[param] || param));
+      addRow(label, col, (s) => {
         const Y = (v) => 3 + (1 - laneY(param, v)) * (RH - 6);
         if (param === "filter") svg("line", { x1: 0, x2: W, y1: RH / 2, y2: RH / 2, stroke: "rgba(255,255,255,.12)", "vector-effect": "non-scaling-stroke" }, s);
         const all = [[0, pts[0][1]], ...pts, [len, pts[pts.length - 1][1]]];
         const dd = all.map((p, k) => `${k ? "L" : "M"}${((p[0] / len) * W).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
-        svg("path", { d: dd + ` L${W},${RH} L0,${RH} Z`, fill: DECK_HEX[d], "fill-opacity": 0.12, stroke: "none" }, s);
-        svg("path", { d: dd, fill: "none", stroke: DECK_HEX[d], "stroke-width": 1.8, "vector-effect": "non-scaling-stroke" }, s);
+        svg("path", { d: dd + ` L${W},${RH} L0,${RH} Z`, fill: col, "fill-opacity": 0.12, stroke: "none" }, s);
+        svg("path", { d: dd, fill: "none", stroke: col, "stroke-width": 1.8, "vector-effect": "non-scaling-stroke" }, s);
       });
     }
     if ((prog.events || []).length || (prog.play !== null && prog.play !== undefined)) {
@@ -549,22 +556,210 @@ class Timeline {
       if (m.a <= tl && !m.step) cur.push(m);
       else if (m.a > tl) up.push(m);
     }
-    const line = (m, ongoing) => {
-      const who = `${m.side}（Deck ${m.deck}）`;
-      if (m.event) return `${who} ${m.event.endsWith("stop") ? "停止" : m.event}`;
-      const what = `${PARAM_LABEL[m.param]} ${fmtParam(m.param, m.from)} → ${fmtParam(m.param, m.to)}`;
-      if (m.step) return `${who} ${what}（瞬间）`;
-      const bars = (m.b - m.a) / 4;
-      return ongoing ? `${who} ${what}，还剩 ${((m.b - tl) / 4).toFixed(1)} 小节` : `${who} ${what}，用 ${bars % 1 ? bars.toFixed(1) : bars} 小节`;
-    };
-    this.next.innerHTML = "";
-    if (cur.length) this.next.append(el("div", { class: "tl-sec" }, "正在做"), ...cur.slice(0, 5).map((m) => el("div", { class: "mv now", style: `border-color:${DECK_HEX[m.deck]}` }, line(m, true))));
-    if (up.length) {
-      this.next.append(el("div", { class: "tl-sec" }, "接下来"),
-        ...up.slice(0, 4).map((m) => el("div", { class: "mv", style: `border-color:${DECK_HEX[m.deck]}` },
-          el("span", { class: "mono" }, `第 ${(m.a / 4 + 1).toFixed(m.a % 4 ? 2 : 0)} 小节 `), line(m, false))));
+    const who = (m) => el("b", { style: `color:${DECK_HEX[m.deck]}` }, `${m.side}（Deck ${m.deck}）`);
+    const what = (m) => el("b", { style: isEq(m.param) ? `color:${BAND_HEX[m.param]}` : "" }, PARAM_LABEL[m.param] || m.param);
+    const barNo = (b) => (b / 4 + 1).toFixed(b % 4 ? 2 : 0);
+    const out = [el("div", { class: "tl-sec big" }, "现在的 EQ 操作")];
+    if (tl < 0) {
+      out.push(el("div", { class: "eq-op idle" }, `过渡还有 ${(-tl / 4).toFixed(1)} 小节开始`));
     }
-    if (!cur.length && !up.length) this.next.append(el("div", { class: "dim" }, "这段过渡的动作都做完了"));
+    const eqNow = cur.filter((m) => isEq(m.param));
+    for (const m of eqNow) {
+      const v = laneAt(p.lanes[`${m.side}.${m.param}`], tl);
+      out.push(el("div", { class: "eq-op", style: `border-color:${BAND_HEX[m.param]}` },
+        who(m), " ", what(m), ` ${fmtParam(m.param, m.from)} → ${fmtParam(m.param, m.to)}`,
+        el("span", { class: "eq-op-now" }, `现在 ${fmtParam(m.param, v)}（${fmtSub(m.param, v)}）`),
+        el("span", { class: "eq-op-left" }, `还剩 ${((m.b - tl) / 4).toFixed(1)} 小节`)));
+    }
+    // 停在非 12 点的 EQ（比如 B 的 LOW 先切着）
+    if (tl >= 0) {
+      const held = [];
+      for (const [name, pts] of Object.entries(p.lanes)) {
+        const [side, param] = name.split(".");
+        if (!isEq(param) || eqNow.some((m) => m.side === side && m.param === param)) continue;
+        if (side === "B" && p.play !== null && p.play !== undefined && tl < p.play) continue; // B 还没起播
+        const v = laneAt(pts, tl);
+        if (v !== null && Math.abs(dB(v)) > 0.5) held.push([side, param, v]);
+      }
+      if (held.length) {
+        out.push(el("div", { class: "eq-held" }, "保持：", ...held.map(([side, param, v], i) => [
+          i ? "、" : "", el("b", { style: `color:${DECK_HEX[side === "A" ? p.a.deck : p.b.deck]}` }, side), " ",
+          el("b", { style: `color:${BAND_HEX[param]}` }, PARAM_LABEL[param]), ` ${fmtParam(param, v)}`])));
+      }
+    }
+    if (!eqNow.length && tl >= 0) out.push(el("div", { class: "eq-op idle" }, "EQ 现在没有在动"));
+    const nx = up.find((m) => isEq(m.param));
+    if (nx) {
+      out.push(el("div", { class: "eq-next" }, `下一个 EQ 动作：第 ${barNo(nx.a)} 小节 `, who(nx), " ", what(nx),
+        ` ${fmtParam(nx.param, nx.from)} → ${fmtParam(nx.param, nx.to)}`, nx.step ? "（瞬间）" : `，用 ${((nx.b - nx.a) / 4).toFixed(nx.b % 4 ? 1 : 0)} 小节`,
+        `（还有 ${((nx.a - tl) / 4).toFixed(1)} 小节）`));
+    } else if (!eqNow.length && tl >= 0) {
+      out.push(el("div", { class: "eq-next" }, "这段过渡后面没有 EQ 动作了"));
+    }
+    const other = cur.filter((m) => !isEq(m.param));
+    if (other.length) {
+      out.push(el("div", { class: "eq-other" }, "同时：", ...other.map((m, i) => [i ? "；" : "", el("b", { style: `color:${DECK_HEX[m.deck]}` }, m.side), " ",
+        what(m), ` ${fmtParam(m.param, m.from)} → ${fmtParam(m.param, m.to)}，还剩 ${((m.b - tl) / 4).toFixed(1)} 小节`])));
+    }
+    this.next.replaceChildren(...out);
+  }
+}
+
+// 曲线在 x 拍处的值（分段线性；同一拍两点 = 阶跃，取后一个）
+function laneAt(pts, x) {
+  if (!pts || !pts.length) return null;
+  if (x <= pts[0][0]) return pts[0][1];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    if (pts[i][0] <= x) {
+      const nx = pts[i + 1];
+      if (!nx || nx[0] === pts[i][0]) return pts[i][1];
+      return pts[i][1] + ((nx[1] - pts[i][1]) * (x - pts[i][0])) / (nx[0] - pts[i][0]);
+    }
+  }
+  return pts[0][1];
+}
+
+// ------------------------------------------------------------------ 交接概览：两首歌的整首波形 + 进出点 + 小节计数
+
+class Handoff {
+  constructor() {
+    this.title = el("b");
+    this.sub = el("span", { class: "dim" });
+    this.where = el("span", { class: "ho-where mono" });
+    const legend = el("span", { class: "ho-legend" },
+      ["lo", "mid", "hi"].map((b) => el("span", {}, el("i", { style: `background:${BAND_HEX[b]}` }), PARAM_LABEL[b])));
+    this.rows = { A: this._row(), B: this._row() };
+    this.root = el("div", { class: "handoff hidden" },
+      el("div", { class: "ho-head" }, this.title, this.sub, el("span", { class: "grow" }), legend, this.where),
+      this.rows.A.root, this.rows.B.root);
+    this.cache = new Map();
+    this.key = null;
+  }
+
+  _row() {
+    const r = { badge: el("span", { class: "deck-no" }), name: el("span", { class: "ho-name" }), bar: el("div", { class: "ho-bar mono" }),
+      canvas: el("canvas", { class: "ho-wave" }), t: null };
+    r.root = el("div", { class: "ho-row" }, el("div", { class: "ho-label" }, el("div", { class: "ho-title" }, r.badge, r.name), r.bar), r.canvas);
+    return r;
+  }
+
+  // info：{ key, title, sub, len, A: track, B: track | null }；track = { id, no, title, deck, bpm, bar1, dur, bars, wave, sections, marks }
+  set(info) {
+    this.root.classList.toggle("hidden", !info);
+    if (!info || info.key === this.key) { if (info) this.info = info; return; }
+    this.key = info.key;
+    this.info = info;
+    this.title.textContent = info.title;
+    this.sub.textContent = info.sub;
+    for (const side of ["A", "B"]) {
+      const r = this.rows[side], t = info[side];
+      r.t = t;
+      r.root.classList.toggle("hidden", !t);
+      if (!t) continue;
+      r.badge.textContent = String(t.deck);
+      r.badge.style.background = DECK_HEX[t.deck];
+      r.name.textContent = `${side} · #${t.no} ${t.title}`;
+    }
+  }
+
+  _overview(t, w, h, dpr) {
+    const key = `${t.id}:${w}:${h}:${dpr}:${t.wave ? 1 : 0}:${(t.sections || []).length}`;
+    if (this.cache.has(key)) return this.cache.get(key);
+    const c = document.createElement("canvas");
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    const g = c.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const X = (tt) => (tt / t.dur) * w;
+    const barDur = 240 / t.bpm;
+    for (const s of t.sections || []) {
+      const x0 = X(t.bar1 + (s.start - 1) * barDur), x1 = X(t.bar1 + (s.end - 1) * barDur);
+      g.fillStyle = SECTION_TINT[s.label] || "rgba(255,255,255,.04)";
+      g.fillRect(x0, 0, x1 - x0, h);
+    }
+    const wf = t.wave;
+    if (wf) {
+      const mid = h / 2, amp = h / 2 - 2, pps = wf.rate;
+      for (let x = 0; x < w; x++) {
+        let ia = Math.floor(((x / w) * t.dur) * pps), ib = Math.max(ia + 1, Math.floor((((x + 1) / w) * t.dur) * pps));
+        ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
+        if (ia >= ib) continue;
+        let pk = 0, lo = 0, mi = 0, hi = 0;
+        for (let i = ia; i < ib; i++) {
+          if (wf.peak[i] > pk) pk = wf.peak[i];
+          if (wf.low[i] > lo) lo = wf.low[i];
+          if (wf.mid[i] > mi) mi = wf.mid[i];
+          if (wf.high[i] > hi) hi = wf.high[i];
+        }
+        const sMax = Math.max(lo, mi, hi, 1);
+        g.strokeStyle = `rgb(${Math.round((255 * lo) / sMax)},${Math.round((200 * mi) / sMax + 40)},${Math.round((255 * hi) / sMax)})`;
+        const a = (pk / 255) * amp;
+        g.beginPath(); g.moveTo(x + 0.5, mid - a); g.lineTo(x + 0.5, mid + a); g.stroke();
+      }
+    }
+    // 乐句线（每 16 小节），每 32 小节标小节号
+    g.font = "9px ui-monospace, Menlo, monospace";
+    for (let b = 1; b <= t.bars + 1; b += 16) {
+      const x = X(t.bar1 + (b - 1) * barDur);
+      g.fillStyle = "rgba(255,255,255,.22)";
+      g.fillRect(Math.round(x), 0, 1, h);
+      if ((b - 1) % 32 === 0) { g.fillStyle = "#8a92a3"; g.fillText(String(b), x + 2, h / 2 - 2); }
+    }
+    if (this.cache.size > 12) this.cache.clear();
+    this.cache.set(key, c);
+    return c;
+  }
+
+  draw(now, posOf, tl) {
+    const info = this.info;
+    if (!info || this.root.classList.contains("hidden")) return;
+    const len = info.len;
+    this.where.textContent = tl === null || tl === undefined ? "" : tl < 0 ? `还有 ${(-tl / 4).toFixed(1)} 小节开始交接`
+      : tl <= len ? `交接 第 ${(tl / 4 + 1).toFixed(1)} / ${len / 4} 小节` : "交接完成";
+    for (const side of ["A", "B"]) {
+      const r = this.rows[side], t = r.t;
+      if (!t) continue;
+      const c = r.canvas, w = c.clientWidth, H = 54;
+      if (!w) continue;
+      const dpr = window.devicePixelRatio || 1;
+      if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(H * dpr); c.style.height = H + "px"; }
+      const g = c.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, H);
+      g.drawImage(this._overview(t, w, H, dpr), 0, 0, w, H);
+      const X = (tt) => (tt / t.dur) * w;
+      const barOf = (tt) => (tt - t.bar1) / (240 / t.bpm) + 1;
+      // 进出区段和标记
+      for (const m of t.marks) {
+        const x = X(m.t);
+        if (m.t1 !== undefined) {
+          const x1 = X(m.t1);
+          g.fillStyle = m.fill;
+          g.fillRect(x, 0, x1 - x, H);
+        }
+        g.fillStyle = m.color;
+        g.fillRect(Math.round(x) - 1, 0, 2, H);
+        g.font = "bold 11px sans-serif";
+        const label = `${m.label} ${Math.floor(barOf(m.t) + 1e-3)}`;
+        const tw = g.measureText(label).width;
+        const lx = m.right ? Math.max(2, x - tw - 4) : Math.min(w - tw - 2, x + 4);
+        const ly = m.top ? 2 : H - 16; // 起点类标签在上、终点类在下，挨得近也不重叠
+        g.fillStyle = "rgba(15,17,21,.8)";
+        g.fillRect(lx - 2, ly, tw + 4, 14);
+        g.fillStyle = m.color;
+        g.fillText(label, lx, ly + 11);
+      }
+      const pos = posOf(t);
+      if (pos !== null) {
+        const xp = X(pos);
+        g.fillStyle = "rgba(0,0,0,.35)";
+        g.fillRect(0, 0, xp, H);
+        g.fillStyle = "#fff";
+        g.fillRect(Math.round(xp) - 1, 0, 2, H);
+        r.bar.textContent = `第 ${Math.max(1, Math.floor(barOf(pos) + 1e-3))} / ${Math.floor(t.bars)} 小节`;
+      } else {
+        r.bar.textContent = `共 ${Math.floor(t.bars)} 小节`;
+      }
+    }
   }
 }
 
@@ -574,6 +769,7 @@ export class LiveView {
   constructor(root, loadTrack) {
     this.loadTrack = loadTrack; // id → Promise<{wave, sections}>
     this.cache = new Map();
+    this.loaded = new Map(); // id → {wave, sections}（已经下载好的）
     this.comp = null;
     this.progress = null;
     this.decks = { 1: new DeckView(1), 2: new DeckView(2) };
@@ -581,15 +777,16 @@ export class LiveView {
     this.mvu = new Vu(30);
     this.xcap = el("div", { class: "xf-cap" });
     this.timeline = new Timeline();
+    this.handoff = new Handoff();
     this.banner = el("div", { class: "live-banner hidden" });
     this.mixer = el("div", { class: "mixer" },
       el("div", { class: "mixer-chs" },
         this.ch[1].root,
         el("div", { class: "master" }, el("div", { class: "ch-name" }, "MASTER"), this.mvu.root, el("div", { class: "kl" }, "主输出")),
         this.ch[2].root),
-      el("div", { class: "xfader" }, el("span", { class: "kl" }, "1"), el("div", { class: "xf-track" }, this.xcap), el("span", { class: "kl" }, "2")),
-      el("div", { class: "mixer-note dim" }, "旋钮 / 推子 / 电平都是从引擎读回的实际值"));
-    root.append(this.banner,
+      el("div", { class: "xfader" }, el("span", { class: "kl" }, "1"), el("div", { class: "xf-track" }, this.xcap), el("span", { class: "kl" }, "2")));
+    this.mixer.title = "旋钮 / 推子 / 电平都是从引擎读回的实际值";
+    root.append(this.banner, this.handoff.root,
       el("div", { class: "live-decks" }, this.decks[1].root, this.decks[2].root),
       el("div", { class: "live-bottom" }, this.mixer, this.timeline.root));
     this._raf = 0;
@@ -598,6 +795,7 @@ export class LiveView {
       if (root.isConnected && root.offsetParent !== null) { // 不在演出页时不画
         this.decks[1].draw(now); this.decks[2].draw(now);
         this.timeline.draw(now);
+        this.handoff.draw(now, (t) => this._posOf(t, now), this.timeline.tlAt(now));
         if (now - this._lastNext > 250) { this._lastNext = now; this.timeline.updateNext(now); }
       }
       this._raf = requestAnimationFrame(loop);
@@ -617,8 +815,55 @@ export class LiveView {
   }
 
   async _trackData(id) {
-    if (!this.cache.has(id)) this.cache.set(id, this.loadTrack(id).catch(() => ({})));
+    if (!this.cache.has(id)) {
+      this.cache.set(id, this.loadTrack(id).catch(() => ({})).then((x) => { this.loaded.set(id, x); return x; }));
+    }
     return this.cache.get(id);
+  }
+
+  // 交接概览：当前（或下一段）过渡的 A、B 两首，整首波形上标出过渡开始 / B 起播 / 交出 / B 进点 / 接满
+  _handoffInfo(prog, comp) {
+    const p = this.progress;
+    if (!prog || !comp || !p || p.stage === "idle" || p.stage === "done") return null;
+    const off = comp._offset || 0;
+    const end = prog.id === "end";
+    const ai = prog.idx, bi = end ? null : prog.idx + 1;
+    const beatT = (grid, beat) => grid[0] / 1000 + (beat * 60) / grid[1];
+    const track = (k, deck) => {
+      const ct = comp.tracks[k], st = comp.set.tracks[k];
+      this._trackData(ct.id);
+      const data = this.loaded.get(ct.id) || {};
+      return { idx: k, id: ct.id, no: k + 1 + off, title: st.title || ct.title || ct.id, deck, bpm: ct.bpm, bar1: ct.bar1_time,
+        dur: ct.duration, bars: ct.bars, wave: data.wave || null, sections: data.sections || [], marks: [] };
+    };
+    const A = track(ai, prog.a.deck);
+    const B = bi === null ? null : track(bi, prog.b.deck);
+    const t0 = beatT(prog.a.grid, prog.a.start);
+    const stop = (prog.events || []).find(([, ev]) => ev === "A.stop");
+    const aOut = stop ? beatT(prog.a.grid, prog.a.start + stop[0]) : prog.playout ? A.dur : beatT(prog.a.grid, prog.a.start + prog.len);
+    A.marks.push({ t: t0, t1: aOut, label: end ? "淡出开始" : "过渡开始", color: "#f2b84b", fill: "rgba(242,184,75,.16)", top: true });
+    if (B && prog.play !== null && prog.play !== undefined) {
+      A.marks.push({ t: beatT(prog.a.grid, prog.a.start + prog.play), label: "B 起播", color: "#3ccf7a" });
+    }
+    A.marks.push({ t: Math.min(aOut, A.dur), label: end ? "停" : stop ? "交出" : prog.playout ? "放到曲尾" : "交出", color: "#f2b84b", right: true });
+    if (B) {
+      const tin = beatT(prog.b.grid, prog.b.in), tFull = beatT(prog.b.grid, prog.b.in + prog.len - (prog.play || 0));
+      B.marks.push({ t: tin, t1: tFull, label: "进点", color: "#3ccf7a", fill: "rgba(60,207,122,.14)", top: true });
+      B.marks.push({ t: tFull, label: "接满", color: "#3ccf7a", right: true });
+    }
+    const tr = end ? null : comp.set.transitions[prog.idx];
+    return {
+      key: `${comp._key || comp._id}:${prog.id}:${A.wave ? 1 : 0}${A.sections.length}:${B && B.wave ? 1 : 0}${B ? B.sections.length : 0}`,
+      title: end ? "终曲" : `交接 ${prog.idx + 1 + off} / ${comp.programs.length + off} · ${tr.label || TECH_LABEL[tr.technique] || tr.technique}`,
+      sub: end ? ` #${A.no} ${A.title} 淡出` : ` #${A.no} ${A.title} → #${B.no} ${B.title}`,
+      len: prog.len, A, B,
+    };
+  }
+
+  _posOf(t, now) {
+    const dv = this.decks[t.deck];
+    if (!dv.track || dv.track.idx !== t.idx || !dv.st || !dv.st[0]) return null;
+    return dv.posAt(now);
   }
 
   // 哪首歌在哪个 deck、各自在当前 / 下一段程序里的角色
@@ -688,6 +933,7 @@ export class LiveView {
       const inTr = progress && progress.stage === "transition" && prog && prog.id !== "end";
       dv.setRole(k === null ? "" : inTr ? (k === prog.idx ? "A · 出" : "B · 进") : main ? "主奏" : "下一首");
     }
+    this.handoff.set(this._handoffInfo(prog, comp));
     this.mvu.set(st ? st.mv : 0);
     if (st && st.x !== undefined) this.xcap.style.left = `${((st.x + 1) / 2) * 100}%`;
 

@@ -68,7 +68,8 @@ def create_app(studio: Studio) -> FastAPI:
             "version": version_text(),
             "engine_mode": "builtin" if studio.builtin else "mixxx",
             "sound_engine": engine_binary() is not None,  # 有声音引擎（Mixxx 的引擎核心）；没有时内置引擎是没声音的模拟器
-            "last_play": studio.last_play,  # 上一次开始的 set / 从第几段 / 倍速：停下后「再开始」用，演出画面也按它找编译结果
+            "last_play": studio.last_play,  # 这一场从哪开始（set / 第几首 / 第几小节 / 倍速）：演出画面按它找编译结果
+            "resume": studio.resume_point,  # 手动停下的位置：「继续」从这里接着放
         }
 
     @app.get("/api/state")
@@ -298,10 +299,12 @@ def create_app(studio: Studio) -> FastAPI:
         return studio.list_sets()
 
     @app.get("/api/sets/{sid}")
-    def api_set(sid: str, rehearse_from: int = 0) -> dict[str, Any]:
-        """rehearse_from = k：预演从第 k 段过渡开始时实际跑的那份（截掉前面的曲目）。"""
-        s = studio.rehearsal_set(studio.load(sid), rehearse_from)
-        return {"set": json.loads(s.to_json()), "compiled": compiled_json(studio.compile(s))}
+    def api_set(sid: str, rehearse_from: int = 0, track: int | None = None, bar: float | None = None) -> dict[str, Any]:
+        """rehearse_from = k：从第 k 段过渡开始时实际跑的那份（截掉前面的曲目）；
+        track + bar：停下后「继续」跑的那份（从第 track 首（0 起）第 bar 小节起）。"""
+        start = (track, bar) if track is not None and bar is not None else None
+        s = studio.rehearsal_set(studio.load(sid), rehearse_from, start)
+        return {"set": json.loads(s.to_json()), "compiled": compiled_json(studio.compile(s, resume=start is not None))}
 
     @app.post("/api/sets/{sid}/rehearse")
     def api_rehearse(sid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
@@ -351,7 +354,11 @@ def create_app(studio: Studio) -> FastAPI:
     @app.post("/api/stop")
     def api_stop() -> dict[str, Any]:
         studio.stop()
-        return {"ok": True}
+        return {"ok": True, "resume": studio.resume_point}
+
+    @app.post("/api/resume")
+    def api_resume() -> dict[str, Any]:
+        return studio.resume().to_dict()
 
     @app.post("/api/quit")
     def api_quit() -> dict[str, Any]:

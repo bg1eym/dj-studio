@@ -81,6 +81,14 @@ async function stopShow() {
   toast("停止中…");
 }
 
+// 停下后「继续」：从停下的那首、那一拍接着放
+async function resumeShow() {
+  await api("POST", "/api/resume");
+  S.homeDone = null;
+  await loadState();
+  renderHome(true);
+}
+
 const fmt = (t) => {
   if (t === null || t === undefined || isNaN(t)) return "–";
   const s = Math.max(0, t);
@@ -338,21 +346,23 @@ async function renderHome(force = false) {
     return;
   }
   S.homeMode = mode;
-  root.innerHTML = "";
+  const seq = (S.homeSeq = (S.homeSeq || 0) + 1);
   if (mode === "live") {
     S.homeLivePlaying = playing;
     const last = S.state && S.state.last_play;
     S.showSetId = ((S.engine || {}).rehearsal && S.engine.set) || (last && last.set) || (S.progress && S.progress.set_id) || S.showSetId;
     await loadShowCompiled();
-    if (S.homeMode !== "live") return; // 等编译结果时状态变了
+    if (S.homeMode !== "live" || seq !== S.homeSeq) return; // 等编译结果时状态变了 / 又开始了一次渲染
+    root.innerHTML = "";
     const prog = S.progress || {};
+    const resume = S.state && S.state.resume;
     root.append(
       h("div", { class: "panel row home-live-bar" },
         h("b", {}, (S.showCompiled && S.showCompiled.set && S.showCompiled.set.name) || S.showSetId || ""),
         h("span", { class: "grow" }),
         playing ? h("button", { class: "danger", onclick: (e) => busy(e, "停止中…", stopShow) }, "■ 停止")
-          : [last && last.set === S.showSetId && isBuiltin()
-              ? h("button", { class: "primary", onclick: (e) => busy(e, "启动中…", () => startShow(last.set, { from: last.from, speed: last.speed })) }, "▶ 再开始")
+          : [resume && resume.set === S.showSetId
+              ? h("button", { class: "primary", title: "从停下的位置接着放", onclick: (e) => busy(e, "启动中…", resumeShow) }, `▶ 继续（${resume.label}）`)
               : null,
             h("button", { onclick: () => { S.homeDone = prog.started_at; renderHome(true); } }, "回到开始")]),
       h("div", { class: "panel", id: "show-status" }),
@@ -363,6 +373,7 @@ async function renderHome(force = false) {
     renderShowStatus();
     return;
   }
+  root.innerHTML = "";
   const card = h("div", { class: "home" });
   root.append(card);
   if (mode === "drop" || mode === "plan") {
@@ -1087,11 +1098,11 @@ async function loadShowCompiled() {
 // 演出页显示哪份编译结果：预演从第 k 段开始时是截短的那份（progress.index 按它算）
 function showKey() {
   const e = S.engine || {};
-  // 正在放：按引擎报的；停下以后：按上一次开始时的（引擎已经关了）
+  // 这一场从第几首第几小节开始（从第 k 段过渡开始、停下后继续）：正在放按引擎报的，停下以后按上一次开始时的
   const last = (S.state && S.state.last_play) || {};
-  const r = e.rehearsal ? { set: e.set, from: e.from } : last;
-  if (r.set === S.showSetId && r.from) {
-    return { key: `${r.set}~${r.from}`, url: `/api/sets/${r.set}?rehearse_from=${r.from}`, offset: r.from - 1 };
+  const r = e.rehearsal ? { set: e.set, track: e.track, bar: e.bar } : last;
+  if (r.set === S.showSetId && r.track !== undefined && r.track !== null && r.bar !== undefined && r.bar !== null) {
+    return { key: `${r.set}~${r.track}~${r.bar}`, url: `/api/sets/${r.set}?track=${r.track}&bar=${r.bar}`, offset: r.track };
   }
   return { key: S.showSetId, url: "/api/sets/" + S.showSetId };
 }

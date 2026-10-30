@@ -499,7 +499,7 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     for th in threads:
         th.join(30)
     assert len(opened) == 1 and sum(not isinstance(r, StudioError) for r in results) == 1, results
-    assert studio.last_play == {"set": sid, "from": 0, "speed": 1}
+    assert studio.last_play == {"set": sid, "from": 0, "speed": 1, "track": 0, "bar": 1.0}
     studio.stop()
     studio.conductor.join(30)
     t0 = time.time()
@@ -510,3 +510,23 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     assert len(opened) == 2
     studio.stop()
     studio.conductor.join(30)
+
+    # 停在过渡中途 →「继续」：A 从停下的那一拍接着放，B 按已经过去的拍数对位起播，过渡照常做完
+    studio.play(sid, speed=10)
+    t0 = time.time()
+    while studio.conductor.progress.stage != "transition" and time.time() - t0 < 60:
+        time.sleep(0.02)
+    time.sleep(0.6)
+    studio.stop()
+    studio.conductor.join(30)
+    rp = studio.resume_point
+    tr0 = studio.load(sid).transitions[0]
+    assert rp and rp["track"] == 0 and tr0.start < rp["bar"] < 41, (rp, tr0.start)  # 停在过渡中途
+    assert studio.compile(studio.rehearsal_set(studio.load(sid), start=(0, rp["bar"])), resume=True).ok
+    studio.resume()
+    assert studio.resume_point is None and studio.last_play["bar"] == rp["bar"]
+    studio.conductor.join(120)
+    p = studio.conductor.progress
+    log = "\n".join(p.log)
+    assert p.stage == "done", log + f"\n{p.error}"
+    assert f"第 {rp['bar']:g} 小节" in log and "tr1 开始" in log and "B 起播" in log, log

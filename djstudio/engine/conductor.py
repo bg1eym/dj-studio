@@ -53,12 +53,25 @@ class Progress:
         return d
 
 
+def _lane_at(pts: list[list[float]], x: float) -> float:
+    """自动化曲线在 x 拍处的值（分段线性；同一拍两点 = 阶跃，取后一个）。和 DJStudio.interp 一致。"""
+    if x <= pts[0][0]:
+        return float(pts[0][1])
+    for i in range(len(pts) - 1, -1, -1):
+        if pts[i][0] <= x:
+            if i + 1 >= len(pts) or pts[i + 1][0] == pts[i][0]:
+                return float(pts[i][1])
+            (a, va), (b, vb) = pts[i], pts[i + 1]
+            return float(va + (vb - va) * (x - a) / (b - a))
+    return float(pts[0][1])
+
+
 class Conductor:
     def __init__(self, client: EngineClient, compiled: Compiled,
                  on_progress: Callable[[Progress], None] | None = None,
                  on_log: Callable[[str], None] | None = None,
                  load_timeout: float = 20.0, lost_timeout: float = 60.0, stall_timeout: float = 8.0,
-                 stop_fade: float = 4.0) -> None:
+                 stop_fade: float = 4.0, resume: bool = False) -> None:
         if not compiled.ok:
             raise ConductorError("set 校验没通过，不能播放")
         self.c = client
@@ -70,6 +83,9 @@ class Conductor:
         self.lost_timeout = lost_timeout
         self.stall_timeout = stall_timeout
         self.stop_fade = stop_fade  # 手动停止时淡出几秒
+        # 停下后「继续」：第 1 首可能停在第 1 段过渡的中途。先装好 B、发下第 1 段程序（resume：引擎接受已经开始的过渡，
+        # B 按已经过去的拍数对位起播，旋钮按时间线当前位置），再让 A 起播
+        self.resume = resume
         self.progress = Progress(set_id=compiled.set.id, n_tracks=len(compiled.set.tracks))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -172,15 +188,36 @@ class Conductor:
         self.c.send({"t": "cue", "deck": d0, "ms": info.grid.beat_time(op["beat"]) * 1000.0})
         self.c.send({"t": "bpm", "deck": d0, "v": op["bpm"]})
         self.c.send({"t": "vol", "deck": d0, "v": 1.0})
+        resume_prog = self.compiled.programs[0] if self.resume and self.compiled.programs else None
+        if resume_prog:
+            # 停下后「继续」：A 可能停在第 1 段过渡中途。起播前先把 A 的推子 / 旋钮摆到时间线当前位置的值
+            tl0 = float(op["beat"]) - float(resume_prog["a"]["start"])
+            for name, pts in resume_prog["lanes"].items():
+                side, param = name.split(".", 1)
+                if side == "A":
+                    self.c.send({"t": "param", "deck": d0, "p": param, "v": _lane_at(pts, tl0)})
         self.c.send({"t": "play", "deck": d0, "on": 1})
         self._wait(lambda: self.c.deck(d0).playing, 3.0, "开场起播")  # type: ignore[union-attr]
         self.log(f"▶ 开场 {self._title(0)}（第 {self.compiled.set.tracks[0].start:g} 小节，{op['bpm']:g} BPM）")
+        pre_armed: dict[str, Any] | None = None
+        pre_cursor: int | None = None
+        if resume_prog:
+            # 两边都没在播时只能往 deck1 装（AutoDJ 的规矩），所以 B 在 A 起播后马上装；程序带 resume 下发：
+            # 引擎接受已经开始的过渡，B 按已经过去的拍数对位起播，旋钮按时间线当前位置
+            self._stage("loading", f"装载 {self._title(1)}", index=0)
+            self._load(1)
+            pre_cursor = self.c.mark()  # 下发后程序马上就开始：「started」「b_play」不能漏
+            pre_armed = self._arm({**resume_prog, "resume": True}, 0)
 
         for i, prog in enumerate(self.compiled.programs):
-            self._stage("loading", f"装载 {self._title(i + 1)}", index=i)
-            self._load(i + 1)
-            prog = self._arm(prog, i)
-            self._run_program(prog, i)
+            if i == 0 and pre_armed is not None:
+                prog = pre_armed
+                self._run_program(prog, i, cursor=pre_cursor)
+            else:
+                self._stage("loading", f"装载 {self._title(i + 1)}", index=i)
+                self._load(i + 1)
+                prog = self._arm(prog, i)
+                self._run_program(prog, i)
             self.progress.index = i + 1
             self.log(f"✓ 过渡 {i + 1} 完成，{self._title(i + 1)} 主奏")
 
@@ -322,10 +359,10 @@ class Conductor:
             p["events"] = [[8, "A.stop"]]
         return p
 
-    def _run_program(self, prog: dict[str, Any], i: int, ending: bool = False) -> None:
+    def _run_program(self, prog: dict[str, Any], i: int, ending: bool = False, cursor: int | None = None) -> None:
         pid = prog["id"]
         st: dict[str, Any] = {"tl": None, "since": time.monotonic(), "started": False}
-        cursor = [self.c.mark()]
+        cursor = [self.c.mark() if cursor is None else cursor]
         bpm = prog["bpm"][0][1] if prog.get("bpm") else 120.0
         a_dur = prog["a"]["dur"] / 1000.0
         # 硬上限：A 整首时长 + 程序长度 + 余量（防止任何情况下无限等）

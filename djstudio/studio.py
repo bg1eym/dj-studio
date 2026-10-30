@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .compiler import Compiled, Issue, TrackInfo, compile_set
+from .compiler import Compiled, Issue, TrackInfo, compile_set, deck_for
 from .config import Config, get_config
 from .engine.client import EngineClient, EngineError
 from .engine.conductor import Conductor, Progress
@@ -143,7 +143,8 @@ class Studio:
         self._client_lock = threading.Lock()
         self.conductor: Conductor | None = None
         self._rehearsal: dict[str, Any] | None = None
-        self.last_play: dict[str, Any] | None = None  # {"set", "from", "speed"}：停下后「再开始」用同样的
+        self.last_play: dict[str, Any] | None = None  # {"set", "from", "speed", "track", "bar"}：这一场从哪开始
+        self.resume_point: dict[str, Any] | None = None  # 手动停下的位置（第几首第几小节）：「继续」从这里接着放
         self._start_lock = threading.Lock()  # 同一时间只启动一次（启动引擎要几秒，网页上连点会开出两个引擎、两套声音）
         self._plan_cache: tuple[Any, Any] | None = None
         # 预演用的引擎：默认 Node 模拟器；开发时可以换成真 Mixxx 测试台（HarnessLink，同一套行协议）
@@ -215,8 +216,8 @@ class Studio:
             c = r["client"]
             return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
                     "status": c.status, "at": _heard_at(c, r.get("audio")), "link": c.link.name, "rehearsal": True,
-                    "speed": r["speed"], "set": r["set"], "from": r["from"], "builtin": r.get("builtin", False),
-                    "audio": r.get("audio")}
+                    "speed": r["speed"], "set": r["set"], "from": r["from"], "track": r["track"], "bar": r["bar"],
+                    "builtin": r.get("builtin", False), "audio": r.get("audio")}
         if self.builtin:
             return {"connected": False, "online": False, "builtin": True}
         c = self._client
@@ -252,7 +253,7 @@ class Studio:
         mx = self._mixxx_tracks([t for t in tracks if t])
         return tracks, mx
 
-    def compile(self, s: SetFile) -> Compiled:
+    def compile(self, s: SetFile, resume: bool = False) -> Compiled:
         tracks, mx = self.track_infos(s)
         lookup = {id(st): t for st, t in zip(s.tracks, tracks)}
 
@@ -272,7 +273,7 @@ class Studio:
             db = downbeat_from_bar1(g, t.bar1) if t.bar1 is not None else 0
             return TrackInfo(t.id, t.display, Grid(g.bpm, g.first_beat, db, g.duration))
 
-        c = compile_set(s, resolve)
+        c = compile_set(s, resolve, resume=resume)
         # Mixxx 网格与 kick 对不上：同步会对齐网格而不是 kick，过渡里两个 kick 会错开
         for k, (st, t) in enumerate(zip(s.tracks, tracks)):
             gc = (t.analysis or {}).get("grid_check") if t else None
@@ -1057,8 +1058,10 @@ class Studio:
     STOP_FADE_BUILTIN = 1.0  # 内置引擎：点「停止」后淡出 1 秒，然后关掉引擎
 
     def stop(self) -> None:
-        """停止：淡出后停下。内置引擎（演出 / 预演）淡出完就关掉引擎进程——声音一定停，之后可以再开始。"""
+        """停止：记下停在哪（「继续」用），淡出后停下。内置引擎（演出 / 预演）淡出完就关掉引擎进程——声音一定停。"""
         r = self._rehearsal
+        if r and self.conductor and self.conductor.running:
+            self.resume_point = self._resume_point()
         if r:
             r["closing"].set()  # 收尾线程不再留 3 秒最后画面，淡出完立刻关引擎
         if self.conductor and self.conductor.running:
@@ -1070,28 +1073,70 @@ class Studio:
 
     REHEARSAL_LEAD_BARS = 8  # 从第 k 段过渡开始预演时，提前几小节起播
 
-    def rehearsal_set(self, s: SetFile, from_transition: int = 0) -> SetFile:
-        """from_transition = k（从 1 起）：只留第 k 首起的部分，第 k 首从过渡前 REHEARSAL_LEAD_BARS 小节起播。"""
-        if not from_transition:
-            return s
-        k = from_transition - 1
-        if not 0 <= k < len(s.transitions):
-            raise StudioError(f"没有第 {from_transition} 段过渡")
-        tracks = [t.model_copy() for t in s.tracks[k:]]
-        tracks[0] = tracks[0].model_copy(update={"start": max(1.0, s.transitions[k].start - self.REHEARSAL_LEAD_BARS)})
-        return s.model_copy(update={"id": f"{s.id}-from{from_transition}", "tracks": tracks, "transitions": s.transitions[k:]})
+    def run_start(self, s: SetFile, from_transition: int = 0, start: tuple[int, float] | None = None) -> tuple[int, float]:
+        """这一场从哪开始：(第几首（0 起），第几小节)。from_transition = k（从 1 起）= 第 k 首、过渡前 8 小节；
+        start = 停下后「继续」的位置；都没有 = 从头。"""
+        if start is not None:
+            k, bar = int(start[0]), float(start[1])
+            if not 0 <= k < len(s.tracks):
+                raise StudioError(f"没有第 {k + 1} 首")
+            return k, max(1.0, bar)
+        if from_transition:
+            k = from_transition - 1
+            if not 0 <= k < len(s.transitions):
+                raise StudioError(f"没有第 {from_transition} 段过渡")
+            return k, max(1.0, s.transitions[k].start - self.REHEARSAL_LEAD_BARS)
+        return 0, s.tracks[0].start
 
-    def rehearse(self, set_id: str, speed: float = 1.0, from_transition: int = 0, builtin: bool = False) -> Progress:
+    def rehearsal_set(self, s: SetFile, from_transition: int = 0, start: tuple[int, float] | None = None) -> SetFile:
+        """实际要跑的那份：从 run_start 那首起截短，第 1 首从那个小节起播（编号照原来的，网页按 _offset 显示）。"""
+        if not from_transition and start is None:
+            return s
+        k, bar = self.run_start(s, from_transition, start)
+        tracks = [t.model_copy() for t in s.tracks[k:]]
+        tracks[0] = tracks[0].model_copy(update={"start": bar})
+        sid = f"{s.id}-at{k + 1}-{bar:g}" if start is not None else f"{s.id}-from{from_transition}"
+        return s.model_copy(update={"id": sid, "tracks": tracks, "transitions": s.transitions[k:]})
+
+    def _resume_point(self) -> dict[str, Any] | None:
+        """现在停在哪：A 还在放就从 A 当前的拍继续（可以在过渡中途）；A 已经交给 B 了就从 B 继续。"""
+        r, cond = self._rehearsal, self.conductor
+        if not r or not cond:
+            return None
+        comp, c = cond.compiled, r["client"]
+        i = cond.progress.index or 0
+        for k in (i, i + 1):
+            if k >= len(comp.tracks):
+                break
+            ds, info = c.deck(deck_for(k)), comp.tracks[k]
+            if ds and ds.playing and info:
+                bar = round(info.grid.beat_bar(math.floor(info.grid.time_beat(ds.pos_ms / 1000.0))), 4)
+                n = r["track"] + k
+                st = comp.set.tracks[k]
+                return {"set": r["set"], "track": n, "bar": max(1.0, bar), "speed": r["speed"],
+                        "label": f"#{n + 1} {st.title or st.id} 第 {math.floor(max(1.0, bar))} 小节"}
+        return None
+
+    def resume(self) -> Progress:
+        """停下后「继续」：从停下的那首、那一拍接着放（在过渡中途停的，A、B 和旋钮都回到当时的位置）。"""
+        p = self.resume_point
+        if not p:
+            raise StudioError("没有停下的位置可以继续")
+        return self.rehearse(p["set"], p["speed"], builtin=self.builtin, start=(p["track"], p["bar"]))
+
+    def rehearse(self, set_id: str, speed: float = 1.0, from_transition: int = 0, builtin: bool = False,
+                 start: tuple[int, float] | None = None) -> Progress:
         """在 Node 模拟器里按这套 set 跑一遍（真正的 DJStudio.js，假 Mixxx，没有声音），网页演出页照常显示。
         曲目的时长 / BPM / 网格用和真机一样的解析结果，所以小节、过渡时刻和旋钮动作与真机一致。"""
         if not self._start_lock.acquire(blocking=False):
             raise StudioError("正在启动，稍等")
         try:
-            return self._rehearse(set_id, speed, from_transition, builtin)
+            return self._rehearse(set_id, speed, from_transition, builtin, start)
         finally:
             self._start_lock.release()
 
-    def _rehearse(self, set_id: str, speed: float, from_transition: int, builtin: bool) -> Progress:
+    def _rehearse(self, set_id: str, speed: float, from_transition: int, builtin: bool,
+                  start: tuple[int, float] | None) -> Progress:
         if self.conductor and self.conductor.running:
             raise StudioError("正在播放或预演，先停下")
         if self.job and self.job.state == "running":
@@ -1101,8 +1146,10 @@ class Studio:
             raise StudioError(miss)
         # 上一场留着最后画面的引擎先关掉：任何时候只有一个引擎在出声
         self._close_rehearsal()
-        s = self.rehearsal_set(self.load(set_id), from_transition)
-        c = self.compile(s)
+        full = self.load(set_id)
+        track0, bar0 = self.run_start(full, from_transition, start)
+        s = self.rehearsal_set(full, from_transition, start)
+        c = self.compile(s, resume=start is not None)
         if not c.ok:
             raise StudioError("set 校验没通过")
         # 演出（内置引擎、原速）出声；预演和倍速不出声
@@ -1113,10 +1160,11 @@ class Studio:
             link.close()
             raise StudioError("内置引擎没有启动起来")
         audio = link.audio() if hasattr(link, "audio") else None
-        self.last_play = {"set": set_id, "from": from_transition, "speed": speed}
+        self.last_play = {"set": set_id, "from": from_transition, "speed": speed, "track": track0, "bar": bar0}
+        self.resume_point = None  # 开始新的一场：之前停下的位置作废
         closing = threading.Event()
         self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
-                           "audio": audio, "closing": closing}
+                           "audio": audio, "closing": closing, "track": track0, "bar": bar0}
         log_path = self.cfg.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{set_id}.log" if builtin else None
 
         def on_log(line: str) -> None:
@@ -1126,15 +1174,15 @@ class Studio:
             self.emit("log", line)
 
         cond = Conductor(client, c, on_progress=lambda p: self.emit("progress", p.to_dict()), on_log=on_log,
-                         stop_fade=self.STOP_FADE_BUILTIN if builtin else 4.0)
+                         stop_fade=self.STOP_FADE_BUILTIN if builtin else 4.0, resume=start is not None)
         self.conductor = cond
 
         def reap() -> None:  # 播完后留几秒最后画面再关引擎；手动停止的淡出完立刻关
             cond.join(None)
             closing.wait(3)
+            link.close()  # 先关引擎（声音停）再清状态：状态清了 = 引擎一定已经关了
             if self._rehearsal and self._rehearsal["client"] is client:
                 self._rehearsal = None
-            link.close()
 
         cond.start()
         threading.Thread(target=reap, name="rehearsal-reaper", daemon=True).start()

@@ -23,7 +23,7 @@
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.4.0";
+DJStudio.VERSION = "0.4.1";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -311,6 +311,9 @@ DJStudio.handle = function (m) {
         DJStudio.set(DJStudio.ch(m.deck), "volume", m.v);
     } else if (t === "neutral") {
         DJStudio.neutral(m.deck);
+    } else if (t === "param") {
+        // 按通道名设一个旋钮 / 推子（和自动化曲线同一套映射）：停下后「继续」时先把 A 摆到时间线当前位置
+        DJStudio.applyParam(m.deck, m.p, m.v);
     } else if (t === "eject") {
         // 空 deck 上 eject 会把上一首弹出的歌装回来，所以只弹已装载的
         if (DJStudio.playing(m.deck)) { err = "deck playing"; }
@@ -343,7 +346,8 @@ DJStudio.arm = function (p) {
     if (!DJStudio.loaded(a)) { return "deck A not loaded"; }
     if (p.b && !DJStudio.loaded(p.b.deck)) { return "deck B not loaded"; }
     var tl = DJStudio.beatNow(a, p.a.grid) - p.a.start;
-    if (tl > DJStudio.LATE_TOL) { return "late: tl=" + tl.toFixed(2); }
+    // resume = 停下后「继续」：A 从过渡中途起播是有意的，不拒绝；B 在 startB 里按已经过去的拍数对位起播
+    if (tl > DJStudio.LATE_TOL && !p.resume) { return "late: tl=" + tl.toFixed(2); }
     DJStudio.prog = {
         p: p, st: "armed", tl: tl, fired: {}, bStarted: false, aStopped: false,
         lastPhase: 0, doneAt: 0

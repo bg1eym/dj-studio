@@ -182,7 +182,8 @@ def compile_transition(
     return prog, ex
 
 
-def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None]) -> Compiled:
+def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], resume: bool = False) -> Compiled:
+    """resume = True：停下后「继续」跑的截短 set，第 1 首可以从第 1 段过渡的中途开始（引擎按 resume 补上已经过去的部分）。"""
     infos = [resolve(t) for t in s.tracks]
     c = Compiled(set=s, tracks=infos)
     err = lambda where, msg: c.issues.append(Issue("error", where, msg))  # noqa: E731
@@ -243,7 +244,7 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None]) -> 
         c.programs.append(prog)
 
         # 时序校验
-        if tr.start < established - 1e-6:
+        if tr.start < established - 1e-6 and not (resume and i == 0):
             err(where, f"A 在第 {tr.start:g} 小节开始过渡，但上一段要到第 {established:g} 小节才结束")
         a_end_bar = tr.start + ex.bars
         if not ex.a_playout and a_end_bar > a.grid.last_bar + 0.25:
