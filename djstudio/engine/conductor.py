@@ -57,7 +57,8 @@ class Conductor:
     def __init__(self, client: EngineClient, compiled: Compiled,
                  on_progress: Callable[[Progress], None] | None = None,
                  on_log: Callable[[str], None] | None = None,
-                 load_timeout: float = 20.0, lost_timeout: float = 60.0, stall_timeout: float = 8.0) -> None:
+                 load_timeout: float = 20.0, lost_timeout: float = 60.0, stall_timeout: float = 8.0,
+                 stop_fade: float = 4.0) -> None:
         if not compiled.ok:
             raise ConductorError("set 校验没通过，不能播放")
         self.c = client
@@ -68,6 +69,7 @@ class Conductor:
         self.load_timeout = load_timeout
         self.lost_timeout = lost_timeout
         self.stall_timeout = stall_timeout
+        self.stop_fade = stop_fade  # 手动停止时淡出几秒
         self.progress = Progress(set_id=compiled.set.id, n_tracks=len(compiled.set.tracks))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -123,7 +125,7 @@ class Conductor:
             self._stage("done", "整套播完")
             self.log("✓ 整套播完")
         except StopRequested:
-            self._fade_out_all()
+            self._fade_out_all(self.stop_fade)
             self._stage("stopped", "已手动停止")
             self.log("■ 已停止")
         except Exception as e:  # noqa: BLE001

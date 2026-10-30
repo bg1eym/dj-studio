@@ -138,9 +138,10 @@ jobs:
         run: |
           set -o pipefail
           python packaging/macos/smoke_engine.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee engine-smoke.log
-      - name: 对时检查（分析用的解码 = 实际播放；拍线落在 kick 起音上）
+      - name: 对时检查（分析用的解码 = 实际播放；拍线落在 kick 起音上；曲子中间起播的定位）
         run: |
           set -o pipefail
+          brew install lame || true  # 生成 320k、带封面的测试 mp3（Mac 上没有 mp3 编码器）
           python packaging/macos/timing_check.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee timing.log
       - name: 打包 DJ Studio.app
         run: |

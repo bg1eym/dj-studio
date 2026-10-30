@@ -6,6 +6,8 @@
   2. 解码器相对原始信号的延迟（编码器延迟有没有去掉，只记录）；
   3. 原速单放时引擎输出和原曲一样（差 < -40 dB）——kick 的声音不该被引擎改动；
   4. 按 DJ Studio 的分析算出拍线，必须落在播放时 kick 的起音上（±5 ms）。
+另外（有 lame 或 ffmpeg 时）：一首 90 秒、320k CBR、带 800 KB 封面图的 mp3（和常见的商店 mp3 一样），从曲子中间几个位置
+起播（引擎要先定位），播出来的必须和分析用的解码在同一位置（错位 ≤ 2 帧）——定位不准时画面上的波形会和听到的对不上。
 用法：python timing_check.py <djstudio-engine 路径>（需要 numpy 和 djstudio 包）
 """
 import json
@@ -84,6 +86,69 @@ def run(args, timeout=120) -> str:
     return r.stdout.decode()
 
 
+def long_mp3(tmp: Path) -> Path | None:
+    """90 秒、每 8 拍换一种花样（kick / 无 kick / 双 kick / 只有 hat）的合成曲，320k CBR，带 800 KB 封面。"""
+    n = int(90 * SR)
+    rng = np.random.default_rng(11)
+    y = np.zeros(n)
+    t = np.arange(int(0.25 * SR)) / SR
+    kick = np.sin(2 * np.pi * np.cumsum(48 + 102 * np.exp(-t / 0.03)) / SR) * np.exp(-t / 0.09)
+    hat = rng.standard_normal(int(0.03 * SR)) * np.exp(-np.arange(int(0.03 * SR)) / (0.006 * SR))
+    b = 0
+    while T0 + (b + 1) * BEAT < 89:
+        s0 = int(round((T0 + b * BEAT) * SR))
+        mode = (b // 8) % 4
+        if mode in (0, 2):
+            y[s0:s0 + len(kick)] += 0.8 * kick
+        if mode == 2:
+            s1 = s0 + int(BEAT / 4 * SR)
+            y[s1:s1 + len(kick)] += 0.5 * kick
+        h = s0 + int(BEAT / 2 * SR)
+        y[h:h + len(hat)] += (0.4 if mode == 3 else 0.15) * hat
+        b += 1
+    y += 0.01 * rng.standard_normal(n)  # 底噪：各处都能互相关
+    wav = tmp / "long.wav"
+    write_wav(wav, y * 0.9)
+    raw = tmp / "long-raw.mp3"
+    if shutil.which("lame"):
+        r = subprocess.run(["lame", "--quiet", "-b", "320", "--cbr", str(wav), str(raw)])
+    elif shutil.which("ffmpeg"):
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(wav), "-c:a", "libmp3lame", "-b:a", "320k", str(raw)])
+    else:
+        return None
+    if r.returncode != 0:
+        return None
+    # 自己写 ID3v2.3 标签：一个 800 KB 的 APIC（封面）帧，放在原来的标签位置
+    data = raw.read_bytes()
+    if data[:3] == b"ID3":
+        data = data[10 + ((data[6] << 21) | (data[7] << 14) | (data[8] << 7) | data[9]):]
+    pic = b"\xff\xd8\xff\xe0" + rng.integers(0, 256, 800_000, dtype=np.uint8).tobytes() + b"\xff\xd9"
+    body = b"\x00image/jpeg\x00\x03\x00" + pic
+    frame = b"APIC" + len(body).to_bytes(4, "big") + b"\x00\x00" + body
+    size = len(frame)
+    syncsafe = bytes([(size >> 21) & 0x7F, (size >> 14) & 0x7F, (size >> 7) & 0x7F, size & 0x7F])
+    out = tmp / "long320.mp3"
+    out.write_bytes(b"ID3\x03\x00\x00" + syncsafe + frame + data)
+    return out
+
+
+def seek_check(f: Path, tmp: Path) -> None:
+    dec_path = tmp / "long.dec.f32"
+    run(["--decode", str(f), str(dec_path), str(SR)])
+    dec = np.fromfile(dec_path, dtype="<f4").astype(np.float64)
+    print(f"  {f.name}：{f.stat().st_size // 1024} KB，解码 {len(dec) / SR:.1f} 秒")
+    for start in (10.0, 47.3, 81.9):
+        ren_path = tmp / f"long.ren{start}.f32"
+        out = run(["--render", str(f), str(ren_path), "3", str(start)], timeout=180)
+        info = json.loads(next(ln for ln in out.splitlines() if ln.startswith("{")))
+        ren = np.fromfile(ren_path, dtype="<f4").astype(np.float64)
+        p0 = int(round(info["start"]))
+        skip = SR // 4
+        lag = lag_of(ren[skip:skip + 2 * SR], dec[p0 + skip:p0 + skip + 2 * SR], max_lag=SR)
+        check(abs(lag) <= 2 and abs(p0 / SR - start) < 0.05,
+              f"从 {start} 秒起播（定位到第 {p0} 帧）：播出来的和分析用的解码错位 {lag} 帧（{lag / SR * 1000:+.1f} ms）")
+
+
 def main() -> int:
     from djstudio.library.analysis import analyze
     from djstudio.library.audio import ANALYSIS_SR, decode_mono, decoder_name
@@ -139,6 +204,12 @@ def main() -> int:
         err = ((g["first_beat"] - onset + BEAT / 2) % BEAT) - BEAT / 2
         check(abs(g["bpm"] - BPM) < 0.05 and abs(err) < 0.005,
               f"{name}：拍线 BPM {g['bpm']}，第一拍 {g['first_beat'] * 1000:.1f} ms，kick 起音 {onset * 1000:.1f} ms，差 {err * 1000:+.1f} ms")
+    print("\n曲子中间起播（引擎定位）：")
+    long = long_mp3(tmp)
+    if long:
+        seek_check(long, tmp)
+    else:
+        print("  没有 lame / ffmpeg，跳过")
     if failed:
         print(f"\n{len(failed)} 项不对：", *failed, sep="\n  ")
         return 1

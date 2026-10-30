@@ -228,6 +228,7 @@ class AudioOut {
         o["underruns"] = static_cast<qint64>(m_underruns.load()); // 声卡报告的断音次数
         o["played_ms"] = static_cast<double>(m_played.load()) * 1000.0 / kSampleRate; // 声卡已经取走的
         o["rate"] = kSampleRate;           // 引擎输出的采样率
+        o["started_ms"] = static_cast<double>(m_startedMs.load()); // 声卡第一次取数据的墙钟（Unix 毫秒；对时检查用）
         if (m_deviceRate > 0) {
             o["device_rate"] = m_deviceRate; // 设备本身的采样率（不同时由系统转换）
         }
@@ -242,6 +243,11 @@ class AudioOut {
     static int callback(const void*, void* output, unsigned long frames, const PaStreamCallbackTimeInfo*,
             PaStreamCallbackFlags flags, void* user) {
         auto* self = static_cast<AudioOut*>(user);
+        if (self->m_startedMs.load() == 0) {
+            self->m_startedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                                        .count();
+        }
         if (flags & paOutputUnderflow) {
             self->m_underruns++;
         }
@@ -319,6 +325,7 @@ class AudioOut {
     double m_deviceRate = 0;
     std::atomic<qint64> m_underruns{0};
     std::atomic<qint64> m_played{0};
+    std::atomic<qint64> m_startedMs{0};
     std::thread m_fake;
     std::atomic<bool> m_fakeStop{false};
 };

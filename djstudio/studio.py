@@ -143,6 +143,8 @@ class Studio:
         self._client_lock = threading.Lock()
         self.conductor: Conductor | None = None
         self._rehearsal: dict[str, Any] | None = None
+        self.last_play: dict[str, Any] | None = None  # {"set", "from", "speed"}：停下后「再开始」用同样的
+        self._start_lock = threading.Lock()  # 同一时间只启动一次（启动引擎要几秒，网页上连点会开出两个引擎、两套声音）
         self._plan_cache: tuple[Any, Any] | None = None
         # 预演用的引擎：默认 Node 模拟器；开发时可以换成真 Mixxx 测试台（HarnessLink，同一套行协议）
         self.rehearsal_link_factory: Callable[..., Link] = _default_engine_link
@@ -191,11 +193,15 @@ class Studio:
         if self.conductor and self.conductor.running:
             self.conductor.request_stop()
             self.conductor.join(3)
-        r = self._rehearsal
-        if r:
-            r["client"].link.close()
-            self._rehearsal = None
+        self._close_rehearsal()
         self.disconnect()
+
+    def _close_rehearsal(self) -> None:
+        """关掉上一场演出 / 预演的引擎（进程结束 = 声音停）。"""
+        r, self._rehearsal = self._rehearsal, None
+        if r:
+            r["closing"].set()
+            r["client"].link.close()
 
     def disconnect(self) -> None:
         with self._client_lock:
@@ -499,11 +505,12 @@ class Studio:
                 raise StudioError("内置引擎没有启动起来")
             audio = link.audio() if hasattr(link, "audio") else None
             if audio and audio.get("on"):
-                job.say(f"内置引擎就绪（Mixxx 2.5.6 引擎 + DJStudio.js {client.version}），声音从「{audio.get('device')}」出")
+                job.say(f"内置引擎就绪（Mixxx 2.5.6 引擎 + DJStudio.js {client.version or mapping_version()}），"
+                        f"声音从「{audio.get('device')}」出")
             elif audio:
                 job.say(f"!! 内置引擎就绪，但没有声音：{audio.get('error') or '打不开声音输出'}")
             else:
-                job.say(f"内置引擎就绪（模拟器 + DJStudio.js {client.version}，没有声音）")
+                job.say(f"内置引擎就绪（模拟器 + DJStudio.js {client.version or mapping_version()}，没有声音）")
         finally:
             link.close()
         state = {"set": set_id, "at": time.time(), "engine": "builtin"}
@@ -1018,7 +1025,7 @@ class Studio:
             return self.rehearse(set_id, speed, from_transition, builtin=True)
         if self.conductor and self.conductor.running:
             raise StudioError("正在播放或预演，先停下")
-        self._rehearsal = None
+        self._close_rehearsal()
         if self.job and self.job.state == "running":
             raise StudioError(f"任务进行中：{self.job.name}")
         prep = self.prepared()
@@ -1047,9 +1054,17 @@ class Studio:
         self.conductor.start()
         return self.conductor.progress
 
+    STOP_FADE_BUILTIN = 1.0  # 内置引擎：点「停止」后淡出 1 秒，然后关掉引擎
+
     def stop(self) -> None:
+        """停止：淡出后停下。内置引擎（演出 / 预演）淡出完就关掉引擎进程——声音一定停，之后可以再开始。"""
+        r = self._rehearsal
+        if r:
+            r["closing"].set()  # 收尾线程不再留 3 秒最后画面，淡出完立刻关引擎
         if self.conductor and self.conductor.running:
             self.conductor.request_stop()
+        elif r:
+            self._close_rehearsal()
 
     # ------------------------------------------------------------ 预演（模拟器里跑，不碰 Mixxx）
 
@@ -1069,6 +1084,14 @@ class Studio:
     def rehearse(self, set_id: str, speed: float = 1.0, from_transition: int = 0, builtin: bool = False) -> Progress:
         """在 Node 模拟器里按这套 set 跑一遍（真正的 DJStudio.js，假 Mixxx，没有声音），网页演出页照常显示。
         曲目的时长 / BPM / 网格用和真机一样的解析结果，所以小节、过渡时刻和旋钮动作与真机一致。"""
+        if not self._start_lock.acquire(blocking=False):
+            raise StudioError("正在启动，稍等")
+        try:
+            return self._rehearse(set_id, speed, from_transition, builtin)
+        finally:
+            self._start_lock.release()
+
+    def _rehearse(self, set_id: str, speed: float, from_transition: int, builtin: bool) -> Progress:
         if self.conductor and self.conductor.running:
             raise StudioError("正在播放或预演，先停下")
         if self.job and self.job.state == "running":
@@ -1076,6 +1099,8 @@ class Studio:
         miss = _engine_missing() if self.rehearsal_link_factory is _default_engine_link else None
         if miss:
             raise StudioError(miss)
+        # 上一场留着最后画面的引擎先关掉：任何时候只有一个引擎在出声
+        self._close_rehearsal()
         s = self.rehearsal_set(self.load(set_id), from_transition)
         c = self.compile(s)
         if not c.ok:
@@ -1088,8 +1113,10 @@ class Studio:
             link.close()
             raise StudioError("内置引擎没有启动起来")
         audio = link.audio() if hasattr(link, "audio") else None
+        self.last_play = {"set": set_id, "from": from_transition, "speed": speed}
+        closing = threading.Event()
         self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
-                           "audio": audio}
+                           "audio": audio, "closing": closing}
         log_path = self.cfg.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{set_id}.log" if builtin else None
 
         def on_log(line: str) -> None:
@@ -1098,12 +1125,13 @@ class Studio:
                     f.write(line + "\n")
             self.emit("log", line)
 
-        cond = Conductor(client, c, on_progress=lambda p: self.emit("progress", p.to_dict()), on_log=on_log)
+        cond = Conductor(client, c, on_progress=lambda p: self.emit("progress", p.to_dict()), on_log=on_log,
+                         stop_fade=self.STOP_FADE_BUILTIN if builtin else 4.0)
         self.conductor = cond
 
-        def reap() -> None:  # 预演结束后留几秒最后画面，再关模拟器
+        def reap() -> None:  # 播完后留几秒最后画面再关引擎；手动停止的淡出完立刻关
             cond.join(None)
-            time.sleep(3)
+            closing.wait(3)
             if self._rehearsal and self._rehearsal["client"] is client:
                 self._rehearsal = None
             link.close()

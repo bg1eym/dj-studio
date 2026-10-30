@@ -68,6 +68,7 @@ def create_app(studio: Studio) -> FastAPI:
             "version": version_text(),
             "engine_mode": "builtin" if studio.builtin else "mixxx",
             "sound_engine": engine_binary() is not None,  # 有声音引擎（Mixxx 的引擎核心）；没有时内置引擎是没声音的模拟器
+            "last_play": studio.last_play,  # 上一次开始的 set / 从第几段 / 倍速：停下后「再开始」用，演出画面也按它找编译结果
         }
 
     @app.get("/api/state")

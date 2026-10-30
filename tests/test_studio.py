@@ -3,7 +3,9 @@ import json
 import sqlite3
 from pathlib import Path
 import shutil
+import threading
 import time
+from typing import Any
 
 import pytest
 
@@ -472,3 +474,39 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     p = studio.conductor.progress
     assert p.stage == "done", "\n".join(p.log) + f"\n{p.error}"
     assert any(studio.cfg.logs_dir.glob(f"*-{sid}.log"))  # 演出日志照常写
+
+    # 连点「开始」（启动引擎要几秒）：两个请求同时到，只能开出一个引擎；停止 = 引擎关掉；之后可以再开始
+    opened = []
+    real_factory = studio.rehearsal_link_factory
+
+    def counting_factory(*a, **k):
+        link = real_factory(*a, **k)
+        opened.append(link)
+        return link
+
+    studio.rehearsal_link_factory = counting_factory
+    results: list[Any] = []
+
+    def start() -> None:
+        try:
+            results.append(studio.play(sid, speed=1))
+        except StudioError as e:
+            results.append(e)
+
+    threads = [threading.Thread(target=start) for _ in range(3)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(30)
+    assert len(opened) == 1 and sum(not isinstance(r, StudioError) for r in results) == 1, results
+    assert studio.last_play == {"set": sid, "from": 0, "speed": 1}
+    studio.stop()
+    studio.conductor.join(30)
+    t0 = time.time()
+    while studio._rehearsal is not None and time.time() - t0 < 5:  # 手动停止：淡出完马上关引擎，不等 3 秒
+        time.sleep(0.05)
+    assert studio._rehearsal is None and opened[0]._p.poll() is not None, "停止后引擎进程还在"
+    studio.play(sid, speed=1)  # 再开始
+    assert len(opened) == 2
+    studio.stop()
+    studio.conductor.join(30)

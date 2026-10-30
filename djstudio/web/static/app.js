@@ -58,6 +58,29 @@ async function guard(fn) {
   try { return await fn(); } catch (e) { toast(e.message, true); }
 }
 
+// 按钮在请求进行中变灰、显示 label（启动引擎要几秒：连点会再开一次）
+async function busy(e, label, fn) {
+  const b = e && e.currentTarget;
+  if (b && b.disabled) return;
+  const text = b ? b.textContent : "";
+  if (b) { b.disabled = true; b.textContent = label; }
+  try { return await guard(fn); } finally { if (b) { b.disabled = false; b.textContent = text; } }
+}
+window.busy = busy;
+
+// 开始演出（内置引擎可以从第 k 段过渡、倍速）；记下参数，停下后「再开始」用同样的
+async function startShow(setId, body) {
+  await api("POST", `/api/sets/${setId}/play`, body);
+  S.showSetId = setId; S.showCompiled = null; S.homeDone = null;
+  await loadState();
+  renderHome(true);
+}
+
+async function stopShow() {
+  await api("POST", "/api/stop");
+  toast("停止中…");
+}
+
 const fmt = (t) => {
   if (t === null || t === undefined || isNaN(t)) return "–";
   const s = Math.max(0, t);
@@ -306,6 +329,8 @@ async function renderHome(force = false) {
   const root = $("#tab-home");
   if (!root || S.tab !== "home") return;
   const mode = homeMode();
+  const playing = !!(S.state && S.state.playing);
+  if (mode === "live" && playing !== S.homeLivePlaying) force = true; // 停下了：「停止」换成「再开始」
   if (mode === S.homeMode && !force && root.childElementCount) {
     if (mode === "drop" || mode === "plan") renderHomePlan();
     else if (mode === "live") renderShowStatus();
@@ -315,17 +340,21 @@ async function renderHome(force = false) {
   S.homeMode = mode;
   root.innerHTML = "";
   if (mode === "live") {
-    S.showSetId = ((S.engine || {}).rehearsal && S.engine.set) || (S.progress && S.progress.set_id) || S.showSetId;
+    S.homeLivePlaying = playing;
+    const last = S.state && S.state.last_play;
+    S.showSetId = ((S.engine || {}).rehearsal && S.engine.set) || (last && last.set) || (S.progress && S.progress.set_id) || S.showSetId;
     await loadShowCompiled();
     if (S.homeMode !== "live") return; // 等编译结果时状态变了
     const prog = S.progress || {};
-    const playing = S.state && S.state.playing;
     root.append(
       h("div", { class: "panel row home-live-bar" },
         h("b", {}, (S.showCompiled && S.showCompiled.set && S.showCompiled.set.name) || S.showSetId || ""),
         h("span", { class: "grow" }),
-        playing ? h("button", { class: "danger", onclick: () => guard(async () => { await api("POST", "/api/stop"); toast("淡出停止中…"); }) }, "■ 停止")
-          : h("button", { onclick: () => { S.homeDone = prog.started_at; renderHome(true); } }, "回到开始")),
+        playing ? h("button", { class: "danger", onclick: (e) => busy(e, "停止中…", stopShow) }, "■ 停止")
+          : [last && last.set === S.showSetId && isBuiltin()
+              ? h("button", { class: "primary", onclick: (e) => busy(e, "启动中…", () => startShow(last.set, { from: last.from, speed: last.speed })) }, "▶ 再开始")
+              : null,
+            h("button", { onclick: () => { S.homeDone = prog.started_at; renderHome(true); } }, "回到开始")]),
       h("div", { class: "panel", id: "show-status" }),
       liveRoot,
       h("details", { class: "panel job-log" }, h("summary", {}, "运行日志"), h("div", { class: "log", id: "show-log" })),
@@ -449,13 +478,8 @@ function renderHomeJob() {
         h("div", { class: "dim" }, builtin ? `约 ${Math.round(r.duration / 60)} 分钟。用内置的 Mixxx 引擎，不连你装的 Mixxx。` +
           (hasSound() ? "原速时从电脑的声音输出放出来；倍速时没有声音。" : "没有找到声音引擎：看得到旋钮，没有声音。")
           : `约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好。`), opts),
-      h("button", { class: "primary huge", onclick: () => guard(async () => {
-        const body = builtin ? { from: +$("#play-from").value, speed: +$("#play-speed").value } : {};
-        await api("POST", `/api/sets/${r.set}/play`, body);
-        S.showSetId = r.set; S.showCompiled = null; S.homeDone = null;
-        await loadState();
-        renderHome(true);
-      }) }, "▶ 开始演出")));
+      h("button", { class: "primary huge", onclick: (e) => busy(e, "启动中…", () =>
+        startShow(r.set, builtin ? { from: +$("#play-from").value, speed: +$("#play-speed").value } : {})) }, "▶ 开始演出")));
     if (warns.length) el.append(h("div", { class: "warn-box" }, h("b", {}, "需要注意"), warns.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
     el.append(h("div", { class: "row dim", style: "margin-top:10px" }, builtin ? null :
       h("a", { href: "#home", onclick: (e) => { e.preventDefault(); guard(async () => {
@@ -1026,7 +1050,7 @@ async function renderShow() {
       h("select", { id: "rh-from", disabled: busy }, h("option", { value: 0 }, "从头"),
         (full && !(S.engine || {}).rehearsal ? full.transitions : []).map((tr, i) => h("option", { value: i + 1, selected: S.rhFrom === i + 1 }, `过渡 ${i + 1} 前 8 小节`))),
       h("select", { id: "rh-speed", disabled: busy }, [1, 2, 4, 8].map((v) => h("option", { value: v, selected: v === (S.rhSpeed || 1) }, `${v}×`))),
-      h("button", { disabled: busy || !S.showSetId, onclick: () => guard(async () => {
+      h("button", { disabled: busy || !S.showSetId, onclick: (e) => window.busy(e, "启动中…", async () => {
         S.rhFrom = +$("#rh-from").value; S.rhSpeed = +$("#rh-speed").value;
         await api("POST", `/api/sets/${S.showSetId}/rehearse`, { speed: S.rhSpeed, from: S.rhFrom });
         await loadState(); renderShow();
@@ -1035,10 +1059,10 @@ async function renderShow() {
       h("button", { disabled: playing || (S.job && S.job.state === "running"), onclick: () => guard(async () => {
         await api("POST", `/api/sets/${S.showSetId}/prepare`, {}); toast("准备中：会重启 Mixxx，约 1 分钟");
       }) }, "准备"),
-      h("button", { class: "primary", disabled: playing || !isPrepared, onclick: () => guard(async () => {
+      h("button", { class: "primary", disabled: playing || !isPrepared, onclick: (e) => window.busy(e, "启动中…", async () => {
         await api("POST", `/api/sets/${S.showSetId}/play`); await loadState(); renderShow();
       }) }, "▶ 开始"),
-      h("button", { class: "danger", disabled: !playing, onclick: () => guard(async () => { await api("POST", "/api/stop"); toast("淡出停止中…"); }) }, "■ 淡出停止"),
+      h("button", { class: "danger", disabled: !playing, onclick: (e) => window.busy(e, "停止中…", stopShow) }, "■ 停止"),
     ),
     h("div", { id: "job-show" }),
     h("div", { class: "panel", id: "show-status" }),
@@ -1063,8 +1087,11 @@ async function loadShowCompiled() {
 // 演出页显示哪份编译结果：预演从第 k 段开始时是截短的那份（progress.index 按它算）
 function showKey() {
   const e = S.engine || {};
-  if (e.rehearsal && e.set === S.showSetId && e.from) {
-    return { key: `${e.set}~${e.from}`, url: `/api/sets/${e.set}?rehearse_from=${e.from}`, offset: e.from - 1 };
+  // 正在放：按引擎报的；停下以后：按上一次开始时的（引擎已经关了）
+  const last = (S.state && S.state.last_play) || {};
+  const r = e.rehearsal ? { set: e.set, from: e.from } : last;
+  if (r.set === S.showSetId && r.from) {
+    return { key: `${r.set}~${r.from}`, url: `/api/sets/${r.set}?rehearse_from=${r.from}`, offset: r.from - 1 };
   }
   return { key: S.showSetId, url: "/api/sets/" + S.showSetId };
 }
