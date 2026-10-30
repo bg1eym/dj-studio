@@ -163,7 +163,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VER=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          gh release create "$RELEASE_TAG" --title "DJ Studio $VER（Mac，Apple 芯片）" --notes "独立的 DJ Studio.app" 2>/dev/null || true
+          gh release create "$RELEASE_TAG" --title "DJ Studio ${VER}（Mac，Apple 芯片）" --notes "独立的 DJ Studio.app" 2>/dev/null || true
           # 不再做 Intel 版：把以前传的删掉
           gh release delete-asset "$RELEASE_TAG" DJ-Studio-mac-x64.zip -y 2>/dev/null || true
           gh release delete-asset "$RELEASE_TAG" selftest-x64.txt -y 2>/dev/null || true
@@ -178,7 +178,7 @@ jobs:
             echo 'curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-arm64.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"'
             echo '```'
           } > release-notes.md
-          gh release edit "$RELEASE_TAG" --title "DJ Studio $VER（Mac，Apple 芯片）" --notes-file release-notes.md --prerelease=false --latest || true
+          gh release edit "$RELEASE_TAG" --title "DJ Studio ${VER}（Mac，Apple 芯片）" --notes-file release-notes.md --prerelease=false --latest || true
       - name: 上传日志（成功失败都传，Release「ci-logs」）
         if: always()
         env:
