@@ -450,10 +450,10 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     # 换了解码器（这里假装是别的解码器分析的）的也重新分析
     t, u = (studio.store.get(x.id) for x in studio.load(job.result["set"]).tracks)
     assert t.analysis["decoder"] == "ffmpeg"
+    assert studio.refresh_stale() is None  # 启动时：分析都是新的，不重做
     studio.store.update(t.id, analysis={**t.analysis, "grid_source": "mixxx"})
     studio.store.update(u.id, analysis={**u.analysis, "decoder": "something-else"})
-    studio._auto_key = None
-    job = wait_job(studio.auto_prepare(), 120)
+    job = wait_job(studio.refresh_stale(), 120)  # 启动时（升级后）：过时了就自动重做一键分析
     assert job.state == "ok" and any("2 首" in line and "重新分析" in line for line in job.log), "\n".join(job.log)
     assert studio.store.get(t.id).analysis["grid_source"] == "own" and studio.store.get(u.id).analysis["decoder"] == "ffmpeg"
     assert job.stages == studio.BUILTIN_STAGES and job.progress == 1.0

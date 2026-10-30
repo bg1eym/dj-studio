@@ -20,6 +20,7 @@ def _serve(studio, host: str, port: int, open_browser: bool) -> None:  # type: i
     if not free_port(host, port):
         raise SystemExit(1)
     app = create_app(studio)
+    threading.Timer(0.5, studio.refresh_stale).start()  # 升级后旧分析自动重做
     url = f"http://{host}:{port}/"
     print(f"DJ Studio {version_text()} → {url}")
     if open_browser:

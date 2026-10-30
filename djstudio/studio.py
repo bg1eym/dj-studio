@@ -872,6 +872,29 @@ class Studio:
         self.emit("plan", res)
         self.maybe_auto()
 
+    def _stale(self, ids: list[str]) -> list[str]:
+        """要重新分析的：换了解码器（mp3 开头的编码延迟两边处理可能不同，差几十毫秒；声音引擎的解码修过对齐）；
+        内置引擎下以前按 Mixxx 的网格切的段落（内置引擎用自己的网格）。"""
+        dec = decoder_name()
+        return [i for i in ids if (t := self.store.get(i)) and (
+            (t.analysis or {}).get("decoder", "ffmpeg") != dec
+            or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
+
+    def refresh_stale(self) -> Job | None:
+        """启动时：谱上的歌是按旧解码器 / 旧方式分析的（升级之后）→ 自动重做一键分析，拍线和波形才和声音对得上。
+        不然首页显示「可以开始」，点了用的还是旧网格。"""
+        try:
+            st = self.plan_status()
+        except Exception:  # noqa: BLE001  启动时尽力而为
+            return None
+        if not st or st.get("error") or not all(r["track"] for r in st["tracks"]):
+            return None
+        if not self._stale([r["track"] for r in st["tracks"]]):
+            return None
+        with self._auto_lock:
+            self._auto_key = None  # 同一份谱、同一组歌，但分析过时了：要再跑一次
+        return self.maybe_auto()
+
     def maybe_auto(self) -> Job | None:
         """打碟谱和谱上的歌都齐了 → 自动开始一键分析（同一份谱 + 同一组歌只自动开始一次）。"""
         with self._auto_lock:
@@ -925,12 +948,7 @@ class Studio:
         if missing:
             raise StudioError("这些歌还没放进来：" + "、".join(missing))
         ids = [m.id for m in matches if m]
-        # 要重新分析的：换了解码器（mp3 开头的编码延迟两边处理可能不同，差几十毫秒）；
-        # 内置引擎下以前按 Mixxx 的网格切的段落（内置引擎用自己的网格）
-        dec = decoder_name()
-        stale = [i for i in ids if (t := self.store.get(i)) and (
-            (t.analysis or {}).get("decoder", "ffmpeg") != dec
-            or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
+        stale = self._stale(ids)
         if stale:
             job.say(f"{len(stale)} 首按现在的解码器 / 网格重新分析 …")
             for i in stale:
