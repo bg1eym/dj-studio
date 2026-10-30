@@ -943,6 +943,7 @@ int probeFile(const QString& path) {
     o["duration"] = static_cast<double>(src->frameLength()) / sr.toDouble();
     o["samplerate"] = static_cast<int>(sr.value());
     o["channels"] = static_cast<int>(src->getSignalInfo().getChannelCount());
+    o["first_frame"] = static_cast<qint64>(src->frameIndexRange().start()); // 解码器起点（Mac 的 CoreAudio 不是 0）
     o["bitrate"] = static_cast<int>(meta.getStreamInfo().getBitrate().value()) * 1000;
     o["codec"] = QFileInfo(path).suffix().toLower();
     o["title"] = meta.getTrackInfo().getTitle();

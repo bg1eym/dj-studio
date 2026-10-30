@@ -107,6 +107,8 @@ def main() -> int:
     for f in files:
         name = f.suffix[1:]
         dec_path, ren_path = tmp / f"{name}.dec.f32", tmp / f"{name}.ren.f32"
+        pr = json.loads(next(ln for ln in run(["--probe", str(f)]).splitlines() if ln.startswith("{")))
+        print(f"  {name}：解码器起点第 {pr.get('first_frame')} 帧（不是 0 时，0.3.0 的分析会比声音早这么多帧）")
         run(["--decode", str(f), str(dec_path), str(SR)])
         dec = np.fromfile(dec_path, dtype="<f4").astype(np.float64)
         out = run(["--render", str(f), str(ren_path), "8"], timeout=180)
