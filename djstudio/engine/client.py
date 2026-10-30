@@ -67,6 +67,7 @@ class EngineClient:
         self._listeners: list[Listener] = []
         self.status: dict[str, Any] | None = None
         self.last_status_at = 0.0
+        self.last_status_wall = 0.0  # 同一时刻的墙钟（Unix 秒）：网页按它把画面对到声音上
         self.version: str | None = None
         self.boots = 0  # 收到过几次 boot hello（= Mixxx 加载/重载了映射）
         link.on_raw = self._on_raw
@@ -83,6 +84,7 @@ class EngineClient:
             if t == "st":
                 self.status = msg
                 self.last_status_at = time.monotonic()
+                self.last_status_wall = time.time()
             elif t == "ack":
                 self._acks[int(msg["c"])] = msg
                 if "v" in msg:

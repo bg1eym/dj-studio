@@ -228,6 +228,19 @@ def test_studio_builtin_show_uses_engine(tmp_path, monkeypatch):
     studio.play("eng", speed=2.0)
     es = studio.engine_state()
     assert es["link"] == "mixxx-engine" and es["builtin"] and es["audio"]["on"] is False
+    t0 = time.time()
+    while studio.engine_state().get("at") is None and time.time() - t0 < 10:
+        time.sleep(0.05)
+    # 状态帧带「什么时候听到」的时刻（Unix 毫秒；不出声时 = 收到的时刻）：网页按它对齐播放头
+    assert abs(studio.engine_state()["at"] - time.time() * 1000) < 2000
     studio.conductor.join(120)
     p = studio.conductor.progress
     assert p.stage == "done", "\n".join(p.log) + f"\n{p.error}"
+
+
+def test_timing_check():
+    """对时检查（CI 在 Mac 上也跑这一个）：分析用的解码 = 实际播放，单放不改动声音，拍线落在 kick 起音上。"""
+    script = Path(__file__).resolve().parents[1] / "packaging" / "macos" / "timing_check.py"
+    r = subprocess.run([os.sys.executable, str(script), BIN], capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "对时检查全部通过" in r.stdout

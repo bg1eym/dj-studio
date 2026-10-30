@@ -12,13 +12,13 @@
 
 ## 安装（Mac）
 
-打开终端，粘贴这一行（自动选 Apple 芯片 / Intel 版，装进「应用程序」并打开；以后更新也是这一行）：
+只支持 Apple 芯片（M1 及以后）的 Mac，不做 Intel 版。打开终端，粘贴这一行（装进「应用程序」并打开；以后更新也是这一行）：
 
 ```bash
-A=$(uname -m | sed 's/x86_64/x64/'); curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-$A.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"
+curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-arm64.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"
 ```
 
-也可以在 [Release 页](https://github.com/bg1eym/dj-studio/releases/tag/mac-app-latest)下载 zip（Apple 芯片：`arm64`；Intel：`x64`），
+也可以在 [Release 页](https://github.com/bg1eym/dj-studio/releases/tag/mac-app-latest)下载 `DJ-Studio-mac-arm64.zip`，
 解压后把 DJ Studio 拖进「应用程序」。这样下载的第一次打开要：右键 → 打开 → 打开（macOS 15 以后：双击一次，再到 系统设置 → 隐私与安全性 → 「仍要打开」），
 因为应用没有经过苹果公证。
 

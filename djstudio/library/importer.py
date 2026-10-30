@@ -197,6 +197,7 @@ class Library:
         result["decoder"] = decoder
         self.store.save_waveform(tid, wf)
         fields: dict[str, Any] = {"analysis": result, "analysis_version": ANALYSIS_VERSION, "analysis_error": None}
-        if not t.bar1_confirmed:
+        # 用户确认的是「哪一拍是第 1 小节」；具体时间跟着网格走（换了解码器重新分析时，网格可能挪了几十毫秒）
+        if not t.bar1_confirmed or (t.bar1 is not None and abs(result["bar1"] - t.bar1) < 0.1):
             fields["bar1"] = result["bar1"]
         self.store.update(tid, **fields)

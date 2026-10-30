@@ -44,6 +44,15 @@ def _age(c: EngineClient) -> float | None:
     return round(a, 2) if math.isfinite(a) else None
 
 
+def _heard_at(c: EngineClient, audio: dict[str, Any] | None) -> float | None:
+    """最近一帧状态里的位置什么时候从扬声器出来（Unix 毫秒）= 收到的时刻 + 声音输出延迟。
+    网页按这个时刻推算播放头，而不是按网页收到的时刻（中间隔着轮询，50–150ms 不等）——画面和声音才对得上。"""
+    if not c.last_status_wall:
+        return None
+    lat = float(audio.get("latency_ms") or 0) if audio and audio.get("on") else 0.0
+    return round(c.last_status_wall * 1000 + lat, 1)
+
+
 def _duration(path: Path) -> float:
     try:
         return probe(path).duration
@@ -199,15 +208,16 @@ class Studio:
         if r:  # 预演中：网页看的是模拟器里的引擎
             c = r["client"]
             return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
-                    "status": c.status, "link": c.link.name, "rehearsal": True, "speed": r["speed"],
-                    "set": r["set"], "from": r["from"], "builtin": r.get("builtin", False), "audio": r.get("audio")}
+                    "status": c.status, "at": _heard_at(c, r.get("audio")), "link": c.link.name, "rehearsal": True,
+                    "speed": r["speed"], "set": r["set"], "from": r["from"], "builtin": r.get("builtin", False),
+                    "audio": r.get("audio")}
         if self.builtin:
             return {"connected": False, "online": False, "builtin": True}
         c = self._client
         if not c:
             return {"connected": False, "online": False}
         return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
-                "status": c.status, "link": c.link.name}
+                "status": c.status, "at": _heard_at(c, None), "link": c.link.name}
 
     # ------------------------------------------------------------ 曲目解析
 

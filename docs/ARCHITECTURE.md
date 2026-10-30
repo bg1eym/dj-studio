@@ -57,6 +57,10 @@ Mixxx + DJStudio.js（控制器映射）
 `mv`（主输出电平），以及 deck 位置和程序时间线位置 `pg.tl`。Python 原样经 SSE 每 100ms 推给网页；`web/static/live.js` 画两条滚动波形、
 混音台和过渡时间线，两帧之间按播放速度外推位置。计划（编译出的曲线）和实际（读回的旋钮）分开画：时间线上是计划，旋钮是实际。
 
+画面和声音对齐：Python 收到状态帧时记下墙钟，`engine_state()` 给出 `at` = 收到时刻 + 声卡报的输出延迟（Unix 毫秒）
+= 帧里的位置从扬声器出来的时刻。网页按 `at`（换算到页面时钟）外推播放头，而不是按网页收到 SSE 的时刻
+（中间隔着 50–150ms 不等的轮询）。拍线、波形来自分析，分析用的解码和播放是同一个解码器、同一套帧号（见 MIXXX_NOTES「CoreAudio」一条）。
+
 **预演**：同一套 conductor + `DJStudio.js`，在声音引擎里跑但不出声（没有声音引擎时用 Node 模拟器；`Studio.rehearsal_link_factory` 可以换）。
 从第 k 段开始时用截短的 set（`Studio.rehearsal_set`：第 k 首从过渡前 8 小节起播）。
 

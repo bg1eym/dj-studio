@@ -83,6 +83,14 @@ time.sleep(2)
 check(any(h.lower().startswith("f0") for h in hex_lines), f"DJStudio.js 在 Mixxx 的脚本引擎里跑起来了（收到 {len(hex_lines)} 条 SysEx）")
 a = cmd(2, {"cmd": "audio"})
 print("  声音输出：", a)
+if a and a.get("on"):
+    # 声卡按自己的时钟取数据：3 秒里取走的应该正好 3 秒（快了 = 采样率不对，声音会变调、和画面错开）
+    t0, p0 = time.time(), a["played_ms"]
+    time.sleep(3)
+    b = cmd(4, {"cmd": "audio"})
+    ratio = (b["played_ms"] - p0) / ((time.time() - t0) * 1000)
+    check(abs(ratio - 1) < 0.03, f"声卡取数据的速度 = 墙钟的 {ratio:.3f} 倍（设备 {b.get('device')}，"
+          f"设备采样率 {b.get('device_rate')}，引擎 {b.get('rate')}，延迟 {b.get('latency_ms', 0):.1f} ms，断音 {b.get('underruns')} 次）")
 cmd(3, {"cmd": "quit"})
 p.wait(10)
 if p.returncode != 0:

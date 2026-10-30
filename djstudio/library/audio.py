@@ -29,9 +29,14 @@ def have_decoder() -> bool:
     return engine_binary() is not None or have_ffmpeg()
 
 
+# 声音引擎解码结果的版本：/2 = 输出按播放时的帧号对齐（Mac 的 CoreAudio 解码器起点不是 0，以前没补，
+# 拍线和波形比实际声音早 12–48ms）。改了就会让旧的分析按新解码器重做。
+ENGINE_DECODER = "mixxx-engine/2"
+
+
 def decoder_name() -> str:
     """现在用哪个解码器（写进分析结果：换了解码器要重新分析，mp3 开头的编码延迟两边处理可能不同）。"""
-    return "mixxx-engine" if _engine() else "ffmpeg"
+    return ENGINE_DECODER if _engine() else "ffmpeg"
 
 
 def _engine() -> Path | None:

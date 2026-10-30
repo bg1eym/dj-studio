@@ -260,11 +260,12 @@ class DeckView {
 
   setRole(text) { this.role.textContent = text || ""; this.role.style.display = text ? "" : "none"; }
 
-  setStatus(ds, mx, now) {
+  // tFrame = 这一帧里的位置从扬声器出来的时刻（页面时钟，ms）；speed = 预演倍速
+  setStatus(ds, mx, tFrame, speed) {
     this.st = ds;
     this.mx = mx;
     if (!ds || !ds[0]) {
-      this.anchor = { pos: 0, t: now, rate: 1, playing: false };
+      this.anchor = { pos: 0, t: tFrame, rate: 1, playing: false };
       this.bpm.textContent = "–";
       this.pitch.textContent = "";
       this.time.textContent = "";
@@ -273,10 +274,10 @@ class DeckView {
     }
     const measured = ds[2] / 1000, playing = !!ds[1];
     const rate = ds[5] > 0 ? ds[4] / ds[5] : 1;
-    const pred = this.posAt(now);
-    // 引擎的位置每秒只更新十几次：小误差平滑并入，大跳变（seek / 装新歌）直接跟上
+    const pred = this.posAt(tFrame);
+    // 引擎的位置每秒更新十次：小误差平滑并入，大跳变（seek / 装新歌）直接跟上
     const pos = playing && this.anchor.playing && Math.abs(pred - measured) < 0.15 ? pred + (measured - pred) * 0.3 : measured;
-    this.anchor = { pos, t: now, rate, playing };
+    this.anchor = { pos, t: tFrame, rate, speed: speed || 1, playing };
     this.bpm.textContent = ds[4].toFixed(2);
     const pc = (rate - 1) * 100;
     this.pitch.textContent = Math.abs(pc) < 0.005 ? " 原速" : ` ${pc > 0 ? "+" : ""}${pc.toFixed(2)}%`;
@@ -287,7 +288,7 @@ class DeckView {
 
   posAt(now) {
     const a = this.anchor;
-    return a.playing ? a.pos + ((now - a.t) / 1000) * a.rate : a.pos;
+    return a.playing ? a.pos + ((now - a.t) / 1000) * a.rate * (a.speed || 1) : a.pos;
   }
 
   draw(now) {
@@ -659,6 +660,10 @@ export class LiveView {
 
   update(engine, progress) {
     const now = performance.now();
+    // 状态帧里的位置是什么时候「听到」的：服务器给了（收到时刻 + 声卡延迟，Unix 毫秒）就换算到页面时钟，
+    // 否则只能当作现在（会比声音晚一个轮询间隔）
+    const tFrame = engine && engine.at ? engine.at - performance.timeOrigin : now;
+    const speed = (engine && engine.speed) || 1;
     this.progress = progress;
     const st = engine && engine.status;
     const asg = this._assign();
@@ -676,7 +681,7 @@ export class LiveView {
       }
       const ds = st ? st.d[d - 1] : null;
       const mx = st && st.m ? st.m[d - 1] : null;
-      dv.setStatus(ds, mx, now);
+      dv.setStatus(ds, mx, tFrame, speed);
       this.ch[d].set(mx, ds ? ds[6] : 0);
       const main = progress && comp && k === progress.index;
       const inTr = progress && progress.stage === "transition" && prog && prog.id !== "end";
@@ -697,7 +702,7 @@ export class LiveView {
       this.timeline.setProgram(prog, { key: prog.id + ":" + (comp._id || ""), title, sub });
       if (pg && pg.id.replace("!", "") === prog.id) {
         const bpm = st.d[prog.a.deck - 1][1] ? st.d[prog.a.deck - 1][4] : prog.b ? st.d[prog.b.deck - 1][4] : 120;
-        this.timeline.setTl(pg.tl, bpm || 120, pg.st === "running" || pg.st === "armed", now);
+        this.timeline.setTl(pg.tl, (bpm || 120) * speed, pg.st === "running" || pg.st === "armed", tFrame);
       } else {
         this.timeline.setTl(null, 120, false, now);
       }

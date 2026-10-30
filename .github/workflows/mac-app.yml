@@ -1,6 +1,7 @@
-# 在 GitHub 的 macOS 构建机上做出独立的 DJ Studio.app（Apple 芯片 / Intel 各一个）：
+# 在 GitHub 的 macOS 构建机上做出独立的 DJ Studio.app（只做 Apple 芯片版，不做 Intel 版）：
 #   1. 用 Mixxx 2.5.6 源码编声音引擎 djstudio-engine（只编这一个程序，见 tools/mixxx-engine）
-#   2. 用 PyInstaller 把网页服务（Python）和引擎打成一个 .app，在构建机上自检
+#   2. 在 Apple 芯片的构建机上测引擎（冒烟 + 对时：分析看到的 = 实际放出来的，拍线落在 kick 上），
+#      再用 PyInstaller 把网页服务（Python）和引擎打成一个 .app，自检
 #   3. 放到 GitHub Release「mac-app-latest」（README 里的一行安装命令从这里下载）
 # 失败时把日志传到 Release「ci-logs」。
 name: mac-app
@@ -34,9 +35,6 @@ jobs:
           - arch: arm64
             buildenv: tools/macos_arm64-cross-release_buildenv.sh
             triplet: arm64-osx-min1100-release
-          - arch: x64
-            buildenv: tools/macos_release_buildenv.sh
-            triplet: x64-osx-min1100-release
     steps:
       - uses: actions/checkout@v4
       - name: 报到（ci-logs 里能看到构建开始了）
@@ -97,11 +95,6 @@ jobs:
           F=tools/mixxx-engine/dist/djstudio-engine
           { lipo -info "$F"; ls -la "$F"; otool -L "$F"; } | tee engine-deps.txt
           if otool -L "$F" | tail -n +2 | grep -vE '^\s*(/usr/lib/|/System/)'; then echo "有非系统库"; exit 1; fi
-      - name: 冒烟测试（x64 版能在这台机器上直接跑）
-        if: matrix.arch == 'x64'
-        run: |
-          echo "$(date -u +%H:%M:%S) 冒烟测试（x64 版能在这台机器上直接跑）" >> "$RUNNER_TEMP/progress.txt"
-          python3 packaging/macos/smoke_engine.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee engine-smoke.log
       - uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.arch }}
@@ -113,7 +106,7 @@ jobs:
         run: |
           set +e
           gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）" 2>/dev/null || true
-          { echo "== $GITHUB_SHA engine-${{ matrix.arch }} ${{ job.status }}"; cat engine-deps.txt engine-smoke.log 2>/dev/null || true; tail -n 800 engine-build.log 2>/dev/null || true; } > engine-${{ matrix.arch }}.log
+          { echo "== $GITHUB_SHA engine-${{ matrix.arch }} ${{ job.status }}"; cat engine-deps.txt 2>/dev/null || true; tail -n 800 engine-build.log 2>/dev/null || true; } > engine-${{ matrix.arch }}.log
           for i in 1 2 3 4 5 6; do gh release upload ci-logs engine-${{ matrix.arch }}.log --clobber && break; sleep 10; done
 
   app:
@@ -126,8 +119,6 @@ jobs:
         include:
           - arch: arm64
             os: macos-14
-          - arch: x64
-            os: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -138,12 +129,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 打包 DJ Studio.app
+      - name: 依赖
         run: |
-          set -o pipefail
           echo "COMMIT = \"${GITHUB_SHA}\"" > djstudio/_build.py
           python -m pip install --upgrade pip
           python -m pip install . pyinstaller
+      - name: 引擎冒烟测试（Mac 的解码器、DJStudio.js、声卡时钟）
+        run: |
+          set -o pipefail
+          python packaging/macos/smoke_engine.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee engine-smoke.log
+      - name: 对时检查（分析用的解码 = 实际播放；拍线落在 kick 起音上）
+        run: |
+          set -o pipefail
+          python packaging/macos/timing_check.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee timing.log
+      - name: 打包 DJ Studio.app
+        run: |
+          set -o pipefail
           export DJSTUDIO_APP_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           pyinstaller --noconfirm packaging/macos/djstudio.spec 2>&1 | tee app-build.log
       - name: 自检（在 .app 里：引擎、解码、声音输出）
@@ -160,7 +161,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$RELEASE_TAG" --prerelease --title "DJ Studio（Mac）" --notes "独立的 DJ Studio.app。Apple 芯片下载 arm64，Intel 下载 x64。" 2>/dev/null || true
+          gh release create "$RELEASE_TAG" --prerelease --title "DJ Studio（Mac）" --notes "独立的 DJ Studio.app，Apple 芯片（M1 及以后）的 Mac。" 2>/dev/null || true
+          gh release edit "$RELEASE_TAG" --notes "独立的 DJ Studio.app，Apple 芯片（M1 及以后）的 Mac。" 2>/dev/null || true
+          # 不再做 Intel 版：把以前传的删掉
+          gh release delete-asset "$RELEASE_TAG" DJ-Studio-mac-x64.zip -y 2>/dev/null || true
+          gh release delete-asset "$RELEASE_TAG" selftest-x64.txt -y 2>/dev/null || true
           for i in 1 2 3 4 5 6; do gh release upload "$RELEASE_TAG" DJ-Studio-mac-${{ matrix.arch }}.zip selftest-${{ matrix.arch }}.txt --clobber && break; sleep 10; done
       - name: 上传日志（成功失败都传，Release「ci-logs」）
         if: always()
@@ -169,5 +174,5 @@ jobs:
         run: |
           set +e
           gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）" 2>/dev/null || true
-          { echo "== $GITHUB_SHA app-${{ matrix.arch }} ${{ job.status }}"; cat selftest-${{ matrix.arch }}.txt 2>/dev/null || true; tail -n 400 app-build.log 2>/dev/null || true; } > app-${{ matrix.arch }}.log
+          { echo "== $GITHUB_SHA app-${{ matrix.arch }} ${{ job.status }}"; cat engine-smoke.log timing.log selftest-${{ matrix.arch }}.txt 2>/dev/null || true; tail -n 400 app-build.log 2>/dev/null || true; } > app-${{ matrix.arch }}.log
           for i in 1 2 3 4 5 6; do gh release upload ci-logs app-${{ matrix.arch }}.log --clobber && break; sleep 10; done

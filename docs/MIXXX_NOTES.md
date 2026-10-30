@@ -84,6 +84,8 @@
 | | 结论 | 测法 |
 |---|---|---|
 | ⚠️ | **Linux 上 Mixxx 解码 mp3（libmad）比 ffmpeg 晚约 25ms**（≈ 1105 个采样：编码器延迟 + 解码器延迟，ffmpeg 按 LAME 头去掉了，libmad 这条路没去）。Mac 上 Mixxx 用 CoreAudio 解码，处理方式又可能不同。→ 分析改用声音引擎自己的解码（`--decode`），和播放同一个解码器；分析结果记下解码器，换了就重新分析。 | 同一个 320k mp3 用两边解码，波形互相关：−553 个采样 @22050 |
+| ❌ | **Mac 的 CoreAudio 解码器帧号从 `leadingFrames` 开始，不是 0**（`AudioConverterPrimeInfo`，AAC 常见 2112）。播放时 Mixxx 的帧号就是解码器的帧号，起点之前补静音（preroll）。`--decode` 原来从起点读、从 0 写，分析结果（拍线、波形）比实际声音早 `leadingFrames` 帧，用户在 Mac 上听出「kick 不在拍线上、画面和声音对不上」。→ `--decode` 在前面补同样长的静音（起点 < 0 就丢掉负的那段），解码器版本记为 `mixxx-engine/2`，旧分析自动重做。CI 在 Apple 芯片构建机上跑 `packaging/macos/timing_check.py`：`--decode` 和 `--render`（真正的播放路径）逐帧比。 | `soundsourcecoreaudio.cpp:169-197`；`cachingreader.cpp:351-380`；`timing_check.py` |
+| ✅ | **原速单放时引擎不改动声音**：EQ 居中、没有效果、keylock 关，`--render` 输出和解码结果逐点相同（差 −120 dB），只晚 1 帧（线性变速器插值）。 | `timing_check.py`（Linux：wav / mp3 / aac） |
 | ✅ | 整套 set（长交接 + 瞬时切换 + 终曲淡出）在真引擎里按谱面跑完；过渡中两边时间线拍位差 < 0.05 拍。冷启动时 AutoDJ 抢先预载 deck2 的竞态真实出现，身份核对正确处理。 | `tests/test_mixxx_engine.py` |
 | ✅ | 映射加载时 Mixxx 总会先加载系统目录里的 `common-controller-scripts.js`（真机上在 Mixxx 的 app 资源里；声音引擎把它放在程序旁边的 `res/controllers`）。 | `legacycontrollermappingfilehandler.cpp:233` |
 | ✅ | 用 Mixxx 自己的 `AnalyzerBeats` 分析后序列化出的 blob，我们的解码器读出的 BPM / 首拍与 Mixxx 完全一致（帧单位再次确认）。分析器的 sub_version 形如 `rounding=V4|vamp_plugin_id=qm-tempotracker:0`。 | 测试台 `analyze` 命令 |
@@ -94,6 +96,7 @@
 
 ## 平台差异（仍需真机确认）
 
-- macOS 版 Mixxx 用 CoreAudio 解码 MP3/AAC（`COREAUDIO` 选项），我们的分析用 ffmpeg。两者对编码器延迟的处理可能差几十毫秒，
-  表现为曲库页「网格核对」有很小的相位差（< 0.1 拍内不报警）。
+- macOS 版 Mixxx 用 CoreAudio 解码 MP3/AAC（`COREAUDIO` 选项，优先级 Higher：`soundsourcecoreaudio.cpp:44-50`）。
+  连本机 Mixxx 的模式下我们的分析用 ffmpeg，两者对编码器延迟的处理可能差几十毫秒，
+  表现为曲库页「网格核对」有很小的相位差（< 0.1 拍内不报警）。内置引擎模式下分析和播放是同一个解码器，没有这个问题。
 - IAC 总线会把消息回送给所有监听者（包括发送者）——这是 CoreMIDI 的行为，不在 Mixxx 源码里。协议已按方向区分帧头。

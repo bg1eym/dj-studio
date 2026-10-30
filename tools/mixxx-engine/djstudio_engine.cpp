@@ -4,13 +4,17 @@
 //   解码（SoundSourceProxy，Mac 上是 CoreAudio）。
 // 没有界面、曲库、皮肤、广播、黑胶控制、HID，也不带测试框架。Mixxx 的核心是静态库，用不到的代码不会进程序。
 //
-// 三种用法：
+// 四种用法：
 //   djstudio-engine                 演出：stdin / stdout 与 Python 通信（djstudio/engine/link.py 的 EngineLink），
 //                                   协议与 sim/fake_mixxx.mjs 相同：十六进制 = 原始 MIDI；'#' 开头 = 控制命令 / 回复（JSON）。
 //                                   声音经 PortAudio 输出到系统默认输出设备，引擎按声卡的时钟走（和 Mixxx 一样）。
 //   djstudio-engine --probe <文件>  打印 JSON：时长、采样率、声道、码率、标签
 //   djstudio-engine --decode <文件> <输出> <采样率>
-//                                   解码成单声道 float32（小端）写到输出文件，按给定采样率重采样（分析用）
+//                                   解码成单声道 float32（小端）写到输出文件，按给定采样率重采样（分析用）。
+//                                   输出第 i 点 = 播放时曲目的第 i 帧（解码器起点不是 0 时前面补静音，见 decodeFile）
+//   djstudio-engine --render <文件> <输出> <秒数> [起点秒]
+//                                   离线渲染：deck 1 原速播放，主输出下混成单声道 float32（44100 Hz）。
+//                                   对时测试用：和 --decode 的结果逐点比，确认分析看到的就是播放出来的
 //
 // 环境变量：DJSTUDIO_MAPPING = DJStudio.midi.xml 路径；DJSTUDIO_SYSTEM_MAPPINGS = 放 common-controller-scripts.js
 // 的目录（默认：程序旁边的 res/controllers）；DJSTUDIO_SPEED = 引擎相对墙钟的倍速（默认 1；不是 1 时没有声音）；
@@ -21,8 +25,8 @@
 // - [AutoDJ],enabled / skip_next 由本文件里移植的 AutoDJProcessor 逻辑处理（toggleAutoDJ / P1LOADED /
 //   skipNext / 队首删除），装载走真正的 Deck::slotLoadTrack；不模拟 AutoDJ 的自动淡化。
 // - 没有 PlayerManager，所以「空 deck 上 eject 装回上一首」的逻辑不可用（Deck 构造时 PlayerManager 为空）。
-// - 声音输出是这里直接开的 PortAudio 输出流（Mixxx 的 SoundManager 也是 PortAudio），引擎在主线程处理，
-//   声卡回调只从环形缓冲区取数据。
+// - 声音输出是这里直接开的 PortAudio 输出流（Mixxx 的 SoundManager 也是 PortAudio）。和 Mixxx 一样，
+//   引擎在声卡回调里处理（每次 512 帧）；主线程只跑脚本、定时器和命令。
 
 #include <portaudio.h>
 
@@ -185,6 +189,7 @@ class AudioOut {
             return false;
         }
         m_device = QString::fromUtf8(Pa_GetDeviceInfo(dev)->name);
+        m_deviceRate = Pa_GetDeviceInfo(dev)->defaultSampleRate;
         if (Pa_StartStream(m_stream) != paNoError) {
             m_error = QStringLiteral("声音输出启动失败");
             Pa_CloseStream(m_stream);
@@ -219,6 +224,10 @@ class AudioOut {
         o["latency_ms"] = m_latencyMs + kBufferFrames * 1000.0 / kSampleRate;
         o["underruns"] = static_cast<qint64>(m_underruns.load()); // 声卡报告的断音次数
         o["played_ms"] = static_cast<double>(m_played.load()) * 1000.0 / kSampleRate; // 声卡已经取走的
+        o["rate"] = kSampleRate;           // 引擎输出的采样率
+        if (m_deviceRate > 0) {
+            o["device_rate"] = m_deviceRate; // 设备本身的采样率（不同时由系统转换）
+        }
         if (!m_error.isEmpty()) {
             o["error"] = m_error;
         }
@@ -233,9 +242,18 @@ class AudioOut {
         if (flags & paOutputUnderflow) {
             self->m_underruns++;
         }
+        // PortAudio 按约定每次要 512 帧；万一不是（某些驱动 / 采样率转换），也按 512 帧一块渲染，余下的留到下次
         auto* o = static_cast<float*>(output);
-        for (unsigned long done = 0; done < frames; done += kBufferFrames) { // PortAudio 按约定每次给 512 帧
-            self->m_render(o + done * 2);
+        unsigned long done = 0;
+        while (done < frames) {
+            if (self->m_carryPos >= kBufferFrames) {
+                self->m_render(self->m_carry.data());
+                self->m_carryPos = 0;
+            }
+            const unsigned long n = std::min<unsigned long>(frames - done, kBufferFrames - self->m_carryPos);
+            std::copy_n(self->m_carry.data() + self->m_carryPos * 2, n * 2, o + done * 2);
+            self->m_carryPos += static_cast<int>(n);
+            done += n;
         }
         self->m_played += static_cast<qint64>(frames);
         return paContinue;
@@ -289,10 +307,13 @@ class AudioOut {
         return true;
     }
     Render m_render;
+    std::vector<float> m_carry = std::vector<float>(kBufferSamples);
+    int m_carryPos = kBufferFrames;
     PaStream* m_stream = nullptr;
     bool m_initialized = false;
     QString m_device;
     double m_latencyMs = 0;
+    double m_deviceRate = 0;
     std::atomic<qint64> m_underruns{0};
     std::atomic<qint64> m_played{0};
     std::thread m_fake;
@@ -702,6 +723,62 @@ class Engine {
         }
     }
 
+    // ------------------------------------------------------------ 离线渲染（--render，对时测试用）
+
+  public:
+    int render(const QString& path, const QString& outPath, double seconds, double startSec) {
+        QJsonObject t;
+        t["id"] = QStringLiteral("r");
+        t["path"] = path;
+        addTrack(t);
+        scheduleLoad(1, QStringLiteral("r"), false);
+        // 停着走引擎，直到装载完成（读盘线程装好后在引擎处理里回报，见 CachingReader::process）
+        const auto idle = [this](int n) {
+            for (int i = 0; i < n; ++i) {
+                m_pEngineMixer->process(kBufferSamples);
+                QCoreApplication::processEvents();
+                QThread::msleep(2);
+            }
+        };
+        for (int i = 0; i < 2500 && !(co(1, "track_loaded") > 0 && co(1, "track_samples") > 0); ++i) {
+            idle(1);
+        }
+        if (!(co(1, "track_loaded") > 0)) {
+            std::fprintf(stderr, "装载失败：%s\n", path.toUtf8().constData());
+            return 1;
+        }
+        TrackPointer track = deckN(1)->getLoadedTrack();
+        const double sr = track->getSampleRate().toDouble();
+        ControlObject::set(ConfigKey("[Channel1]", "playposition"), startSec * sr / (co(1, "track_samples") / 2));
+        idle(100); // 定位 + 让读盘线程把开头几块读进缓存
+        EngineBuffer* eb = deckN(1)->getEngineDeck()->getEngineBuffer();
+        const double start = eb->getExactPlayPos().value();
+        ControlObject::set(ConfigKey("[Channel1]", "play"), 1.0);
+        QFile f(outPath);
+        if (!f.open(QIODevice::WriteOnly)) {
+            std::fprintf(stderr, "写不了：%s\n", outPath.toUtf8().constData());
+            return 1;
+        }
+        const long buffers = static_cast<long>(std::ceil(seconds * kSampleRate / kBufferFrames));
+        std::vector<float> mono(kBufferFrames);
+        for (long b = 0; b < buffers; ++b) {
+            m_pEngineMixer->process(kBufferSamples);
+            const CSAMPLE* p = m_pEngineMixer->getMainBuffer();
+            for (int i = 0; i < kBufferFrames; ++i) {
+                mono[static_cast<size_t>(i)] = 0.70710678f * (p[2 * i] + p[2 * i + 1]);
+            }
+            f.write(reinterpret_cast<const char*>(mono.data()), kBufferFrames * sizeof(float));
+            QThread::msleep(1); // 让读盘线程跟上（真放的时候它有 11.6 ms）
+        }
+        QJsonObject o;
+        o["start"] = start; // 输出第 i 点 = 曲目第 start + i 帧（原速、曲目 44100 Hz 时）
+        o["track_rate"] = sr;
+        o["rate"] = kSampleRate;
+        emitLine(QJsonDocument(o).toJson(QJsonDocument::Compact).toStdString());
+        return 0;
+    }
+
+  private:
     // ------------------------------------------------------------ 状态
 
     QJsonObject state() {
@@ -935,6 +1012,14 @@ int decodeFile(const QString& path, const QString& outPath, int srOut) {
     std::vector<float> mono;
     mono.reserve(static_cast<size_t>(src->frameLength()));
     mixxx::IndexRange remaining = src->frameIndexRange();
+    // 输出第 i 点必须是播放时曲目的第 i 帧（拍线、波形都按它算）。Mixxx 播放时帧号就是解码器的帧号，
+    // 解码器起点之前那段放静音（cachingreader.cpp:351-380 preroll）。Mac 的 CoreAudio 解码器起点是
+    // leadingFrames 而不是 0（soundsourcecoreaudio.cpp:181,197），所以这里同样在前面补静音；起点 < 0 就丢掉负的那段。
+    const SINT first = remaining.start();
+    SINT skip = first < 0 ? -first : 0;
+    if (first > 0) {
+        mono.assign(static_cast<size_t>(first), 0.0f);
+    }
     while (!remaining.empty()) {
         auto chunk = remaining.splitAndShrinkFront(std::min<SINT>(65536, remaining.length()));
         const auto readable = proxy.readSampleFrames(
@@ -943,6 +1028,10 @@ int decodeFile(const QString& path, const QString& outPath, int srOut) {
         const CSAMPLE* p = readable.readableData();
         const auto frames = readable.frameIndexRange().length();
         for (SINT i = 0; i < frames; ++i) {
+            if (skip > 0) {
+                --skip;
+                continue;
+            }
             // 和 ffmpeg -ac 1 一样：立体声按 -3 dB 下混，单声道原样（立体声代理把它复制到了两个声道）
             mono.push_back(ch == 1 ? p[2 * i] : 0.70710678f * (p[2 * i] + p[2 * i + 1]));
         }
@@ -982,6 +1071,14 @@ int main(int argc, char** argv) {
     }
     if (args.size() >= 5 && args[1] == QLatin1String("--decode")) {
         const int rc = decodeFile(args[2], args[3], args[4].toInt());
+        tmp.remove();
+        std::_Exit(rc);
+    }
+
+    if (args.size() >= 5 && args[1] == QLatin1String("--render")) {
+        auto* engine = new Engine(config);
+        const int rc = engine->render(args[2], args[3], args[4].toDouble(), args.size() >= 6 ? args[5].toDouble() : 0.0);
+        std::fflush(gOut);
         tmp.remove();
         std::_Exit(rc);
     }
