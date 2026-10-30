@@ -1015,7 +1015,7 @@ int decodeFile(const QString& path, const QString& outPath, int srOut) {
     mixxx::IndexRange remaining = src->frameIndexRange();
     // 输出第 i 点必须是播放时曲目的第 i 帧（拍线、波形都按它算）。Mixxx 播放时帧号就是解码器的帧号，
     // 解码器起点之前那段放静音（cachingreader.cpp:351-380 preroll）。Mac 的 CoreAudio 解码器起点是
-    // leadingFrames 而不是 0（soundsourcecoreaudio.cpp:181,197），所以这里同样在前面补静音；起点 < 0 就丢掉负的那段。
+    // leadingFrames，可能不是 0（soundsourcecoreaudio.cpp:181,197），所以这里同样在前面补静音；起点 < 0 就丢掉负的那段。
     const SINT first = remaining.start();
     SINT skip = first < 0 ? -first : 0;
     if (first > 0) {
