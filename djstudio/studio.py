@@ -53,6 +53,22 @@ def _heard_at(c: EngineClient, audio: dict[str, Any] | None) -> float | None:
     return round(c.last_status_wall * 1000 + lat, 1)
 
 
+LOUDNESS_TARGET = -14.0  # LUFS：每首统一到这个响度（技巧曲常见 -6 ~ -9 LUFS，压低 5–8 dB，两首叠加不削波）
+PEAK_CEILING_DB = -1.0  # 加了增益以后采样峰值不超过 -1 dBFS（只限制往上提）
+
+
+def track_gain_db(analysis: dict[str, Any]) -> float | None:
+    """按响度统一音量的增益（dB）。没有响度数据 = None（按原样放）。"""
+    lufs = analysis.get("loudness")
+    if lufs is None or lufs <= -69:
+        return None
+    g = LOUDNESS_TARGET - float(lufs)
+    peak = float(analysis.get("peak") or 0.0)
+    if peak > 0:
+        g = min(g, PEAK_CEILING_DB - 20 * math.log10(peak))
+    return round(max(-24.0, min(12.0, g)), 2)
+
+
 def _duration(path: Path) -> float:
     try:
         return probe(path).duration
@@ -217,7 +233,7 @@ class Studio:
             return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
                     "status": c.status, "at": _heard_at(c, r.get("audio")), "link": c.link.name, "rehearsal": True,
                     "speed": r["speed"], "set": r["set"], "from": r["from"], "track": r["track"], "bar": r["bar"],
-                    "builtin": r.get("builtin", False), "audio": r.get("audio")}
+                    "gain_db": r.get("gain_db"), "builtin": r.get("builtin", False), "audio": r.get("audio")}
         if self.builtin:
             return {"connected": False, "online": False, "builtin": True}
         c = self._client
@@ -481,12 +497,18 @@ class Studio:
         return self.rehearsal_link_factory(rows, speed)  # 测试 / 开发换上的（两个参数）
 
     def _sim_rows(self, s: SetFile, c: Compiled) -> list[dict[str, Any]]:
-        """内置引擎（模拟器）里的曲目：时长 / BPM / 网格用编译时同一份结果，小节和过渡时刻与编译出的程序一致。"""
+        """内置引擎（模拟器）里的曲目：时长 / BPM / 网格用编译时同一份结果，小节和过渡时刻与编译出的程序一致；
+        gain = 按响度统一音量的增益（引擎走 Mixxx 的 ReplayGain）。"""
         rows = []
         for t, info in zip(s.tracks, c.tracks):
             tr = self.store.get(t.id)
-            rows.append({"id": t.id, "dur": info.grid.duration, "bpm": info.grid.bpm, "first_beat": info.grid.first_beat,
-                         "path": tr.path if tr else None})
+            row = {"id": t.id, "dur": info.grid.duration, "bpm": info.grid.bpm, "first_beat": info.grid.first_beat,
+                   "path": tr.path if tr else None}
+            g = track_gain_db((tr.analysis or {}) if tr else {})
+            if g is not None:
+                row["gain"] = round(10 ** (g / 20.0), 5)
+                row["gain_db"] = g
+            rows.append(row)
         return rows
 
     def _prepare_builtin(self, job: Job, set_id: str) -> dict[str, Any]:
@@ -886,6 +908,7 @@ class Studio:
         dec = decoder_name()
         return [i for i in ids if (t := self.store.get(i)) and (
             (t.analysis or {}).get("decoder", "ffmpeg") != dec
+            or "loudness" not in (t.analysis or {})  # 0.3.5 起分析里有响度（演出时统一音量用）
             or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
 
     def refresh_stale(self) -> Job | None:
@@ -1164,7 +1187,8 @@ class Studio:
         self.resume_point = None  # 开始新的一场：之前停下的位置作废
         closing = threading.Event()
         self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
-                           "audio": audio, "closing": closing, "track": track0, "bar": bar0}
+                           "audio": audio, "closing": closing, "track": track0, "bar": bar0,
+                           "gain_db": [row.get("gain_db") for row in self._sim_rows(s, c)]}
         log_path = self.cfg.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{set_id}.log" if builtin else None
 
         def on_log(line: str) -> None:

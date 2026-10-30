@@ -160,3 +160,14 @@ def test_real_plan_pdf_parses():
         if tr.tempo_to != tr.tempo_from:
             assert tr.ramp_b
     assert all(t.bar1_s is not None and t.file_name for t in plan.tracks)
+
+
+
+def test_track_gain_db_targets_loudness_and_limits_peak():
+    """统一音量：响的曲子压到 -14 LUFS；往上提时峰值不超过 -1 dBFS；没有响度 = 不动。"""
+    from djstudio.studio import LOUDNESS_TARGET, track_gain_db
+
+    assert LOUDNESS_TARGET == -14.0
+    assert track_gain_db({"loudness": -8.44, "peak": 1.0739}) == -5.56
+    assert track_gain_db({"loudness": -20.0, "peak": 0.5}) == round(-1 - 20 * __import__("math").log10(0.5), 2)  # 峰值限制
+    assert track_gain_db({}) is None and track_gain_db({"loudness": -70.0}) is None

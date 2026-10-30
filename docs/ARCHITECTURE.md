@@ -78,6 +78,13 @@ B 的位置与时间线一致（误差 < 10ms）。
 **演出页**（`web/static/live.js`）：顶部「交接」行画当前（或下一段）过渡的 A、B 整首波形，标出过渡开始 / B 起播 / 交出（或放到曲尾）、
 B 的进点 / 接满，播放头和小节计数；EQ 三段用固定颜色（LOW 红、MID 绿、HIGH 蓝，和波形的颜色一致）；
 时间线下面大字显示「现在的 EQ 操作」（正在动的：从几点到几点、现在几点、还剩几小节；保持在非 12 点的；下一个 EQ 动作）。
+过渡时间线按通道分两组（CH 1 在上、CH 2 在下，和混音台一样），每组 7 行，顺序和旋钮一样（HIGH / MID / LOW / FILTER / ECHO / REVERB / 推子），
+没有动作的行也画（整段过渡里它停在哪）；纵坐标 = 旋钮转角（7 点在下、12 点在中间、5 点在上；推子 = 推子位置）；每行左边的小旋钮是引擎读回的实际值，
+游标处的点是计划值，两者重合。旋钮指针用 SVG 的 transform 属性旋转（Safari 不认 CSS `transform-box: view-box`）。
+
+**音量和电平表**：每首按响度统一到 -14 LUFS（`studio.track_gain_db`，分析里的 `loudness` / `peak`，往上提时峰值不超过 -1 dBFS），
+增益随 library 命令给引擎，走 Mixxx 的 ReplayGain。电平表是 dBFS（引擎量的推子前 / 主输出 RMS 和峰值，状态帧 `m[d][7..8]`、`ml`），
+CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_meter` 反推。
 从第 k 段开始时用截短的 set（`Studio.rehearsal_set`：第 k 首从过渡前 8 小节起播）。
 
 ## 关键设计决定

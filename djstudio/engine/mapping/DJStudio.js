@@ -23,7 +23,7 @@
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.4.1";
+DJStudio.VERSION = "0.4.2";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -50,6 +50,7 @@ DJStudio.reset = function () {
     DJStudio.lastErr = "";
     DJStudio.xfMode = null;
     DJStudio.loadSeq = [0, 0, 0]; // 每个 deck 装上新歌的次数（下标 1、2）
+    DJStudio.meters = false;
 };
 DJStudio.reset();
 
@@ -67,6 +68,8 @@ DJStudio.now = function () { return Date.now() - DJStudio.t0; };
 
 DJStudio.init = function (id, debugging) {
     DJStudio.reset();
+    // DJ Studio 声音引擎有 dBFS 电平表（真 Mixxx 没有这个控件，读一次会在 Mixxx 日志里提示一次未知控件）
+    DJStudio.meters = DJStudio.get("[DJStudio]", "meters") > 0;
     for (var d = 1; d <= 2; d++) {
         DJStudio.set(DJStudio.ch(d), "quantize", 1);
         // keylock 默认关：在真 Mixxx 2.5.6 上实测，keylock 开着且 deck 不在原速时，时间拉伸器（SoundTouch /
@@ -223,7 +226,8 @@ DJStudio.deckStatus = function (d) {
 
 // 混音台读数（网页上画旋钮用）：[hi, mid, lo, filter, echo, reverb, vu]，都是 Mixxx 控件的原生值。
 // EQ 0..4（1 = 0dB），filter 0..1（0.5 = 关），echo / reverb = 效果单元对这个通道开着时的 mix，否则 0；
-// vu = [ChannelN],vu_meter（推子前、EQ / 滤波之后，enginedeck.cpp:69-81，0..1）
+// vu = [ChannelN],vu_meter（推子前、EQ / 滤波之后，enginedeck.cpp:69-81，0..1）；
+// 在 DJ Studio 声音引擎里（[DJStudio],meters = 1）后面再加两项：推子前电平 RMS / 峰值（dBFS，djs_level / djs_peak）
 DJStudio.r3 = function (v) { return Math.round(v * 1000) / 1000; };
 DJStudio.fxSend = function (d, name) {
     var g = DJStudio.fxGroup(DJStudio.FX_UNIT[name]);
@@ -240,7 +244,10 @@ DJStudio.mixerStatus = function (d) {
         DJStudio.fxSend(d, "echo"),
         DJStudio.fxSend(d, "reverb"),
         DJStudio.r3(DJStudio.get(DJStudio.ch(d), "vu_meter"))
-    ];
+    ].concat(DJStudio.meters ? DJStudio.levels(DJStudio.ch(d)) : []);
+};
+DJStudio.levels = function (g) {
+    return [Math.round(DJStudio.get(g, "djs_level") * 10) / 10, Math.round(DJStudio.get(g, "djs_peak") * 10) / 10];
 };
 
 // ------------------------------------------------------------------ 控制映射
@@ -564,6 +571,7 @@ DJStudio.tick = function () {
             m: [DJStudio.mixerStatus(1), DJStudio.mixerStatus(2)],
             x: DJStudio.r3(DJStudio.get("[Master]", "crossfader")),
             mv: DJStudio.r3(DJStudio.get("[Main]", "vu_meter")), // 主输出电平在 [Main]（[Master] 只有旧名 VuMeter 的别名，enginevumeter.cpp:20-29）
+            ml: DJStudio.meters ? DJStudio.levels("[Main]") : null, // 主输出 RMS / 峰值（dBFS）
             pg: pr ? { id: pr.p.id, st: pr.st, tl: Math.round(pr.tl * 1000) / 1000, b: pr.bStarted ? 1 : 0 } : null,
             ld: DJStudio.loader ? DJStudio.loader.deck : 0,
             ad: DJStudio.get("[AutoDJ]", "enabled") > 0 ? 1 : 0

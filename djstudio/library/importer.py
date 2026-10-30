@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .audio import AUDIO_EXTS, AudioError, decode_mono, decoder_name, probe, ANALYSIS_SR
+from .audio import AUDIO_EXTS, AudioError, decode_mono_stats, decoder_name, probe, ANALYSIS_SR
 from .analysis import ANALYSIS_VERSION, analyze
 from .store import Store, Track
 
@@ -191,10 +191,13 @@ class Library:
         if not t:
             return
         decoder = decoder_name()
-        x = decode_mono(Path(t.path), ANALYSIS_SR)
+        x, stats = decode_mono_stats(Path(t.path), ANALYSIS_SR)
         grid = self.mixxx_grid(t) if self.mixxx_grid else None
         result, wf = analyze(x, ANALYSIS_SR, grid, t.bar1 if t.bar1_confirmed else None)
         result["decoder"] = decoder
+        # 响度（LUFS）和采样峰值：演出时按它给每首统一音量（像 Mixxx 的 ReplayGain / Prime 的 Auto Gain）
+        result["loudness"] = round(stats.get("loudness", -70.0), 2)
+        result["peak"] = round(stats.get("peak", 0.0), 4)
         self.store.save_waveform(tid, wf)
         fields: dict[str, Any] = {"analysis": result, "analysis_version": ANALYSIS_VERSION, "analysis_error": None}
         # 用户确认的是「哪一拍是第 1 小节」；具体时间跟着网格走（换了解码器重新分析时，网格可能挪了几十毫秒）

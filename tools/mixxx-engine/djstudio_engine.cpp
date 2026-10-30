@@ -11,7 +11,8 @@
 //   djstudio-engine --probe <文件>  打印 JSON：时长、采样率、声道、码率、标签
 //   djstudio-engine --decode <文件> <输出> <采样率>
 //                                   解码成单声道 float32（小端）写到输出文件，按给定采样率重采样（分析用）。
-//                                   输出第 i 点 = 播放时曲目的第 i 帧（解码器起点不是 0 时前面补静音，见 decodeFile）
+//                                   输出第 i 点 = 播放时曲目的第 i 帧（解码器起点不是 0 时前面补静音，见 decodeFile）；
+//                                   stdout 打印 JSON：响度（LUFS，按立体声）和采样峰值
 //   djstudio-engine --render <文件> <输出> <秒数> [起点秒]
 //                                   离线渲染：deck 1 原速播放，主输出下混成单声道 float32（44100 Hz）。
 //                                   对时测试用：和 --decode 的结果逐点比，确认分析看到的就是播放出来的
@@ -76,6 +77,7 @@
 #include "sources/audiosourcestereoproxy.h"
 #include "sources/soundsourceproxy.h"
 #include "track/beats.h"
+#include "track/replaygain.h"
 #include "track/track.h"
 #include "track/trackmetadata.h"
 #include "util/logging.h"
@@ -378,6 +380,23 @@ class Engine {
             m_pNumDecks->set(m_pNumDecks->get() + 1);
         }
         ControlObject::set(ConfigKey(kMainGroup, "enabled"), 1.0);
+        // 每首的增益（把响度统一到同一个目标，像 Mixxx 的 ReplayGain、Prime 的 Auto Gain）走 Mixxx 自己的 ReplayGain：
+        // 装载时 [ChannelN],replaygain = 曲目的 ReplayGain（basetrackplayer.cpp:883），EnginePregain 乘上它
+        // （enginepregain.cpp:68-119）。Mixxx 里这三个值来自偏好设置；没给增益的曲目按原样（不像 Mixxx 默认 -6 dB）
+        ControlObject::set(ConfigKey("[ReplayGain]", "ReplayGainEnabled"), 1.0);
+        ControlObject::set(ConfigKey("[ReplayGain]", "ReplayGainBoost"), 1.0);
+        ControlObject::set(ConfigKey("[ReplayGain]", "DefaultBoost"), 1.0);
+        // 电平表（dBFS）：deck 推子前（增益、EQ、滤波之后，和 DJ 混音台一样）和主输出。Mixxx 自己的 vu_meter 是对数刻度、
+        // 封顶 1，响的曲子一直顶满，看不出差几个 dB
+        const char* groups[3] = {"[Channel1]", "[Channel2]", "[Main]"};
+        for (int i = 0; i < 3; ++i) {
+            m_meters[i].level = std::make_unique<ControlObject>(ConfigKey(groups[i], "djs_level"));
+            m_meters[i].peak = std::make_unique<ControlObject>(ConfigKey(groups[i], "djs_peak"));
+            m_meters[i].level->set(-90.0);
+            m_meters[i].peak->set(-90.0);
+        }
+        m_metersFlag = std::make_unique<ControlObject>(ConfigKey("[DJStudio]", "meters"));
+        m_metersFlag->set(1.0);
         PlayerInfo::create();
         // EQ 与快速效果链（真 Mixxx 里由 PlayerManager::addDeckInner 注册），以及标准效果单元
         for (int n = 1; n <= 2; ++n) {
@@ -457,6 +476,7 @@ class Engine {
                 return;
             }
             m_pEngineMixer->process(kBufferSamples);
+            updateMeters();
             const CSAMPLE* p = m_pEngineMixer->getMainBuffer();
             std::copy(p, p + kBufferSamples, out);
             m_engineFrames += kBufferFrames;
@@ -536,9 +556,40 @@ class Engine {
     }
     void processOne() {
         m_pEngineMixer->process(kBufferSamples);
+        updateMeters();
         recordBuffer();
         m_engineFrames += kBufferFrames;
         autodjPositionTick();
+    }
+
+    // 每处理一块（512 帧）更新一次：RMS 按 300 ms 积分（VU 表的速度），峰值每秒落 20 dB；单位 dBFS
+    void updateMeters() {
+        const double dt = static_cast<double>(kBufferFrames) / kSampleRate;
+        const double a = 1.0 - std::exp(-dt / 0.3);
+        const double fall = std::pow(10.0, -dt); // -20 dB/s
+        for (int i = 0; i < 3; ++i) {
+            const CSAMPLE* p = nullptr;
+            if (i < 2) {
+                // 停着的 deck 不处理，它的缓冲区里是上一次的内容：当静音
+                if (co(i + 1, "play") > 0) {
+                    p = m_pEngineMixer->getChannelBuffer(QString("[Channel%1]").arg(i + 1));
+                }
+            } else {
+                p = m_pEngineMixer->getMainBuffer();
+            }
+            double sum = 0.0, mx = 0.0;
+            if (p) {
+                for (int k = 0; k < kBufferSamples; ++k) {
+                    sum += static_cast<double>(p[k]) * p[k];
+                    mx = std::max(mx, static_cast<double>(std::fabs(p[k])));
+                }
+            }
+            LevelMeter& m = m_meters[i];
+            m.ms += (sum / kBufferSamples - m.ms) * a;
+            m.pk = std::max(mx, m.pk * fall);
+            m.level->set(m.ms > 1e-9 ? 10.0 * std::log10(m.ms) : -90.0);
+            m.peak->set(m.pk > 3e-5 ? 20.0 * std::log10(m.pk) : -90.0);
+        }
     }
 
     // ------------------------------------------------------------ AutoDJ（autodjprocessor.cpp 移植）
@@ -702,12 +753,16 @@ class Engine {
                     mixxx::Bpm(bpm),
                     QStringLiteral("djstudio-engine")));
         }
+        if (t.contains("gain") && t["gain"].toDouble() > 0) {
+            pTrack->setReplayGain(mixxx::ReplayGain(t["gain"].toDouble(), mixxx::ReplayGain::kPeakUndefined));
+        }
         m_lib[t["id"].toString()] = LibTrack{t["id"].toString(), pTrack};
         QJsonObject r;
         r["id"] = t["id"];
         r["duration"] = pTrack->getDuration();
         r["samplerate"] = static_cast<int>(sr.value());
         r["bpm"] = pTrack->getBpm();
+        r["gain"] = pTrack->getReplayGain().getRatio();
         return r;
     }
 
@@ -963,6 +1018,12 @@ class Engine {
     std::atomic<qint64> m_engineFrames{0};
     std::atomic<bool> m_frozen{false};
     bool m_quit = false;
+    struct LevelMeter {
+        double ms = 0.0, pk = 0.0;
+        std::unique_ptr<ControlObject> level, peak;
+    };
+    LevelMeter m_meters[3];
+    std::unique_ptr<ControlObject> m_metersFlag;
     AudioOut m_audio;
 };
 
@@ -1041,6 +1102,94 @@ std::vector<float> resample(const std::vector<float>& x, int srIn, int srOut) {
     return y;
 }
 
+// 响度（LUFS，ITU-R BS.1770-4 / EBU R128 积分响度）和采样峰值：按解码出的立体声算（单声道文件只算一个声道）。
+// K 计权两级双二阶滤波器的系数按采样率由模拟原型推出（与 48 kHz 的标准系数一致）。
+class Loudness {
+  public:
+    Loudness(double fs, int channels)
+            : m_channels(channels), m_sub(static_cast<long>(std::lround(fs * 0.1))) {
+        const double pi = kPi;
+        double K = std::tan(pi * 1681.974450955533 / fs);
+        const double Vh = std::pow(10.0, 3.999843853973347 / 20.0), Vb = std::pow(Vh, 0.4996667741545416);
+        const double Q1 = 0.7071752369554196;
+        double a0 = 1.0 + K / Q1 + K * K;
+        m_s1 = {(Vh + Vb * K / Q1 + K * K) / a0, 2.0 * (K * K - Vh) / a0, (Vh - Vb * K / Q1 + K * K) / a0,
+                2.0 * (K * K - 1.0) / a0, (1.0 - K / Q1 + K * K) / a0};
+        K = std::tan(pi * 38.13547087602444 / fs);
+        const double Q2 = 0.5003270373238773;
+        a0 = 1.0 + K / Q2 + K * K;
+        m_s2 = {1.0, -2.0, 1.0, 2.0 * (K * K - 1.0) / a0, (1.0 - K / Q2 + K * K) / a0};
+    }
+    void add(float l, float r) {
+        m_peak = std::max({m_peak, std::fabs(l), std::fabs(r)});
+        double sum = sq(0, l);
+        if (m_channels > 1) {
+            sum += sq(1, r);
+        }
+        m_acc += sum;
+        if (++m_n == m_sub) {
+            m_subs.push_back(m_acc / static_cast<double>(m_sub));
+            m_acc = 0.0;
+            m_n = 0;
+        }
+    }
+    double lufs() const {
+        std::vector<double> blocks; // 400 ms 块（4 个 100 ms 子块），每 100 ms 一块
+        for (size_t i = 0; i + 4 <= m_subs.size(); ++i) {
+            blocks.push_back((m_subs[i] + m_subs[i + 1] + m_subs[i + 2] + m_subs[i + 3]) / 4.0);
+        }
+        const auto L = [](double z) { return -0.691 + 10.0 * std::log10(std::max(z, 1e-12)); };
+        double sum = 0.0;
+        int n = 0;
+        for (double z : blocks) {
+            if (L(z) > -70.0) {
+                sum += z;
+                ++n;
+            }
+        }
+        if (n == 0) {
+            return -70.0;
+        }
+        const double rel = L(sum / n) - 10.0;
+        sum = 0.0;
+        n = 0;
+        for (double z : blocks) {
+            if (L(z) > -70.0 && L(z) > rel) {
+                sum += z;
+                ++n;
+            }
+        }
+        return n ? L(sum / n) : -70.0;
+    }
+    double peak() const {
+        return m_peak;
+    }
+
+  private:
+    struct Biquad {
+        double b0, b1, b2, a1, a2;
+    };
+    double sq(int ch, float x) {
+        double* z = m_z[ch];
+        // 两级直接 II 型转置
+        double y = m_s1.b0 * x + z[0];
+        z[0] = m_s1.b1 * x - m_s1.a1 * y + z[1];
+        z[1] = m_s1.b2 * x - m_s1.a2 * y;
+        const double y2 = m_s2.b0 * y + z[2];
+        z[2] = m_s2.b1 * y - m_s2.a1 * y2 + z[3];
+        z[3] = m_s2.b2 * y - m_s2.a2 * y2;
+        return y2 * y2;
+    }
+    int m_channels;
+    long m_sub;
+    Biquad m_s1{}, m_s2{};
+    double m_z[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    double m_acc = 0.0;
+    long m_n = 0;
+    std::vector<double> m_subs;
+    float m_peak = 0.0f;
+};
+
 int decodeFile(const QString& path, const QString& outPath, int srOut) {
     TrackPointer t = Track::newTemporary(path);
     mixxx::AudioSource::OpenParams params;
@@ -1053,6 +1202,7 @@ int decodeFile(const QString& path, const QString& outPath, int srOut) {
     const auto sr = src->getSignalInfo().getSampleRate();
     const int ch = static_cast<int>(src->getSignalInfo().getChannelCount());
     mixxx::AudioSourceStereoProxy proxy(src, 65536);
+    Loudness loud(sr.toDouble(), ch);
     mixxx::SampleBuffer buffer(65536 * 2);
     std::vector<float> mono;
     mono.reserve(static_cast<size_t>(src->frameLength()));
@@ -1077,6 +1227,7 @@ int decodeFile(const QString& path, const QString& outPath, int srOut) {
                 --skip;
                 continue;
             }
+            loud.add(p[2 * i], p[2 * i + 1]);
             // 和 ffmpeg -ac 1 一样：立体声按 -3 dB 下混，单声道原样（立体声代理把它复制到了两个声道）
             mono.push_back(ch == 1 ? p[2 * i] : 0.70710678f * (p[2 * i] + p[2 * i + 1]));
         }
@@ -1088,6 +1239,10 @@ int decodeFile(const QString& path, const QString& outPath, int srOut) {
         return 1;
     }
     f.write(reinterpret_cast<const char*>(y.data()), static_cast<qint64>(y.size() * sizeof(float)));
+    QJsonObject o;
+    o["loudness"] = std::round(loud.lufs() * 100.0) / 100.0; // LUFS
+    o["peak"] = static_cast<double>(loud.peak());             // 采样峰值（线性，满幅 = 1）
+    emitLine(QJsonDocument(o).toJson(QJsonDocument::Compact).toStdString());
     return 0;
 }
 
@@ -1116,6 +1271,7 @@ int main(int argc, char** argv) {
     }
     if (args.size() >= 5 && args[1] == QLatin1String("--decode")) {
         const int rc = decodeFile(args[2], args[3], args[4].toInt());
+        std::fflush(gOut);
         tmp.remove();
         std::_Exit(rc);
     }

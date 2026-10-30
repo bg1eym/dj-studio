@@ -289,3 +289,49 @@ def test_timing_check():
     r = subprocess.run([os.sys.executable, str(script), BIN], capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "对时检查全部通过" in r.stdout
+
+
+def test_engine_loudness_gain_and_meters(tmp_path):
+    """解码时算响度（BS.1770：两声道 997 Hz、-20 dBFS 正弦 = -20 LUFS）；library 给的增益走 Mixxx 的 ReplayGain；
+    电平表是 dBFS（推子前 RMS：正弦 -20 dBFS 峰值 → RMS -23 dBFS，再加增益 -6 dB）。"""
+    import wave
+
+    sr = 48000
+    t = np.arange(sr * 8) / sr
+    pcm = (0.1 * np.sin(2 * np.pi * 997 * t) * 32767).astype("<i2")
+    wav = tmp_path / "sine.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(np.repeat(pcm, 2).tobytes())
+    r = subprocess.run([BIN, "--decode", str(wav), str(tmp_path / "o.f32"), "22050"], capture_output=True,
+                       env=engine_env(Path(BIN)), timeout=60)
+    stats = json.loads(next(ln for ln in r.stdout.decode().splitlines() if ln.startswith("{")))
+    assert abs(stats["loudness"] + 20.0) < 0.1 and abs(stats["peak"] - 0.1) < 0.002, stats
+
+    from djstudio.library.audio import decode_mono_stats, loudness_mono
+
+    x, st2 = decode_mono_stats(wav)  # 走声音引擎（conftest 设了 DJSTUDIO_ENGINE_BIN 时）或 ffmpeg 近似
+    assert abs(st2["loudness"] + 20.0) < 0.3 and abs(loudness_mono(x, 22050) + 20.0) < 0.3
+
+    link = EngineLink(Path(BIN), [{"id": "s", "path": str(wav), "bpm": 120.0, "first_beat": 0.0, "gain": 0.5}],
+                      speed=1.0, audio=False)
+    try:
+        link.sim({"cmd": "load", "deck": 1, "id": "s"})
+        time.sleep(0.5)
+        assert abs(link.sim({"cmd": "get", "group": "[Channel1]", "key": "replaygain"})["v"] - 0.5) < 1e-6
+        assert link.sim({"cmd": "get", "group": "[DJStudio]", "key": "meters"})["v"] == 1
+        link.sim({"cmd": "set", "group": "[Channel1]", "key": "volume", "value": 1})
+        link.sim({"cmd": "set", "group": "[Channel1]", "key": "play", "value": 1})
+        time.sleep(2.0)
+        lvl = link.sim({"cmd": "get", "group": "[Channel1]", "key": "djs_level"})["v"]
+        pk = link.sim({"cmd": "get", "group": "[Channel1]", "key": "djs_peak"})["v"]
+        main = link.sim({"cmd": "get", "group": "[Main]", "key": "djs_level"})["v"]
+        idle = link.sim({"cmd": "get", "group": "[Channel2]", "key": "djs_level"})["v"]
+    finally:
+        link.sim({"cmd": "quit"})
+        time.sleep(0.3)
+        link.close()
+    assert abs(lvl - (-23.0 - 6.0)) < 1.0 and abs(pk - (-20.0 - 6.0)) < 1.0, (lvl, pk)
+    assert abs(main - lvl) < 1.0 and idle <= -89, (main, idle)  # 推子满、居中：主输出 = 这一路；停着的 deck 是静音

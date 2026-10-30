@@ -12,6 +12,9 @@ const SPAN_S = 7; // 波形窗口：播放头两侧各 7 秒（真实时间，�
 const MIX = { hi: 0, mid: 1, lo: 2, filter: 3, echo: 4, reverb: 5, vu: 6 };
 const PARAM_ORDER = ["vol", "hi", "mid", "lo", "filter", "echo", "reverb"];
 const PARAM_LABEL = { vol: "推子", hi: "HIGH", mid: "MID", lo: "LOW", filter: "FILTER", echo: "ECHO", reverb: "REVERB" };
+// 过渡时间线每组的行：和左边混音台旋钮同一顺序；没有曲线时的值（推子：A 满、B 由程序决定）
+const LANE_PARAMS = ["hi", "mid", "lo", "filter", "echo", "reverb", "vol"];
+const NEUTRAL_V = { hi: 1, mid: 1, lo: 1, filter: 0.5, echo: 0, reverb: 0, vol: 1 };
 const TECH_LABEL = { longhand: "长交接", instant: "瞬时切换", custom: "自定义" };
 const SECTION_TINT = {
   intro: "rgba(120,140,170,.10)", groove: "rgba(80,160,255,.06)", breakdown: "rgba(255,200,80,.12)",
@@ -102,10 +105,33 @@ function knobAngle(param, v) {
   return -150 + Math.max(0, Math.min(1, v)) * 300;
 }
 
-// 时间线行里的纵坐标 0..1（与旋钮位置一致；filter 中线 = 关，上 = HPF，下 = LPF）
+// 时间线行里的纵坐标 0..1 = 旋钮转角（7 点在下、12 点在中间、5 点在上；filter 中线 = 关，上 = HPF，下 = LPF；推子 = 推子位置）
 function laneY(param, v) {
   if (param === "vol") return faderPos(v);
   return (knobAngle(param, v) + 150) / 300;
+}
+
+const paramColor = (param, d) => (isEq(param) ? BAND_HEX[param] : param === "filter" ? "#c9a6ff" : isFx(param) ? "#7ee0b5" : DECK_HEX[d]);
+
+// 时间线每行左边的小旋钮：和混音台上的旋钮同一画法（推子画成 7 点～5 点的转角）
+class MiniKnob {
+  constructor(param, color) {
+    const S = 22, c = 11, r = 8;
+    this.param = param; this.c = c; this.r = r;
+    this.root = svg("svg", { viewBox: `0 0 ${S} ${S}`, width: S, height: S, class: "mini-knob" });
+    svg("path", { d: arcPath(c, c, r, -150, 150), class: "knob-track" }, this.root);
+    this.arc = svg("path", { d: "", class: "knob-arc", stroke: color }, this.root);
+    this.ptr = svg("line", { x1: c, y1: c - r + 1, x2: c, y2: c, stroke: "#fff", "stroke-width": 1.6, "stroke-linecap": "round" }, this.root);
+  }
+
+  set(v) {
+    if (v === null || v === undefined || v === this.v) return;
+    this.v = v;
+    const a = laneY(this.param, v) * 300 - 150;
+    const zero = isEq(this.param) || this.param === "filter" ? 0 : -150;
+    this.arc.setAttribute("d", arcPath(this.c, this.c, this.r, zero, a));
+    this.ptr.setAttribute("transform", `rotate(${a.toFixed(1)} ${this.c} ${this.c})`);
+  }
 }
 
 function arcPath(cx, cy, r, a0, a1) {
@@ -145,7 +171,7 @@ class Knob {
     this.arc.setAttribute("d", arcPath(this.c, this.c, this.r, zero, a));
     if (this.a !== undefined && Math.abs(a - this.a) > 0.25) this._flash();
     this.a = a;
-    this.ptr.style.transform = `rotate(${a}deg)`;
+    this.ptr.setAttribute("transform", `rotate(${a.toFixed(1)} ${this.c} ${this.c})`);
     this.val.textContent = fmtParam(this.param, v);
     this.sub.textContent = fmtSub(this.param, v);
     const kill = isEq(this.param) && eqHours(v) <= -4.9;
@@ -182,23 +208,46 @@ class Fader {
   }
 }
 
-class Vu {
-  constructor(n = 24) {
+// 电平表（dBFS）：条 = RMS（300 ms 积分），亮点 = 峰值（每秒落 20 dB），顶上的灯 = 峰值到 0 dBFS（会削波）。
+// CH1 / MASTER / CH2 三条同一高度、同一刻度，能直接比：两边推子前的电平和主输出差多少。
+const METER_LO = -36, METER_HI = 0, METER_N = 32; // 每格 1.125 dB
+const meterIdx = (db) => Math.floor(((db - METER_LO) / (METER_HI - METER_LO)) * METER_N);
+// 真 Mixxx（没有 dBFS 电平）：vu_meter = log10(32767·平均绝对值/1000 + 1)（enginevumeter.cpp:53-56）反推，约等于 RMS
+const vuToDb = (v) => (v > 0 ? 20 * Math.log10(((10 ** v - 1) * 1000) / 32767) + 1 : -90);
+
+class Meter {
+  constructor() {
     this.segs = [];
-    this.root = el("div", { class: "vu" });
-    for (let i = n - 1; i >= 0; i--) {
-      const s = el("span", { class: i >= n - 2 ? "r" : i >= n - 5 ? "y" : "g" });
-      this.segs[i] = s;
-      this.root.append(s);
+    this.clip = el("span", { class: "clip", title: "峰值到 0 dBFS：主输出会削波失真" });
+    this.root = el("div", { class: "vu" }, this.clip);
+    for (let i = METER_N - 1; i >= 0; i--) {
+      const top = METER_LO + ((i + 1) / METER_N) * (METER_HI - METER_LO);
+      const sp = el("span", { class: top > -3 ? "r" : top > -9 ? "y" : "g" });
+      this.segs[i] = sp;
+      this.root.append(sp);
     }
   }
 
-  set(v) {
-    const lit = Math.round(Math.max(0, Math.min(1, v || 0)) * this.segs.length);
-    if (lit === this.lit) return;
-    this.lit = lit;
-    this.segs.forEach((s, i) => s.classList.toggle("on", i < lit));
+  // rms / peak：dBFS（peak 可以没有）
+  set(rms, peak) {
+    const lit = Math.max(0, Math.min(METER_N, meterIdx(rms ?? -90)));
+    const pk = peak === null || peak === undefined ? -1 : Math.min(METER_N - 1, meterIdx(peak));
+    const key = lit * 100 + pk;
+    if (key === this.key) return;
+    this.key = key;
+    this.segs.forEach((sp, i) => { sp.classList.toggle("on", i < lit); sp.classList.toggle("pk", i === pk && i >= lit); });
+    this.clip.classList.toggle("on", peak !== null && peak !== undefined && peak >= -0.1);
   }
+}
+
+// 刻度（和电平表同高，放在 MASTER 旁边）
+function meterScale() {
+  const root = el("div", { class: "vu-scale" });
+  for (const db of [0, -3, -6, -9, -12, -18, -24, -30, -36]) {
+    const y = ((METER_HI - db) / (METER_HI - METER_LO)) * 100;
+    root.append(el("span", { style: `top:${y}%` }, String(db)));
+  }
+  return root;
 }
 
 class Channel {
@@ -210,9 +259,10 @@ class Channel {
       filter: new Knob("FILTER", "filter", "#c9a6ff"),
       echo: new Knob("ECHO", "echo", "#7ee0b5", true), reverb: new Knob("REVERB", "reverb", "#7ee0b5", true),
     };
-    this.vu = new Vu();
+    this.vu = new Meter();
     this.fader = new Fader(col);
-    this.name = el("div", { class: "ch-name", style: `color:${col}` }, `CH ${d}`);
+    this.gain = el("div", { class: "ch-gain", title: "按响度统一音量的增益（每首统一到 -14 LUFS，像 Mixxx 的 ReplayGain / Prime 的 Auto Gain）" });
+    this.name = el("div", { class: "ch-name", style: `color:${col}` }, `CH ${d}`, this.gain);
     // 旋钮一列、电平 + 推子一列；CH2 镜像，两边推子都靠中间（像真混音台）
     this.root = el("div", { class: `channel ch${d}` },
       this.name,
@@ -222,10 +272,15 @@ class Channel {
         el("div", { class: "fader-row" }, this.vu.root, this.fader.root)));
   }
 
-  set(mx, vol) {
+  // mx：[hi, mid, lo, filter, echo, reverb, vu, rms dB, peak dB]（后两项只有声音引擎有）；gainDb：这首的统一音量增益
+  set(mx, vol, playing, gainDb) {
     if (mx) for (const p of ["hi", "mid", "lo", "filter", "echo", "reverb"]) this.k[p].set(mx[MIX[p]]);
-    this.vu.set(mx ? mx[MIX.vu] : 0);
+    if (!mx || !playing) this.vu.set(-90, null);
+    else if (mx.length >= 9) this.vu.set(mx[7], mx[8]);
+    else this.vu.set(vuToDb(mx[MIX.vu]), null);
     this.fader.set(vol ?? 0);
+    const g = gainDb === null || gainDb === undefined ? "" : `增益 ${gainDb > 0 ? "+" : ""}${gainDb.toFixed(1)} dB`;
+    if (this.gain.textContent !== g) this.gain.textContent = g;
   }
 }
 
@@ -467,47 +522,69 @@ class Timeline {
       const [sx, px] = x.split("."), [sy, py] = y.split(".");
       return sx === sy ? PARAM_ORDER.indexOf(px) - PARAM_ORDER.indexOf(py) : sx < sy ? -1 : 1;
     });
-    const W = 1000, RH = 26;
-    const addRow = (label, color, draw) => {
+    // 两组（CH 1 在上、CH 2 在下，和混音台一样），每组 7 行，顺序和左边旋钮一样。没有动作的行也画：整段过渡里它停在哪。
+    // 纵坐标 = 旋钮转角（7 点在下、12 点在中间、5 点在上；推子 = 推子位置），每行左边的小旋钮是引擎读回的实际值，
+    // 游标处的点是计划值——两者应该重合。
+    const W = 1000, RH = 30;
+    this.dots = [];
+    this.minis = [];
+    const evs = [...(prog.events || [])];
+    if (prog.play !== null && prog.play !== undefined && prog.b) evs.unshift([prog.play, "B 起播"]);
+    const addRow = (label, draw, dot) => {
       const s = svg("svg", { viewBox: `0 0 ${W} ${RH}`, preserveAspectRatio: "none", class: "tl-svg" });
       for (let b = 0; b <= len; b += 4) {
-        svg("line", { x1: (b / len) * W, x2: (b / len) * W, y1: 0, y2: RH, stroke: (b / 4) % 8 === 0 ? "rgba(255,255,255,.14)" : "rgba(255,255,255,.05)", "vector-effect": "non-scaling-stroke" }, s);
+        svg("line", { x1: (b / len) * W, x2: (b / len) * W, y1: 0, y2: RH, stroke: b % 32 === 0 ? "rgba(255,255,255,.14)" : "rgba(255,255,255,.05)", "vector-effect": "non-scaling-stroke" }, s);
       }
-      if (prog.play !== null && prog.play !== undefined && prog.play > 0) {
-        svg("line", { x1: (prog.play / len) * W, x2: (prog.play / len) * W, y1: 0, y2: RH, stroke: DECK_HEX[deckOf("B")], "stroke-dasharray": "3 3", "vector-effect": "non-scaling-stroke" }, s);
+      for (const [b, ev] of evs) { // 事件竖线贯穿每一行：B 起播（绿）、A 停 / loop（红）
+        const x = (b / len) * W;
+        svg("line", { x1: x, x2: x, y1: 0, y2: RH, stroke: ev === "B 起播" ? "#3ccf7a" : "#ff5d5d", "stroke-dasharray": "3 3", "vector-effect": "non-scaling-stroke" }, s);
       }
       draw(s, W, RH);
-      this.rows.append(label instanceof Node ? label : el("div", { class: "tl-label", style: `color:${color}` }, label), s);
+      const cell = el("div", { class: "tl-cell" }, s);
+      dot.dot = el("span", { class: "tl-dot", style: `background:${dot.color}` });
+      dot.RH = RH;
+      cell.append(dot.dot);
+      this.dots.push(dot);
+      this.rows.append(label, cell);
     };
-    for (const name of names) {
-      const [side, param] = name.split(".");
-      const d = deckOf(side);
-      const pts = prog.lanes[name];
-      const col = isEq(param) ? BAND_HEX[param] : DECK_HEX[d];
-      const label = el("div", { class: "tl-label" }, el("span", { style: `color:${DECK_HEX[d]}` }, side), "·",
-        el("span", { style: `color:${col}` }, PARAM_LABEL[param] || param));
-      addRow(label, col, (s) => {
-        const Y = (v) => 3 + (1 - laneY(param, v)) * (RH - 6);
-        if (param === "filter") svg("line", { x1: 0, x2: W, y1: RH / 2, y2: RH / 2, stroke: "rgba(255,255,255,.12)", "vector-effect": "non-scaling-stroke" }, s);
-        const all = [[0, pts[0][1]], ...pts, [len, pts[pts.length - 1][1]]];
-        const dd = all.map((p, k) => `${k ? "L" : "M"}${((p[0] / len) * W).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
-        svg("path", { d: dd + ` L${W},${RH} L0,${RH} Z`, fill: col, "fill-opacity": 0.12, stroke: "none" }, s);
-        svg("path", { d: dd, fill: "none", stroke: col, "stroke-width": 1.8, "vector-effect": "non-scaling-stroke" }, s);
-      });
+    const roleOf = (d) => (prog.a.deck === d ? "A" : prog.b && prog.b.deck === d ? "B" : null);
+    for (const d of [1, 2]) {
+      const side = roleOf(d);
+      if (!side) continue;
+      const who = (info.names || {})[side] || "";
+      this.rows.append(el("div", { class: "tl-group", style: `color:${DECK_HEX[d]}` },
+        `CH ${d} · ${side === "A" ? (prog.id === "end" ? "终曲" : "A 出") : "B 进"}${who ? " · " + who : ""}`));
+      for (const param of LANE_PARAMS) {
+        const lane = prog.lanes[`${side}.${param}`];
+        const base = side === "B" && param === "vol" ? 0 : NEUTRAL_V[param];
+        const pts = lane || [[0, base]];
+        const moving = !!lane && pts.some(([, v]) => Math.abs(v - pts[0][1]) > 1e-4);
+        const col = paramColor(param, d);
+        const mini = new MiniKnob(param, col);
+        const val = el("span", { class: "tl-kv mono" });
+        this.minis.push({ d, param, mini, val });
+        const label = el("div", { class: "tl-label" + (moving ? "" : " still") }, mini.root,
+          el("span", { class: "tl-pn", style: `color:${col}` }, PARAM_LABEL[param]), val);
+        const scale = (v) => laneY(param, v);
+        addRow(label, (sv) => {
+          const Y = (v) => 3 + (1 - scale(v)) * (RH - 6);
+          if (param !== "vol" && !isFx(param)) { // 12 点 / 关 的位置
+            const y = Y(NEUTRAL_V[param]);
+            svg("line", { x1: 0, x2: W, y1: y, y2: y, stroke: "rgba(255,255,255,.16)", "stroke-dasharray": "2 4", "vector-effect": "non-scaling-stroke" }, sv);
+          }
+          const all = [[0, pts[0][1]], ...pts, [len, pts[pts.length - 1][1]]];
+          const dd = all.map((q, k) => `${k ? "L" : "M"}${((q[0] / len) * W).toFixed(1)},${Y(q[1]).toFixed(1)}`).join(" ");
+          svg("path", { d: dd + ` L${W},${RH} L0,${RH} Z`, fill: col, "fill-opacity": moving ? 0.14 : 0.05, stroke: "none" }, sv);
+          svg("path", { d: dd, fill: "none", stroke: col, "stroke-opacity": moving ? 1 : 0.45, "stroke-width": moving ? 1.8 : 1.2, "vector-effect": "non-scaling-stroke" }, sv);
+          if (side === "B" && prog.play > 0) { // B 还没起播的部分压暗
+            svg("rect", { x: 0, y: 0, width: (prog.play / len) * W, height: RH, fill: "rgba(0,0,0,.45)" }, sv);
+          }
+        }, { side, param, pts, scale, color: col });
+      }
     }
-    if ((prog.events || []).length || (prog.play !== null && prog.play !== undefined)) {
-      addRow("事件", "#ff8d8d", (s) => {
-        const evs = [...(prog.events || [])];
-        if (prog.play !== null && prog.play !== undefined && prog.b) evs.unshift([prog.play, "B 起播"]);
-        for (const [b, ev] of evs) {
-          const x = (b / len) * W;
-          svg("line", { x1: x, x2: x, y1: 0, y2: RH, stroke: "#ff5d5d", "stroke-width": 2, "vector-effect": "non-scaling-stroke" }, s);
-        }
-      });
+    if (evs.length) {
       const evText = el("div", { class: "tl-events dim" });
-      const evs = [...(prog.events || [])];
-      if (prog.play !== null && prog.play !== undefined && prog.b) evs.unshift([prog.play, "B 起播"]);
-      evText.textContent = "事件：" + evs.map(([b, ev]) => `${ev.replace("A.stop", "A 停").replace("B.stop", "B 停")} @ 第 ${(b / 4 + 1).toFixed(b % 4 ? 2 : 0)} 小节`).join("，");
+      evText.textContent = "事件（虚线）：" + evs.map(([b, ev]) => `${ev.replace("A.stop", "A 停").replace("B.stop", "B 停")} @ 第 ${(b / 4 + 1).toFixed(b % 4 ? 2 : 0)} 小节`).join("，");
       this.rows.append(el("div"), evText);
     }
     // 动作表
@@ -543,6 +620,26 @@ class Timeline {
     this.cursor.style.left = `calc(var(--tl-label) + (100% - var(--tl-label)) * ${f})`;
     if (this.where) {
       this.where.textContent = tl < 0 ? `还有 ${(-tl / 4).toFixed(1)} 小节开始` : `第 ${(tl / 4 + 1).toFixed(1)} / ${p.len / 4} 小节`;
+    }
+    for (const d of this.dots || []) {
+      const hide = tl < 0 || (d.side === "B" && p.play !== null && p.play !== undefined && tl < p.play);
+      d.dot.style.display = hide ? "none" : "";
+      if (hide) continue;
+      const v = laneAt(d.pts, Math.min(tl, p.len));
+      d.dot.style.left = `${f * 100}%`;
+      d.dot.style.top = `${((3 + (1 - d.scale(v)) * (d.RH - 6)) / d.RH) * 100}%`;
+    }
+  }
+
+  // 每行左边的小旋钮 = 引擎读回的实际值（和混音台上的旋钮是同一个数）
+  setMixer(m, ds) {
+    for (const k of this.minis || []) {
+      const mx = m ? m[k.d - 1] : null, dsd = ds ? ds[k.d - 1] : null;
+      const v = k.param === "vol" ? (dsd ? dsd[6] : null) : mx ? mx[MIX[k.param]] : null;
+      if (v === null || v === undefined) continue;
+      k.mini.set(v);
+      const t = k.param === "vol" ? fmtParam("vol", v).replace("推子 ", "") : fmtParam(k.param, v) || "关";
+      if (k.val.textContent !== t) k.val.textContent = t;
     }
   }
 
@@ -774,7 +871,7 @@ export class LiveView {
     this.progress = null;
     this.decks = { 1: new DeckView(1), 2: new DeckView(2) };
     this.ch = { 1: new Channel(1), 2: new Channel(2) };
-    this.mvu = new Vu(30);
+    this.mvu = new Meter();
     this.xcap = el("div", { class: "xf-cap" });
     this.timeline = new Timeline();
     this.handoff = new Handoff();
@@ -782,7 +879,8 @@ export class LiveView {
     this.mixer = el("div", { class: "mixer" },
       el("div", { class: "mixer-chs" },
         this.ch[1].root,
-        el("div", { class: "master" }, el("div", { class: "ch-name" }, "MASTER"), this.mvu.root, el("div", { class: "kl" }, "主输出")),
+        el("div", { class: "master" }, el("div", { class: "ch-name" }, "MASTER"), el("div", { class: "kl" }, "主输出 dBFS"),
+          el("div", { class: "vu-wrap" }, meterScale(), this.mvu.root)),
         this.ch[2].root),
       el("div", { class: "xfader" }, el("span", { class: "kl" }, "1"), el("div", { class: "xf-track" }, this.xcap), el("span", { class: "kl" }, "2")));
     this.mixer.title = "旋钮 / 推子 / 电平都是从引擎读回的实际值";
@@ -928,13 +1026,16 @@ export class LiveView {
       const ds = st ? st.d[d - 1] : null;
       const mx = st && st.m ? st.m[d - 1] : null;
       dv.setStatus(ds, mx, tFrame, speed);
-      this.ch[d].set(mx, ds ? ds[6] : 0);
+      const gains = (engine && engine.gain_db) || [];
+      this.ch[d].set(mx, ds ? ds[6] : 0, !!(ds && ds[1]), k === null ? null : gains[k]);
       const main = progress && comp && k === progress.index;
       const inTr = progress && progress.stage === "transition" && prog && prog.id !== "end";
       dv.setRole(k === null ? "" : inTr ? (k === prog.idx ? "A · 出" : "B · 进") : main ? "主奏" : "下一首");
     }
     this.handoff.set(this._handoffInfo(prog, comp));
-    this.mvu.set(st ? st.mv : 0);
+    if (!st) this.mvu.set(-90, null);
+    else if (st.ml) this.mvu.set(st.ml[0], st.ml[1]);
+    else this.mvu.set(vuToDb(st.mv), null);
     if (st && st.x !== undefined) this.xcap.style.left = `${((st.x + 1) / 2) * 100}%`;
 
     // 时间线
@@ -946,7 +1047,9 @@ export class LiveView {
       const title = prog.id === "end" ? "终曲淡出" : `过渡 ${prog.idx + 1 + off} / ${comp.programs.length + off} · ${tr.label || TECH_LABEL[tr.technique] || tr.technique}`;
       const sub = prog.id === "end" ? ` #${prog.idx + 1 + off} ${ta.title || ta.id}`
         : ` A = Deck ${prog.a.deck} #${prog.idx + 1 + off} ${ta.title || ta.id}（第 ${tr.start} 小节起）→ B = Deck ${prog.b.deck} #${prog.idx + 2 + off} ${tb.title || tb.id}（从第 ${tr.b_in} 小节进）`;
-      this.timeline.setProgram(prog, { key: prog.id + ":" + (comp._id || ""), title, sub });
+      const names = { A: `#${prog.idx + 1 + off} ${ta.title || ta.id}`, B: tb ? `#${prog.idx + 2 + off} ${tb.title || tb.id}` : "" };
+      this.timeline.setProgram(prog, { key: prog.id + ":" + (comp._id || ""), title, sub, names });
+      this.timeline.setMixer(st ? st.m : null, st ? st.d : null);
       if (pg && pg.id.replace("!", "") === prog.id) {
         const bpm = st.d[prog.a.deck - 1][1] ? st.d[prog.a.deck - 1][4] : prog.b ? st.d[prog.b.deck - 1][4] : 120;
         this.timeline.setTl(pg.tl, (bpm || 120) * speed, pg.st === "running" || pg.st === "armed", tFrame);
