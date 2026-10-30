@@ -62,6 +62,9 @@
 #include "controllers/legacycontrollermappingfilehandler.h"
 #include "controllers/midi/legacymidicontrollermapping.h"
 #include "controllers/midi/midicontroller.h"
+#include "effects/backends/effectsbackendmanager.h"
+#include "effects/effectchain.h"
+#include "effects/effectslot.h"
 #include "effects/effectsmanager.h"
 #include "engine/channels/enginedeck.h"
 #include "engine/enginebuffer.h"
@@ -375,6 +378,40 @@ class Engine {
                     m_decks[n]->getEngineDeck()->getHandle(), QString("[Channel%1]").arg(n)));
         }
         m_pEffectsManager->setup();
+        // 效果单元 1 = Echo、2 = Reverb（DJStudio.js 的 FX_UNIT）。真 Mixxx 里效果单元的内容来自用户的 effects.xml，
+        // 没有这个文件时效果单元是空的（effectsmanager.cpp:201-217 readEffectsXml 只装 xml 里有的链），
+        // 所以这里照 README 要求用户在 Mixxx 里做的设置装好：每个单元的第一个槽，参数用效果自己的默认值。
+        const auto pBackends = m_pEffectsManager->getBackendManager();
+        // meta：Echo 0.708 → send = Mixxx 自己的默认值 -3 dB（拉满会叠到削波）；Reverb 1.0 → send 满（默认 0 = 没有湿声）
+        struct UnitFx {
+            int unit;
+            const char* id;
+            double meta;
+        };
+        const UnitFx kUnits[] = {{0, "org.mixxx.effects.echo", 0.708}, {1, "org.mixxx.effects.reverb", 1.0}};
+        for (const auto& [unit, id, meta] : kUnits) {
+            const auto pChain = m_pEffectsManager->getStandardEffectChain(unit);
+            const auto pManifest = pBackends->getManifest(QString::fromLatin1(id), EffectBackendType::BuiltIn);
+            if (pChain && pManifest) {
+                pChain->getEffectSlot(0)->loadEffectWithDefaults(pManifest);
+                // 装上的槽位默认是关的（enabled = 0）；两个效果的 send_amount 都跟 meta 旋钮联动，meta 默认 0 = 没有湿声
+                // （echoeffect.cpp:77-85、reverbeffect.cpp:58-67）。槽位打开、meta 按上面设，湿声多少由效果单元的 mix 决定
+                const QString slot = QString("[EffectRack1_EffectUnit%1_Effect1]").arg(unit + 1);
+                ControlObject::set(ConfigKey(slot, "enabled"), 1.0);
+                ControlObject::set(ConfigKey(slot, "meta"), meta);
+            } else {
+                std::fprintf(stderr, "效果单元 %d 没装上 %s\n", unit + 1, id);
+            }
+        }
+        // 效果单元归零：Mixxx 默认让单元 N 对 Deck N 开着（standardeffectchain.cpp:18-28），mix 也不是 0。
+        // DJStudio.js 启动时也会这样归零；这里先做，没跑脚本时（--render）声音也不被效果改动
+        for (int unit = 1; unit <= 4; ++unit) {
+            const QString g = QString("[EffectRack1_EffectUnit%1]").arg(unit);
+            ControlObject::set(ConfigKey(g, "mix"), 0.0);
+            for (int n = 1; n <= 2; ++n) {
+                ControlObject::set(ConfigKey(g, QString("group_[Channel%1]_enable").arg(n)), 0.0);
+            }
+        }
 
         m_autoDJEnabled = std::make_unique<ControlPushButton>(ConfigKey("[AutoDJ]", "enabled"));
         m_autoDJEnabled->setButtonMode(ControlPushButton::TOGGLE);

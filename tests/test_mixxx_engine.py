@@ -199,6 +199,51 @@ def test_engine_sound_follows_device_clock(tracks, tmp_path, monkeypatch):
     assert x[:22050].std() < 1e-4 and x[-44100 * 10:].std() > 0.005  # 起播前是静音，之后是在播的歌（前奏比较轻）
 
 
+
+def test_effect_units_echo_and_reverb_are_audible(tracks, tmp_path):
+    """效果单元 1 = Echo、2 = Reverb 装好并打开（Mixxx 没有 effects.xml 时效果单元是空的，槽位默认关、send 跟 meta=0）：
+    DJStudio.js 那样设 mix / enabled / group_[ChannelN]_enable 后，录音里听得出来。"""
+    import wave
+
+    def render(fx: str | None) -> np.ndarray:
+        link = EngineLink(Path(BIN), [{"id": "a", "path": str(tracks["a"]), "bpm": SPECS["a"][0],
+                                        "first_beat": SPECS["a"][1]}], speed=4.0, audio=False)
+        out = tmp_path / f"{fx}.wav"
+        try:
+            for u in (1, 2):
+                g = f"[EffectRack1_EffectUnit{u}_Effect1]"
+                assert link.sim({"cmd": "get", "group": g, "key": "loaded"})["v"] == 1
+                assert link.sim({"cmd": "get", "group": g, "key": "enabled"})["v"] == 1
+            link.sim({"cmd": "load", "deck": 1, "id": "a"})
+            time.sleep(0.5)
+            if fx:
+                g = "[EffectRack1_EffectUnit%d]" % {"echo": 1, "reverb": 2}[fx]
+                for k, v in (("group_[Channel1]_enable", 1), ("enabled", 1), ("mix", 0.33)):
+                    link.sim({"cmd": "set", "group": g, "key": k, "value": v})
+            link.sim({"cmd": "set", "group": "[Channel1]", "key": "playposition", "value": 0.3})
+            time.sleep(0.2)
+            link.sim({"cmd": "record", "path": str(out)})
+            link.sim({"cmd": "set", "group": "[Channel1]", "key": "play", "value": 1})
+            time.sleep(2.0)  # 4 倍速 = 8 秒
+            link.sim({"cmd": "record_stop"})
+        finally:
+            link.sim({"cmd": "quit"})
+            time.sleep(0.3)
+            link.close()
+        with wave.open(str(out)) as w:
+            return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).reshape(-1, 2).mean(axis=1) / 32768.0
+
+    def onset(x: np.ndarray) -> int:
+        return int(np.argmax(np.abs(x) > 0.02))
+
+    dry = render(None)
+    for fx in ("echo", "reverb"):
+        wet = render(fx)
+        a, b = dry[onset(dry):], wet[onset(wet):]
+        n = min(len(a), len(b), 5 * 44100)
+        diff = 10 * np.log10(np.sum((b[:n] - a[:n]) ** 2) / np.sum(a[:n] ** 2) + 1e-15)
+        assert diff > -25, f"{fx} 听不出来：和干声只差 {diff:.1f} dB"
+
 def test_studio_builtin_show_uses_engine(tmp_path, monkeypatch):
     """应用里的内置引擎：分析用引擎解码，开始演出用引擎跑（倍速时不出声），全程不碰 Mixxx。"""
     from djstudio.config import Config

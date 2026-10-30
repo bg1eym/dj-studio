@@ -81,6 +81,10 @@ lib = cmd(1, {"cmd": "library", "tracks": [{"id": "k", "path": str(m4a), "bpm": 
 check(lib and lib["tracks"][0]["duration"] > 9, f"引擎装进曲目：{lib}")
 time.sleep(2)
 check(any(h.lower().startswith("f0") for h in hex_lines), f"DJStudio.js 在 Mixxx 的脚本引擎里跑起来了（收到 {len(hex_lines)} 条 SysEx）")
+for u, name in ((1, "Echo"), (2, "Reverb")):
+    g = f"[EffectRack1_EffectUnit{u}_Effect1]"
+    ld, en = cmd(10 + u, {"cmd": "get", "group": g, "key": "loaded"}), cmd(20 + u, {"cmd": "get", "group": g, "key": "enabled"})
+    check(ld and ld["v"] == 1 and en and en["v"] == 1, f"效果单元 {u} 装好了 {name}（loaded {ld and ld['v']}，enabled {en and en['v']}）")
 a = cmd(2, {"cmd": "audio"})
 print("  声音输出：", a)
 if a and a.get("on"):
