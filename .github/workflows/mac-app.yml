@@ -165,8 +165,17 @@ jobs:
                       magic = fh.read(4)
                   if magic not in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xce\xfa\xed\xfe"):
                       continue  # 不是 Mach-O
-                  out = subprocess.run(["vtool", "-show-build", path], capture_output=True, text=True).stdout.split()
-                  vers = [out[i + 1] for i, w in enumerate(out[:-1]) if w in ("minos", "version")]
+                  # 只读最低系统版本：LC_BUILD_VERSION 的 minos、老格式 LC_VERSION_MIN_MACOSX 的 version。
+                  # （LC_BUILD_VERSION 里 tool 下面也有一行 version，那是链接器的版本，不算）
+                  vers, cmd = [], ""
+                  for line in subprocess.run(["vtool", "-show-build", path], capture_output=True, text=True).stdout.splitlines():
+                      w = line.split()
+                      if len(w) < 2:
+                          continue
+                      if w[0] == "cmd":
+                          cmd = w[1]
+                      elif (cmd == "LC_BUILD_VERSION" and w[0] == "minos") or (cmd == "LC_VERSION_MIN_MACOSX" and w[0] == "version"):
+                          vers.append(w[1])
                   for v in vers:
                       try:
                           t = tuple(int(x) for x in v.split(".")[:2])
