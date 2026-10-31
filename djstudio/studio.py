@@ -330,15 +330,10 @@ class Studio:
         save_set(s, self.set_path(s.id))
 
     def fill_hot_cues(self, s: SetFile, c: Compiled) -> SetFile:
-        """按播放规范给每首填 hot cue：breakdown / drop 以 set 里的谱上标记为准，没有就用分析切出的段落。"""
+        """按播放规范（docs/SET_SPEC.md 第 7 节）给每首放 hot cue：这首在 set 里的进、出和中间要处理的点。"""
         from .setspec import fill_hot_cues
 
-        sections = {}
-        for st in s.tracks:
-            t = self.find_track(st)
-            if t and t.analysis:
-                sections[st.id] = t.analysis.get("sections") or []
-        return fill_hot_cues(s, c, sections)
+        return fill_hot_cues(s, c)
 
     def cue_sheet(self, set_id: str) -> str:
         from .setspec import cue_sheet_md

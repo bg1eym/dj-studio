@@ -18,7 +18,7 @@
 用户每次会给一份编排方案（PDF / 打碟谱 / 文字）。
 
 **所有 set 都按播放规范 [docs/SET_SPEC.md](docs/SET_SPEC.md) 生成**：EQ / Filter / 效果器 / 推子 / 速度 / 音量的取值和换算，
-以及 Denon Prime 4+ 格式的 hot cue（8 个打击垫的用途、名字、颜色、位置、中文注释）。生成的 set 写 `"spec": "1"`。
+以及 Denon Prime 4+ 格式的 hot cue（8 个打击垫的用途、名字、颜色、位置、中文注释）。生成的 set 写 `"spec": "2"`。
 规范的表和代码由 `tests/test_setspec.py` 比对，改一边要同时改另一边。
 
 **用户自己写谱**，按《打碟谱规范》[docs/SCORE_SPEC.md](docs/SCORE_SPEC.md)（Markdown，模板 docs/score_template.md），拖到网页首页自动转换（`djstudio/plan/mdplan.py`）。
@@ -34,8 +34,9 @@
    - drop 对 drop、硬切、"抽真空" → `instant`，`b_in` = B 的 drop 小节；
    - 方案逐小节（如每 4 小节）写了旋钮位 → `custom`，把旋钮位逐点写进 lanes（dB / 0..1 / -1..1），切点用 `"step"`。
 4. 主控 BPM：方案有爬坡计划就写 `play_bpm` 或 `tempo`；否则留默认。
-5. hot cue 按 docs/SET_SPEC.md 第 7 节：网页生成的 set 会自动填；手工转的 set 写上 `"spec": "1"`，在网页 Set 页保存时
-   缺的垫子按规范自动补（`Studio.fill_hot_cues`，手写过的垫子不动）；也可以照第 7.3 节的规则手写（名字只用英文，中文写 note）。
+5. hot cue 按 docs/SET_SPEC.md 第 7 节（v2：打击垫没有固定用途，每首按这套 set 放 IN / 处理点 / OUT / STOP，按时间从 1 号垫排）：
+   网页生成的 set 会自动填；手工转的 set 写上 `"spec": "2"`，在网页 Set 页保存时空着的垫子自动放（`Studio.fill_hot_cues`，
+   `auto: false` 的垫子不动）。用户说过：不要给垫子定固定用途，set 只关心进、出和中间要处理的点。
 6. 写好后跑 `djstudio validate <file>`（或网页实时校验）到零错误，再交给用户。
 7. 格式细节见 docs/SET_FORMAT.md，取值规范见 docs/SET_SPEC.md。
 

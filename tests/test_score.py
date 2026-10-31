@@ -15,7 +15,7 @@ from djstudio.grid import Grid
 from djstudio.plan import mdplan
 from djstudio.plan.cdw import PlanError
 from djstudio.plan.convert import LibTrack, convert, eq_db
-from djstudio.setspec import COLOR_NAMES, PADS, fill_hot_cues
+from djstudio.setspec import COLOR_NAMES, CUE_KINDS, fill_hot_cues
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
 SPEC = (DOCS / "SCORE_SPEC.md").read_text(encoding="utf-8")
@@ -65,10 +65,13 @@ def test_template_parses():
     assert t2.rows[-1].stop and t2.rows[-1].end and not t1.rows[-1].stop and t1.rows[-1].end
     # 空格 = 和上一行一样
     assert t2.rows[1].a.mid == 0 and t2.rows[1].a.vol == 10 and t2.rows[2].a.lo == -2 and t2.rows[2].a.filter == 3
-    # hot cue：颜色名、时间写法、BREAK / DROP 也当段落标记
+    # 自己加的 hot cue：颜色名、时间写法、DROP 也当段落标记
+    assert not plan.tracks[0].hot_cues and not plan.tracks[1].hot_cues
     c3 = {c.pad: c for c in plan.tracks[2].hot_cues}
-    assert c3[1].time == pytest.approx(0.12) and c3[1].bar is None and c3[2].bar == 33 and c3[5].color == "#2F7BFF"
-    assert (97.0, "break 2") in plan.tracks[2].cues
+    assert c3[7].time == pytest.approx(72.12) and c3[7].bar is None and c3[7].color == "#FF5FA2"
+    assert c3[8].bar == 113 and c3[8].color == "#FF8C1A" and (113.0, "drop 2") in plan.tracks[2].cues
+    # 动作写在开始动手的那一行
+    assert [r.marks for r in t1.rows][1].startswith("① B 起播")
 
 
 def test_template_converts_and_compiles():
@@ -77,7 +80,7 @@ def test_template_converts_and_compiles():
     assert conv.ok, [str(n) for n in conv.notes]
     assert not [n for n in conv.notes if n.level != "info"], [str(n) for n in conv.notes]
     s = conv.set
-    assert s.spec == "1" and s.ending.mode == "fade" and s.ending.bar == 177 and s.ending.bars == 16
+    assert s.spec == "2" and s.ending.mode == "fade" and s.ending.bar == 177 and s.ending.bars == 16
     tr1, tr2 = s.transitions
     # 过渡 1：长交接，A 自己播完；144→145 一小节内换低频 = 跳变；换速在 B 第 17–24 小节；Reverb 开到 A 结束不关
     assert (tr1.start, tr1.b_in, tr1.play_at, tr1.params) == (121, 1, 8, {"a_end": "playout"})
@@ -91,15 +94,23 @@ def test_template_converts_and_compiles():
     assert tr2.lanes["A.filter"][-2:] == [[3, 0.6], [4, 0.6]] and tr2.lanes["A.echo"] == [[3, 0.0], [3, 0.5, "step"]]
     c = compile_with(s, tracks)
     assert c.ok, [vars(i) for i in c.issues]
-    # hot cue：谱上写的照写的放，没写的按规范补，主 Cue = MIX IN
+    assert tr1.marks[0] == [0.0, "过渡开始"] and [24.0, "③ 换低频：同一拍 A LOW 切、B LOW 回 12 点"] in tr1.marks
+    # hot cue：每首按这套 set 放 进 → 进来时要处理的点 → 出 → 出去时要处理的点 → 停 / 淡出，按时间从 1 号垫排
     s = fill_hot_cues(s, c)
-    assert compile_with(s, tracks).ok
-    p1, p2, p3 = ({h.pad: h for h in t.hot_cues} for t in s.tracks)
-    assert p1[3].bar == 65 and p1[3].note == "16 小节的 breakdown" and p1[2].name == "MIX IN" and p1[8].name == "END"
-    assert p2[8].bar == 97 and p2[7].bar == 93 == tr2.start
-    assert p3[1].bar == 1 and p3[2].bar == 33 and s.tracks[2].main_cue == 33
-    assert 3 not in p3 and 4 not in p3  # 谱上只写了 BREAK 2 / DROP 2：同一处不再补 BREAK 1 / DROP 1
-    assert p3[7].bar == 177 and p3[8].bar == 193  # 终曲淡出
+    assert s.spec == "2" and compile_with(s, tracks).ok
+    got = [[(h.pad, h.name, h.bar) for h in t.hot_cues] for t in s.tracks]
+    assert got[0] == [(1, "IN", 1), (2, "OUT", 121), (3, "HIGH DOWN", 129), (4, "BASS OUT", 145), (5, "REVERB LPF", 153)]
+    assert got[1] == [(1, "IN", 1), (2, "FADER UP", 9), (3, "BASS IN", 17), (4, "OUT", 93), (5, "ECHO", 96), (6, "STOP", 97)]
+    assert got[2] == [(1, "IN", 33), (2, "FADE", 177), (7, "VOCAL", 40.5), (8, "DROP 2", 113)]  # 7、8 是谱上自己加的
+    h = {x.name: x for x in s.tracks[1].hot_cues}
+    assert h["IN"].color == "#22D45A" and h["OUT"].color == "#FF3B3B" and h["STOP"].color == "#A45CFF"
+    assert h["BASS IN"].color == "#FFD60A" and h["ECHO"].color == "#00C8FF"
+    assert "③ 换低频" in h["BASS IN"].note and "LOW 7点 → 12点（一拍到位）" in h["BASS IN"].note
+    assert "推子 5、LOW 7点、HIGH 11点" in h["IN"].note and "推子 5 → 10（7 小节拧到）" in h["FADER UP"].note
+    assert all(x.auto for x in s.tracks[1].hot_cues) and not any(x.auto for x in s.tracks[2].hot_cues if x.pad >= 7)
+    assert [t.main_cue for t in s.tracks] == [1, 1, 33]  # 主 Cue = IN
+    # 再填一次结果一样（自动的重算，手写的不动）
+    assert fill_hot_cues(s, compile_with(s, tracks)).tracks == s.tracks
 
 
 def test_bar_offset_when_score_bar1_is_later():
@@ -114,7 +125,8 @@ def test_bar_offset_when_score_bar1_is_later():
     assert conv.ok, [str(n) for n in conv.notes]
     a = conv.set.tracks[0]
     assert a.plan_bar_offset == 16 and conv.set.transitions[0].start == 121 + 16
-    assert {h.pad: h.bar for h in a.hot_cues}[3] == 65 + 16
+    s = fill_hot_cues(conv.set, compile_with(conv.set, tracks))
+    assert [(h.name, h.bar) for h in s.tracks[0].hot_cues][:2] == [("IN", 1 + 16), ("OUT", 121 + 16)]
 
 
 # ---------------------------------------------------------------- 规范的表 = 代码
@@ -142,10 +154,11 @@ def test_spec_fader_table_matches_code():
         assert (db == "-∞") if g <= 0 else 20 * math.log10(g) == pytest.approx(float(db), abs=0.051), n
 
 
-def test_spec_pads_and_colors_match_code():
-    rows = table("| 打击垫 | 名字 | 颜色 | 放在哪 |")
-    assert [(int(p), n, c) for p, n, c, _ in rows] == [(p.pad, p.name, f"{p.color_name} {p.color}") for p in PADS]
+def test_spec_cue_kinds_and_colors_match_code():
+    rows = table("| 名字 | 颜色 | 什么时候放 |")
+    assert rows == [[k.names, f"{k.color_name} {k.color}", k.when] for k in CUE_KINDS]
     assert dict(table("| 颜色 | 色值 |")) == COLOR_NAMES
+    assert "没有固定用途" in SPEC
     assert f"v{mdplan.SCORE_SPEC_VERSION}" in SPEC.splitlines()[0]
 
 
@@ -204,7 +217,7 @@ def test_header_errors():
     with pytest.raises(PlanError, match="手法"):
         score(ok_rows, HEAD.replace("- 手法：长交接\n", ""))
     with pytest.raises(PlanError, match="规范"):
-        score(ok_rows, HEAD.replace("# 测试谱\n", "# 测试谱\n\n- 规范：v2\n"))
+        score(ok_rows, HEAD.replace("# 测试谱\n", "# 测试谱\n\n- 规范：v3\n"))
     with pytest.raises(PlanError, match="曲目"):
         mdplan.parse_text("# 随便写的笔记\n\n今天练了长交接。\n")
     plan = score(ok_rows, HEAD.replace("- 进场", "- 主速：128 → 130，B 第 9–12 小节换\n- 进场"))
@@ -216,6 +229,7 @@ def test_header_errors():
     ("| 9 | X | | 25.1 | |", "1–8"),
     ("| 2 | MIX IN | 绿 | 25.5 | |", "拍只能是 1–4"),
     ("| 2 | MIX IN | 金 | 25.1 | |", "颜色"),
+    ("| 2 | | 绿 | 25.1 | |", "名字要写"),
 ])
 def test_hot_cue_errors(cue, words):
     rows = "| 21 | — | 12点 | — | — |\n| 25 | 1 | | 7点 | 5 |\n| 41 结束 | 17 | | | 10 |\n"
@@ -258,7 +272,7 @@ def test_upload_md_score_and_download_docs(tmp_path):
     assert r.status_code == 422 and "行" in r.json()["detail"] and "结束" in r.json()["detail"]
     assert client.get("/api/plan").json()["file"] == "我的谱.md"  # 读不了的谱不算当前打碟谱
     spec = client.get("/api/score/spec.md")
-    assert spec.status_code == 200 and spec.text.startswith("# 打碟谱规范 v1")
+    assert spec.status_code == 200 and spec.text.startswith("# 打碟谱规范 v2")
     tmpl = client.get("/api/score/template.md", params={"download": 1})
     assert tmpl.status_code == 200 and "attachment" in tmpl.headers["content-disposition"]
     assert mdplan.parse_text(tmpl.text).title == "我的 set 打碟谱"
@@ -267,9 +281,59 @@ def test_upload_md_score_and_download_docs(tmp_path):
 
 def test_warnings_carry_line_numbers_in_order():
     """提示（不挡着用，但网页首页会显示）带行号，按谱里的先后排。"""
-    t = TEMPLATE.read_text(encoding="utf-8").replace("| 7 | MIX OUT | 红 | 121.1 |", "| 7 | MIX OUT | 红 | 120.1 |") \
-        .replace("- 说明：drop 对 drop", "- 混音：drop 对 drop")
+    t = TEMPLATE.read_text(encoding="utf-8").replace("- 说明：drop 对 drop", "- 混音：drop 对 drop") \
+        .replace("- 说明：B 先半推子进", "- 思路：B 先半推子进").replace("- 主速：132\n", "- 主速：131 → 132，B 第 33–36 小节换\n")
     w = mdplan.parse_text(t).warnings
-    assert len(w) == 2 and "MIX OUT" in w[0] and "混音" in w[1]
-    lines = [int(re.match(r"第 (\d+) 行", x).group(1)) for x in w]
+    assert len(w) == 3 and "思路" in w[0] and "混音" in w[1] and "131" in w[2]  # 没有行号的放最后
+    lines = [int(re.match(r"第 (\d+) 行", x).group(1)) for x in w[:2]]
     assert lines == sorted(lines)
+
+
+# ---------------------------------------------------------------- hot cue 跟着 set 走（v2）
+
+def _two_track_set(**tr):
+    from djstudio.setfile import SetFile
+
+    return SetFile.model_validate({
+        "schema": "djset/2", "spec": "2", "id": "t", "tracks": [{"id": "a", "title": "A"}, {"id": "b", "title": "B"}],
+        "transitions": [{"technique": "longhand", "start": 97, "b_in": 1, **tr}], "ending": {"mode": "playout"}})
+
+
+def test_hot_cues_for_a_set_without_score():
+    """不是谱生成的 set（longhand 手法默认曲线）也一样：按曲线找进、出和中间要处理的点。"""
+    tracks = lib([("a", "a.mp3", 128, 0.0, 160), ("b", "b.mp3", 128, 0.0, 160)])
+    s = _two_track_set()
+    c = compile_with(s, tracks)
+    assert c.ok, [vars(i) for i in c.issues]
+    s = fill_hot_cues(s, c)
+    a, b = ([(h.name, h.bar) for h in t.hot_cues] for t in s.tracks)
+    assert a[0] == ("IN", 1) and a[1] == ("OUT", 97) and len(a) > 2
+    assert b[0] == ("IN", 1) and any(n == "BASS IN" for n, _ in b) and any(n == "BASS OUT" for n, _ in a)
+    assert [h.pad for h in s.tracks[0].hot_cues] == list(range(1, len(a) + 1))  # 从 1 号垫起、按时间排
+    assert [x[1] for x in a] == sorted(x[1] for x in a)
+
+
+def test_manual_pads_win_and_v1_pads_are_replaced():
+    from djstudio.setfile import HotCue
+
+    tracks = lib([("a", "a.mp3", 128, 0.0, 160), ("b", "b.mp3", 128, 0.0, 160)])
+    s = _two_track_set()
+    v1 = [HotCue(pad=1, name="START", bar=1, color="#FFFFFF"), HotCue(pad=2, name="MIX IN", bar=1, color="#22D45A"),
+          HotCue(pad=3, name="IN", bar=5, color="#22D45A", note="我自己的进点"), HotCue(pad=8, name="VOCAL", bar=41)]
+    s = s.model_copy(update={"spec": "1", "tracks": [s.tracks[0].model_copy(update={"hot_cues": v1}), s.tracks[1]]})
+    s = fill_hot_cues(s, compile_with(s, tracks))
+    pads = {h.pad: (h.name, h.bar, h.auto) for h in s.tracks[0].hot_cues}
+    assert pads[3] == ("IN", 5, False) and pads[8] == ("VOCAL", 41, False)  # 手写的不动
+    assert pads[1][0] == "OUT" and pads[1][2]  # v1 固定用途的 START / MIX IN 换掉；自动的 IN 让给手写的 IN
+    assert s.tracks[0].main_cue == 5 and s.spec == "2"
+
+
+def test_too_many_points_keep_in_out_stop_first():
+    from djstudio.setfile import HotCue
+
+    tracks = lib([("a", "a.mp3", 128, 0.0, 160), ("b", "b.mp3", 128, 0.0, 160)])
+    s = _two_track_set()
+    mine = [HotCue(pad=p, name=f"MY {p}", bar=1 + p) for p in range(3, 9)]  # 只剩 1、2 号垫
+    s = s.model_copy(update={"tracks": [s.tracks[0].model_copy(update={"hot_cues": mine}), s.tracks[1]]})
+    s = fill_hot_cues(s, compile_with(s, tracks))
+    assert [(h.pad, h.name) for h in s.tracks[0].hot_cues][:2] == [(1, "IN"), (2, "OUT")]

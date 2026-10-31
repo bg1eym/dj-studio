@@ -15,7 +15,7 @@
 ```jsonc
 {
   "schema": "djset/2",
-  "spec": "1",                          // 按播放规范 SET_SPEC.md 第几版生成；手写的可以空着
+  "spec": "2",                          // 按播放规范 SET_SPEC.md 第几版生成；手写的可以空着
   "id": "rw2023",                       // 文件名，字母数字 - _
   "name": "CDW @ Rock Werchter 2023 复刻",
   "created": "2026-10-28",
@@ -29,13 +29,14 @@
       "start": 1,                       // 仅开场曲：从第几小节起播
       "play_bpm": null,                 // 这首独奏时的主控 BPM；null = 原生 BPM
       "downbeat": null,                 // 一般不用：临时覆盖小节相位（0..3，相对 Mixxx 网格）
-      "cues": {"drop": 65, "break": 129}, // 命名小节标记（谱上的段落），hot cue 的 BREAK / DROP 按它们定
+      "cues": {"drop": 65, "break": 129}, // 命名小节标记（谱上的段落），小节对齐时拿来和分析切出的段落核对
       "plan_bar_offset": 0,             // 谱上第 b 小节 = 本应用第 b + 这个数 小节
-      "main_cue": 1,                    // Prime 4+ 的主 Cue（CUE 键），规范里 = 进点
-      "hot_cues": [                     // Prime 4+ 的 hot cue：打击垫 1–8，用途 / 名字 / 颜色见 SET_SPEC.md 第 7 节
-        {"pad": 2, "name": "MIX IN", "bar": 1, "color": "#22D45A", "note": "开场：从第 1 小节起播"}
+      "main_cue": 1,                    // Prime 4+ 的主 Cue（CUE 键），规范里 = IN
+      "hot_cues": [                     // Prime 4+ 的 hot cue：打击垫 1–8，没有固定用途，按 set 放的规则见 SET_SPEC.md 第 7 节
+        {"pad": 1, "name": "IN", "bar": 1, "color": "#22D45A", "note": "开场：从第 1 小节起播", "auto": true},
+        {"pad": 8, "name": "VOCAL", "bar": 41, "color": "#FF5FA2", "note": "人声进来"}   // auto 不写 = 手写的，重新填时不动
       ],
-      "loops": [],                      // Prime 4+ 的保存 loop：{"pad", "name", "bar", "beats", "note"}
+      "loops": [],                      // Prime 4+ 的保存 loop：{"pad", "name", "bar", "beats", "note", "auto"}
       "note": ""
     }
   ],
@@ -50,6 +51,7 @@
       "lanes": {},                      // 自定义自动化曲线（整条覆盖手法里的同名曲线）
       "events": [],                     // 追加事件
       "tempo": null,                    // 主控 BPM 曲线；null = 默认
+      "marks": [],                      // 谱上的「动作」：[[时间线小节, "文字"], …]，写进那一刻的 hot cue 注释
       "note": "16 小节 groove 叠加后换 bass"
     }
   ],

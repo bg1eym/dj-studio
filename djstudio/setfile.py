@@ -43,13 +43,14 @@ HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 class HotCue(_Model):
     """Denon Prime 4+（Engine DJ）的 hot cue：打击垫 1–8，名字显示在 Prime 屏幕上（ASCII，≤ 16 个字符），
-    颜色在 Engine DJ 里设；位置用本应用的小节号（可以带拍：33.25 = 第 33 小节第 2 拍）。用途和颜色见 docs/SET_SPEC.md。"""
+    颜色在 Engine DJ 里设；位置用本应用的小节号（可以带拍：33.25 = 第 33 小节第 2 拍）。垫子没有固定用途，见 docs/SET_SPEC.md。"""
 
     pad: int = Field(ge=1, le=8)
     name: str = Field(min_length=1, max_length=16)
     bar: float = Field(ge=1)
     color: str = "#FFFFFF"
     note: str = ""  # 中文注释：这个点用来干什么
+    auto: bool = False  # 按 set 自动放的（setspec.fill_hot_cues 重新填时重算）；False = 谱上 / 手写的，不动
 
     @field_validator("name")
     @classmethod
@@ -74,6 +75,7 @@ class SavedLoop(_Model):
     bar: float = Field(ge=1)
     beats: float = Field(gt=0, le=64)
     note: str = ""
+    auto: bool = False  # 按过渡里的 loop 事件自动放的
 
 
 class SetTrack(_Model):
@@ -115,6 +117,16 @@ class Transition(_Model):
     tempo: list[Point] | None = None  # 主控 BPM 曲线 [[bar, bpm], ...]；None = 默认
     label: str = ""  # 显示用的手法名（打碟谱生成的 custom 过渡写「长交接」/「瞬时切换」）
     note: str = ""
+    marks: list[Point] = Field(default_factory=list)  # 谱上的「动作」：[时间线小节, "文字"]，写进那一刻的 hot cue 注释
+
+    @field_validator("marks")
+    @classmethod
+    def _check_marks(cls, v: list[Point]) -> list[Point]:
+        for p in v:
+            if not isinstance(p, (list, tuple)) or len(p) != 2 or not isinstance(p[1], str):
+                raise ValueError(f"marks 的每一项应为 [小节, \"文字\"]：{p!r}")
+            float(p[0])
+        return v
 
     @field_validator("lanes")
     @classmethod

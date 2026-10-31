@@ -451,16 +451,16 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     # 以前连 Mixxx 时按 Mixxx 网格切的段落：再分析一次时按自己的网格重切
     # 换了解码器（这里假装是别的解码器分析的）的也重新分析
     # 按播放规范（docs/SET_SPEC.md）生成：Prime 4+ 的 hot cue、主 Cue；hot cue 表
+    # hot cue（v2）：每首按这套 set 放 进 → 处理点 → 出，按时间从 1 号垫排
     gen = studio.load(job.result["set"])
-    assert gen.spec == "1"
-    a_pads, b_pads = ({h.pad: h for h in st.hot_cues} for st in gen.tracks)
+    assert gen.spec == "2"
     tr0 = gen.transitions[0]
-    assert a_pads[1].name == "START" and a_pads[2].name == "MIX IN" and a_pads[2].bar == gen.tracks[0].start
-    assert a_pads[7].name == "MIX OUT" and a_pads[7].bar == tr0.start and 8 in a_pads
-    assert b_pads[2].bar == tr0.b_in and gen.tracks[1].main_cue == tr0.b_in and 7 not in b_pads
-    assert all(h.note and h.name.isascii() for st in gen.tracks for h in st.hot_cues)
+    a, b = ([(h.pad, h.name, h.bar) for h in st.hot_cues] for st in gen.tracks)
+    assert a == [(1, "IN", gen.tracks[0].start), (2, "OUT", tr0.start), (3, "BASS OUT", tr0.start + 4)]
+    assert b == [(1, "IN", tr0.b_in)] and gen.tracks[1].main_cue == tr0.b_in
+    assert all(h.note and h.name.isascii() and h.auto for st in gen.tracks for h in st.hot_cues)
     sheet = studio.cue_sheet(gen.id)
-    assert "Prime 4+" in sheet and "| 2 | MIX IN |" in sheet and "| 7 | MIX OUT |" in sheet
+    assert "Prime 4+" in sheet and "| 1 | IN |" in sheet and "| 2 | OUT |" in sheet and "没有固定用途" in sheet
     t, u = (studio.store.get(x.id) for x in studio.load(job.result["set"]).tracks)
     assert t.analysis["decoder"] == "ffmpeg"
     assert studio.refresh_stale() is None  # 启动时：分析都是新的，不重做
@@ -604,14 +604,15 @@ def test_markdown_score_drives_the_builtin_flow(tmp_path, monkeypatch):
     job = wait_job(studio.job, 120)
     assert job.state == "ok", "\n".join(job.log)
     s = studio.load(job.result["set"])
-    assert s.id.startswith("plan-") and s.spec == "1"  # 中文文件名：set id 带哈希
+    assert s.id.startswith("plan-") and s.spec == "2"  # 中文文件名：set id 带哈希
     tr = s.transitions[0]
     assert tr.params == {"a_end": "stop"} and tr.events == [[20.0, "A.stop"]] and tr.play_at == 4
     b_pads = {h.pad: h for h in s.tracks[1].hot_cues}
     assert b_pads[4].bar == 33 + s.tracks[1].plan_bar_offset and b_pads[4].note == "谱上写的 drop"
-    a_pads = {h.pad: h for h in s.tracks[0].hot_cues}
-    assert b_pads[2].name == "MIX IN" and b_pads[2].bar == tr.b_in and s.tracks[1].main_cue == tr.b_in
-    assert a_pads[7].bar == tr.start and a_pads[8].bar == tr.start + 20 and a_pads[8].note == "A 在这里停"
+    assert b_pads[1].name == "IN" and b_pads[1].bar == tr.b_in and s.tracks[1].main_cue == tr.b_in
+    a = [(h.pad, h.name, h.bar) for h in s.tracks[0].hot_cues]
+    k = s.tracks[0].plan_bar_offset
+    assert a == [(1, "IN", 1 + k), (2, "OUT", tr.start), (3, "BASS OUT", tr.start + 4), (4, "STOP", tr.start + 20)]
     studio.play(s.id, speed=40)
     studio.conductor.join(60)
     p = studio.conductor.progress

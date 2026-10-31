@@ -1,5 +1,5 @@
 """播放规范 docs/SET_SPEC.md 和代码一致：表里的每一行都要和代码算出来的一样（改一边不改另一边就失败）。
-另外测 hot cue 的格式检查、自动生成和 Prime 4+ 的 hot cue 表。"""
+另外测 hot cue 的格式检查，以及按 set 放 hot cue（v2：垫子没有固定用途）。"""
 import math
 import re
 from pathlib import Path
@@ -9,7 +9,7 @@ import pytest
 from djstudio.compiler import fader_gain
 from djstudio.plan.convert import eq_db, filter_val
 from djstudio.setfile import HotCue, SetTrack
-from djstudio.setspec import PADS, SPEC_VERSION, fmt_time
+from djstudio.setspec import CUE_KINDS, SPEC_VERSION, fmt_time
 from djstudio.studio import LOUDNESS_TARGET, PEAK_CEILING_DB
 
 SPEC = (Path(__file__).resolve().parents[1] / "docs" / "SET_SPEC.md").read_text(encoding="utf-8")
@@ -63,11 +63,10 @@ def test_fader_table_matches_code():
         assert (db == "-∞") if g <= 0 else 20 * math.log10(g) == pytest.approx(float(db), abs=0.051), n
 
 
-def test_hot_cue_pad_table_matches_code():
-    rows = table("| 打击垫 | 名字 | 颜色 | 用途 |")
-    assert len(rows) == 8 == len(PADS)
-    for (pad, name, color, role), p in zip(rows, PADS):
-        assert (int(pad), name, color, role) == (p.pad, p.name, f"{p.color_name} {p.color}", p.role)
+def test_hot_cue_kind_table_matches_code():
+    rows = table("| 名字 | 颜色 | 什么时候放 |")
+    assert [(n, c, w) for n, c, w in rows] == [(k.names, f"{k.color_name} {k.color}", k.when) for k in CUE_KINDS]
+    assert "没有固定用途" in SPEC
 
 
 def test_loudness_and_crossfader_rules():

@@ -1,4 +1,4 @@
-# DJ Studio Set 播放规范 v1
+# DJ Studio Set 播放规范 v2
 
 以后生成的每一套 set 都按这份规范来：打碟谱自动生成的（`djstudio/plan/`）、Claude 按编排方案手工转的、自己手写的都一样。
 它规定 **EQ、Filter、效果器、推子、速度、音量** 的写法和换算，以及 **Denon Prime 4+ 格式的 hot cue**（8 个打击垫的用途、名字、颜色、位置、注释）。
@@ -7,7 +7,8 @@
 - 用户自己写的打碟谱按《打碟谱规范》[SCORE_SPEC.md](SCORE_SPEC.md)（Prime 4+ 的说法：钟点位、推子 0–10、打击垫），读进来按本规范换成 set。
 - 代码里的同一份：`djstudio/setspec.py`（hot cue）、`djstudio/compiler.py`（推子、EQ 原生值）、`djstudio/plan/convert.py`（钟点位）。
   `tests/test_setspec.py` 逐行比对本文的表和代码：**改表要同时改代码，改代码要同时改表**，否则测试失败。
-- 按本规范生成的 set 文件写 `"spec": "1"`；规范有不兼容的改动时升版本号。
+- 按本规范生成的 set 文件写 `"spec": "2"`；规范有不兼容的改动时升版本号。
+  v2（相对 v1）：hot cue 的打击垫不再有固定用途，改成按这一套 set 放每首歌的进、出和中间要处理的点（第 7 节）。
 
 ---
 
@@ -113,67 +114,98 @@
 
 ## 7. Hot cue（Denon Prime 4+ 格式）
 
-Prime 4+ 每首歌有 **8 个 hot cue**（HOT CUE 模式的打击垫 1–8），在 Engine DJ 里可以给每个起名字、设颜色；另外有一个 **主 Cue**（CUE 键）和最多 **8 个保存 loop**（LOOP 模式）。
+Prime 4+ 每首歌有 **8 个 hot cue**（HOT CUE 模式的打击垫 1–8：上排 1–4，下排 5–8），在 Engine DJ 里可以给每个起名字、设颜色；
+另外有一个 **主 Cue**（CUE 键）和最多 **8 个保存 loop**（LOOP 模式）。
 cue 存在 Engine 的数据库里，不在音频文件里，所以要照本应用导出的 hot cue 表在 Engine DJ（或机器上）设一遍。
 
-### 7.1 8 个打击垫的用途（固定）
+### 7.1 原则：hot cue 跟着 set 走
 
-每首歌同一个垫子同一个意思、同一个颜色，换哪首歌手感都一样。用不上的垫子空着。
+**打击垫没有固定用途。** 一套 set 只关心每首歌什么时候进、什么时候出，以及中间要处理的点和变化——这些每首都不一样。
+所以每首放的就是它在**这一套 set** 里要用到的点，**按时间先后从 1 号垫往后排**：上排 1–4 最常用，放最先用到的
+（进、进来时的处理、出……），多的接着放下排。同一首歌换一套 set，hot cue 也跟着变。
 
-| 打击垫 | 名字 | 颜色 | 用途 |
-|---|---|---|---|
-| 1 | START | 白 #FFFFFF | 第 1 小节（曲子最早的小节线），回到开头用 |
-| 2 | MIX IN | 绿 #22D45A | 进点：这首在 set 里从这里进（开场曲 = 起播小节，其它 = 过渡里 B 的进点 b_in）。主 Cue 点也在这里 |
-| 3 | BREAK 1 | 蓝 #2F7BFF | DROP 1 前面最近的 breakdown（进 drop 前的那段） |
-| 4 | DROP 1 | 橙 #FF8C1A | 进点之后第 1 个 drop |
-| 5 | BREAK 2 | 蓝 #2F7BFF | DROP 1 和 DROP 2 之间最后的 breakdown |
-| 6 | DROP 2 | 橙 #FF8C1A | 进点之后第 2 个 drop |
-| 7 | MIX OUT | 红 #FF3B3B | 出点：下一段过渡从这里开始（过渡的 start）；终曲 = 淡出开始 |
-| 8 | END | 紫 #A45CFF | 交完：A 在这里停或推子到底；自己播完的 = 曲末；终曲 = 淡出结束 |
+固定的是**颜色**（一眼看出这是什么点）：
 
-颜色在 Engine DJ 里选最接近的那个。
+| 名字 | 颜色 | 什么时候放 |
+|---|---|---|
+| IN | 绿 #22D45A | 进：这首从这里起播（开场曲 = 起播小节；其它 = 过渡里进场的小节）。主 Cue 也在这里 |
+| BASS IN / BASS OUT / MID UP / HIGH DOWN / EQ DOWN / HPF / LPF / FILTER OFF / FADER UP / FADER DOWN | 黄 #FFD60A | 过渡里这首的旋钮 / 推子开始拧，或一下拧到位 |
+| ECHO / REVERB / ECHO OFF / REVERB OFF | 青 #00C8FF | 过渡里开 / 关效果 |
+| LOOP 8 … | 粉 #FF5FA2 | 过渡里打 loop |
+| OUT | 红 #FF3B3B | 出：这首当出曲的那段过渡从这里开始 |
+| STOP | 紫 #A45CFF | 这首在这里停（谱上的「停」） |
+| FADE | 红 #FF3B3B | 最后一首：从这里开始淡出 |
 
-### 7.2 名字、注释、位置
+谱上自己加的点（drop、人声、breakdown……）颜色随意；没写颜色时按名字猜：DROP 橙、BREAK 蓝，其它白。
 
-- **名字**：显示在 Prime 4+ 屏幕上，只用英文 / 数字，≤ 16 个字符，就用上表的名字。
-- **注释**（`note`）：中文，写清楚这个点干什么用，例如「第 3 段过渡（长交接）：时间线第 4 小节 B 从这里起播」「谱上的 大 breakdown 40 小节（第 57 小节）」。
+### 7.2 自动放哪些点（`setspec.set_points`）
+
+按这首歌在 set 里走过的顺序：
+
+1. **IN**：开场曲 = set 的 `start`；其它 = 上一段过渡的 `b_in`。注释写起播时这首的旋钮位（推子、事先切掉的 EQ）。
+2. **进来时要处理的点**：上一段过渡里 B 的曲线在起播之后开始动的地方（换到这首自己的小节号）。
+3. **OUT**：这首当出曲（A）的那段过渡的 `start`。
+4. **出去时要处理的点**：那段过渡里 A 的曲线开始动的地方。
+5. **STOP**（过渡里的 `A.stop`）、**LOOP n**（过渡事件里的 loop）。
+6. **FADE**：最后一首淡出开始的小节（`ending` 是 `playout` 时没有）。
+
+「开始动」：一下拧到位（`step`）= 那一拍；渐变 = 渐变开始的那一拍；同方向接着拧的几段算一次。同一拍开始的几个动作是一个点。
+过渡里的动作分给动的那个 deck：A 的放在出曲上，B 的放在进曲上；两边同一拍都动（比如换低频）就两首各一个点。
+
+名字按动作取（英文，≤ 16 个字符；放不下时按 效果 > 低频 > Filter > EQ > 推子 留前面的）：
+
+| 动作 | 名字 |
+|---|---|
+| 开 / 关效果 | ECHO / REVERB / ECHO OFF / REVERB OFF |
+| LOW 往上 / 往下 | BASS IN / BASS OUT |
+| Filter 往高通 / 往低通 / 回到关 | HPF / LPF / FILTER OFF |
+| MID、HIGH 一起往上 / 往下 | EQ UP / EQ DOWN |
+| 只动 MID 或 HIGH | MID UP / MID DOWN / HIGH UP / HIGH DOWN |
+| 推子往上 / 往下 | FADER UP / FADER DOWN |
+
+注释（中文）：第几段过渡、时间线第几小节、谱上这一行的「动作」（过渡的 `marks`）、每个旋钮从几点拧到几点、几小节拧到（钟点位、推子 0–10，Prime 4+ 的说法）。
+
+### 7.3 放进打击垫（`setspec.fill_hot_cues`）
+
+- 谱上写的 / set 里手写的垫子（`"auto": false`）一律不动；自动的点按时间先后放进**空着的**垫子，从小号起。
+- 和手写的垫子同名、位置差不到 1 小节的点不再放；手写了叫 IN 的垫子，自动的 IN 让给它。
+- 点比空垫子多：先留 IN / OUT / STOP / FADE，再留效果，其它按时间先后；留下的照样按时间排。
+- 自动放的垫子写 `"auto": true`：set 改了重新填时重算（网页 Set 页保存、打碟谱重新生成）。
+- **主 Cue** = IN（手写了名字叫 IN 的垫子就用它）。
+- **保存 loop**：过渡事件里的 loop（`A.loop:8` 等）依次放进 loop 垫子 1–8，名字 `LOOP 8`（拍数），`"auto": true`。
+- v1 的 set（`"spec": "1"`，固定用途的 START / MIX IN / BREAK 1 / DROP 1 / BREAK 2 / DROP 2 / MIX OUT / END）重新填时换成 v2。
+
+### 7.4 名字、注释、位置
+
+- **名字**：显示在 Prime 4+ 屏幕上，只用英文 / 数字，≤ 16 个字符。
+- **注释**（`note`）：中文，写清楚这个点干什么用。
 - **位置**：set 里写本应用的小节号（可以带拍）。hot cue 表里换成三种写法：本应用的 `小节.拍`、谱上（Engine DJ）的 `小节.拍`、离文件开头的时间 `分:秒.毫秒`。
   在 Engine DJ 里把播放头放到这个时间，按对应的打击垫存 cue，再改名字和颜色。
 - **cue 都落在拍上**（整拍），不放在两拍之间。
 
-### 7.3 自动生成规则（`setspec.fill_hot_cues`）
-
-| 打击垫 | 怎么定 |
-|---|---|
-| START | 第 1 小节 |
-| MIX IN | 开场曲：set 的 `start`；其它：上一段过渡的 `b_in` |
-| BREAK / DROP | 只看进点到交完之间。以 drop 为准：DROP 1 = 第一个 drop，BREAK 1 = 它前面最近的 breakdown；DROP 2 = 下一个 drop，BREAK 2 = 两个 drop 之间最后的 breakdown。没有 drop 时 BREAK 1 / 2 = 前两个 breakdown。位置优先用谱上写的段落（set 的 `cues`），谱上没有就用分析切出的段落。 |
-| MIX OUT | 这首作为 A 的那段过渡的 `start`；终曲 = 淡出开始的小节 |
-| END | 过渡里 `A.stop` 的小节；A 自己播完的 = 曲末；其它 = 时间线结束；终曲 = 淡出结束 |
-
-- **主 Cue**（`main_cue`）= MIX IN。
-- **保存 loop**：过渡事件里的 loop（`A.loop:8` 等）依次放进 loop 垫子 1–8，名字 `LOOP 8`（拍数），位置换成这首自己的小节。
-- set 里已经手写了的垫子不覆盖。
-
-### 7.4 set 文件里的写法
+### 7.5 set 文件里的写法
 
 ```jsonc
 {
-  "id": "3f2a9c0d1e4b", "title": "Satori",
-  "cues": {"breakdown 16": 113, "drop": 129},     // 谱上的段落标记（本应用小节号），hot cue 按它们定
+  "id": "3f2a9c0d1e4b", "title": "Track Two",
   "plan_bar_offset": 0,                            // 谱上第 b 小节 = 本应用第 b + 0 小节
   "main_cue": 1,
   "hot_cues": [
-    {"pad": 2, "name": "MIX IN", "bar": 1, "color": "#22D45A", "note": "第 1 段过渡（长交接）：时间线第 4 小节 B 从这里起播"},
-    {"pad": 3, "name": "BREAK 1", "bar": 113, "color": "#2F7BFF", "note": "谱上的 breakdown 16（第 113 小节）"},
-    {"pad": 4, "name": "DROP 1", "bar": 129, "color": "#FF8C1A", "note": "谱上的 drop（第 129 小节）"},
-    {"pad": 7, "name": "MIX OUT", "bar": 185, "color": "#FF3B3B", "note": "第 2 段过渡从这里开始，交给 #3 Reflection"}
+    {"pad": 1, "name": "IN", "bar": 1, "color": "#22D45A", "auto": true,
+     "note": "第 1 段过渡（长交接）：从这里起播（推子 5、LOW 7点、HIGH 11点）"},
+    {"pad": 2, "name": "FADER UP", "bar": 9, "color": "#FFD60A", "auto": true,
+     "note": "第 1 段过渡（长交接），时间线第 16 小节。谱上的动作：② B 推子往上推满。推子 5 → 10（7 小节拧到）"},
+    {"pad": 3, "name": "BASS IN", "bar": 17, "color": "#FFD60A", "auto": true, "note": "…LOW 7点 → 12点（一拍到位）"},
+    {"pad": 4, "name": "OUT", "bar": 93, "color": "#FF3B3B", "auto": true, "note": "第 2 段过渡（瞬时切换）从这里开始，交给 #3 …"},
+    {"pad": 8, "name": "VOCAL", "bar": 40.5, "color": "#FF5FA2", "note": "人声进来（谱上自己加的）"}
   ],
-  "loops": [{"pad": 1, "name": "LOOP 8", "bar": 177, "beats": 8, "note": "第 2 段过渡里的 8 拍 loop"}]
+  "loops": []
 }
 ```
 
-### 7.5 在哪里看
+过渡里谱上的「动作」：`"marks": [[8, "① B 起播：半推子，LOW 切掉"], [24, "③ 换低频"]]`（时间线小节, 文字）。
+
+### 7.6 在哪里看
 
 - 网页首页「可以演出了」下面的 **Hot Cue 表（Prime 4+）**（可以下载 .md）；演出页右上角也有入口。
   也可以直接打开 `/api/sets/<set id>/cuesheet.md`。
@@ -187,6 +219,5 @@ cue 存在 Engine 的数据库里，不在音频文件里，所以要照本应�
 |---|---|
 | 错误 | hot cue / 保存 loop / 主 Cue 超出曲子 |
 | 错误 | 打击垫号不在 1–8 或重复、名字不是英文 / 数字或超过 16 个字符、颜色不是 #RRGGBB（读 set 文件时就报） |
-| 提示 | `"spec": "1"` 的 set 里，某个垫子的名字和 7.1 的用途不一致 |
 
 EQ / 推子 / Filter / 效果器的取值范围、时间线的先后、变速范围等其它校验见 SET_FORMAT.md「校验」。

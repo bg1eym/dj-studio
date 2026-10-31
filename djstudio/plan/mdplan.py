@@ -17,10 +17,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..setspec import COLOR_NAMES, NAME_MAX, PADS
+from ..setspec import COLOR_NAMES, NAME_MAX, default_color
 from .cdw import TECH, Knobs, Plan, PlanCue, PlanEffect, PlanError, PlanRow, PlanTrack, PlanTransition, check, clock, fader
 
-SCORE_SPEC_VERSION = "1"
+SCORE_SPEC_VERSION = "2"
+ACCEPTED_VERSIONS = ("1", "2")  # v1 的谱写法一样，只是 hot cue 按 v2 放（垫子没有固定用途）
 SUFFIXES = (".md", ".markdown")
 DASHES = ("—", "-", "–", "－", "--")
 
@@ -249,7 +250,6 @@ def parse_text(text: str, name: str = "") -> Plan:
     if len({t.no for t in trans}) != len(trans):
         raise PlanError("有两段过渡用了同一个编号")
     check(plan)
-    _check_cues(plan)
     # 提示按谱里的行号排（没有行号的放最后）
     plan.warnings.sort(key=lambda w: int(m.group(1)) if (m := re.match(r"第 (\d+) 行", w)) else 1 << 30)
     return plan
@@ -260,7 +260,7 @@ def _head(head: list[_Line], warnings: list[str]) -> tuple[int, tuple[int | None
     for no, k, v in _bullets(head):
         if k == "规范":
             m = re.search(r"(\d+)", v)
-            if not m or m.group(1) != SCORE_SPEC_VERSION:
+            if not m or m.group(1) not in ACCEPTED_VERSIONS:
                 raise _err(no, f"这份谱写的是规范「{v}」，本应用认的是 v{SCORE_SPEC_VERSION}")
         elif k == "开场":
             m = re.search(r"(\d+)", v)
@@ -353,13 +353,14 @@ def _hot_cues(sec: _Section, by_no: dict[int, PlanTrack]) -> None:
             if pad in pads:
                 raise _err(line, f"打击垫 {pad} 写了两遍")
             pads.add(pad)
-            spec = PADS[pad - 1]
-            name = r.get("名字", "") or spec.name
+            name = r.get("名字", "")
+            if not name:
+                raise _err(line, "名字要写（英文 / 数字，≤ 16 个字符，比如 IN、OUT、BASS SWAP、VOCAL）")
             if not name.isascii():
                 raise _err(line, f"名字「{name}」只能用英文 / 数字（Prime 4+ 屏幕上显示），中文写在注释里")
             if len(name) > NAME_MAX:
                 raise _err(line, f"名字「{name}」超过 {NAME_MAX} 个字符")
-            color = _color(r.get("颜色", ""), spec.color, line)
+            color = _color(r.get("颜色", ""), default_color(name), line)
             bar, time = _position(r["位置"], line)
             by_no[no].hot_cues.append(PlanCue(pad, name, color, bar, time, r.get("注释", ""), line))
             # BREAK / DROP 也是段落标记：小节对齐时拿来核对，自动补别的垫子时也按它们定
@@ -526,24 +527,6 @@ def _rows(where: str, t: _Table, x: int, b_in: int) -> list[PlanRow]:
     if not rows:
         raise _err(t.line, f"{where} 的旋钮表是空的")
     return rows
-
-
-def _check_cues(plan: Plan) -> None:
-    """谱上写明的 MIX IN / MIX OUT 和过渡对不上时提醒（hot cue 照谱上写的设，set 照过渡走）。"""
-    for i, pt in enumerate(plan.tracks):
-        pads = {c.pad: c for c in pt.hot_cues}
-        mix_in = pads.get(2)
-        if mix_in and mix_in.bar is not None:
-            want = plan.start_bar if i == 0 else (plan.transitions[i - 1].b_in if i - 1 < len(plan.transitions) else None)
-            if want is not None and abs(mix_in.bar - want) > 1e-6:
-                plan.warnings.append(f"第 {mix_in.line} 行：#{pt.no} 的 MIX IN 写在第 {mix_in.bar:g} 小节，"
-                                     + ("开场" if i == 0 else f"过渡 {i} 里 B ") + f"从第 {want:g} 小节进")
-        mix_out = pads.get(7)
-        if mix_out and mix_out.bar is not None and i < len(plan.transitions):
-            want = plan.transitions[i].rows[0].a_bar
-            if abs(mix_out.bar - want) > 1e-6:
-                plan.warnings.append(f"第 {mix_out.line} 行：#{pt.no} 的 MIX OUT 写在第 {mix_out.bar:g} 小节，"
-                                     f"过渡 {i + 1} 的旋钮表从第 {want} 小节开始")
 
 
 def score_doc(name: str) -> Path | None:

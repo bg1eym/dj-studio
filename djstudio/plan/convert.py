@@ -360,6 +360,7 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
         "tempo": tempo,
         "label": "长交接" if tr.technique == "longhand" else "瞬时切换",
         "note": note,
+        "marks": [[float(r.a_bar - a0), r.marks] for r in tr.rows if r.marks.strip()],
     }
     return out, notes
 
@@ -420,7 +421,8 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
             cues[name] = float(bar + al.k)
         t["cues"] = cues
         t["plan_bar_offset"] = al.k
-        # 谱上写明的 hot cue（Markdown 谱）：照写的设；没写的垫子编译后按规范补（setspec.fill_hot_cues 不覆盖写了的）
+        # 谱上写明的 hot cue（Markdown 谱）：照写的设；空着的垫子编译后按 set 放进、出和中间要处理的点
+        # （setspec.fill_hot_cues 不动写了的）
         hot = []
         g2 = Grid(lt.grid.bpm, lt.grid.first_beat, al.downbeat, lt.grid.duration) if lt.grid else None
         for c in pt.hot_cues:
@@ -436,9 +438,6 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
             hot.append({"pad": c.pad, "name": c.name, "bar": round(bar, 4), "color": c.color, "note": c.note or "谱上写的"})
         if hot:
             t["hot_cues"] = hot
-            mix_in = next((h for h in hot if h["pad"] == 2), None)
-            if mix_in:
-                t["main_cue"] = mix_in["bar"]  # 主 Cue = MIX IN（docs/SET_SPEC.md 7.3）
         tracks.append(t)
     trans = []
     for tr in plan.transitions:

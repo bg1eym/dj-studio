@@ -1,6 +1,6 @@
 [project]
 name = "djstudio"
-version = "0.3.9"
+version = "0.3.10"
 description = "Mixxx 驱动的自动打碟 Web App：本地导入音频、按编排方案生成 set、由 Mixxx 执行混音"
 requires-python = ">=3.11"
 dependencies = [

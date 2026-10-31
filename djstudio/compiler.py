@@ -63,6 +63,7 @@ class Compiled:
     opening: dict[str, Any] | None = None
     issues: list[Issue] = field(default_factory=list)
     schedule: list[Segment] = field(default_factory=list)
+    expanded: list[Any] = field(default_factory=list)  # 每段过渡展开后的曲线（人读单位、小节；hot cue 按它找点）
 
     @property
     def ok(self) -> bool:
@@ -240,8 +241,10 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], res
             prog, ex = compile_transition(i, tr, a, b, a_bpm, b_bpm)
         except TechniqueError as e:
             err(where, str(e))
+            c.expanded.append(None)  # 和过渡的序号对齐
             continue
         c.programs.append(prog)
+        c.expanded.append(ex)
 
         # 时序校验
         if tr.start < established - 1e-6 and not (resume and i == 0):
