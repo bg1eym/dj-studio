@@ -198,6 +198,7 @@ class Library:
         # 响度（LUFS）和采样峰值：演出时按它给每首统一音量（像 Mixxx 的 ReplayGain / Prime 的 Auto Gain）
         result["loudness"] = round(stats.get("loudness", -70.0), 2)
         result["peak"] = round(stats.get("peak", 0.0), 4)
+        result["waveform_version"] = wf.get("v", 1)
         self.store.save_waveform(tid, wf)
         fields: dict[str, Any] = {"analysis": result, "analysis_version": ANALYSIS_VERSION, "analysis_error": None}
         # 用户确认的是「哪一拍是第 1 小节」；具体时间跟着网格走（换了解码器重新分析时，网格可能挪了几十毫秒）

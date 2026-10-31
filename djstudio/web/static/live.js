@@ -4,12 +4,13 @@
 // 不是计划值——Mixxx 里旋钮在哪，这里就画在哪。计划值（编译出的自动化曲线）画在过渡时间线上，
 // 游标走到哪里，旋钮应该就在曲线的那个位置。波形与游标在两帧之间按播放速度外推，每个画面帧重画。
 
-import { drawBlueWave, WAVE_COLORS } from "./wavedraw.js";
+import { drawTriBand, WAVE_COLORS } from "./wavedraw.js";
 
 const NS = "http://www.w3.org/2000/svg";
 const DECK_HEX = { 1: "#ff9a3c", 2: "#46c2ff" };
-// EQ 三段的颜色（旋钮、时间线曲线、EQ 操作）：低 = 红、中 = 绿、高 = 蓝。波形另用 Prime 4 那种蓝白分层（wavedraw.js）
-const BAND_HEX = { lo: "#ff5d5d", mid: "#4cd97b", hi: "#4ea3ff" };
+// EQ 三段的颜色（旋钮、时间线曲线、EQ 操作）和波形同一套：LOW = 蓝、MID = 绿、HIGH = 白（Denon 三频段波形的颜色，
+// 看波形就知道哪个旋钮管哪一层）。蓝色在深色底上调亮一点，字看得清。
+const BAND_HEX = { lo: "#5b8cff", mid: WAVE_COLORS.mid, hi: "#f2f4f8" };
 const SPAN_S = 7; // 波形窗口：播放头两侧各 7 秒（真实时间，两边 deck 同一比例，拍对齐时小节线上下对齐）
 const MIX = { hi: 0, mid: 1, lo: 2, filter: 3, echo: 4, reverb: 5, vu: 6 };
 const PARAM_ORDER = ["vol", "hi", "mid", "lo", "filter", "echo", "reverb"];
@@ -113,7 +114,8 @@ function laneY(param, v) {
   return (knobAngle(param, v) + 150) / 300;
 }
 
-const paramColor = (param, d) => (isEq(param) ? BAND_HEX[param] : param === "filter" ? "#c9a6ff" : isFx(param) ? "#7ee0b5" : DECK_HEX[d]);
+const FX_HEX = "#f0c050";
+const paramColor = (param, d) => (isEq(param) ? BAND_HEX[param] : param === "filter" ? "#c9a6ff" : isFx(param) ? FX_HEX : DECK_HEX[d]);
 
 // 时间线每行左边的小旋钮：和混音台上的旋钮同一画法（推子画成 7 点～5 点的转角）
 class MiniKnob {
@@ -259,7 +261,7 @@ class Channel {
       hi: new Knob("HIGH", "hi", BAND_HEX.hi, false, BAND_HEX.hi), mid: new Knob("MID", "mid", BAND_HEX.mid, false, BAND_HEX.mid),
       lo: new Knob("LOW", "lo", BAND_HEX.lo, false, BAND_HEX.lo),
       filter: new Knob("FILTER", "filter", "#c9a6ff"),
-      echo: new Knob("ECHO", "echo", "#7ee0b5", true), reverb: new Knob("REVERB", "reverb", "#7ee0b5", true),
+      echo: new Knob("ECHO", "echo", FX_HEX, true), reverb: new Knob("REVERB", "reverb", FX_HEX, true),
     };
     this.vu = new Meter();
     this.fader = new Fader(col);
@@ -384,7 +386,7 @@ class DeckView {
       if (x1 - x0 > 50) { g.fillStyle = "#7d8597"; g.font = "10px sans-serif"; g.fillText(s.label, Math.max(2, x0 + 3), H - 3); }
     }
 
-    // 波形：Prime 4 那种蓝白分层；按当前 EQ / 滤波缩放各频段（看得出「低频切掉了」），整体亮度跟推子
+    // 波形：Denon 三频段（wavedraw.js）；按当前 EQ / 滤波缩放各频段（看得出「低频切掉了」），整体亮度跟推子
     const wf = t.wave;
     if (wf) {
       const mx = this.mx;
@@ -397,21 +399,18 @@ class DeckView {
       const vol = faderPos(ds[6]);
       g.globalAlpha = ds[1] ? 0.35 + 0.65 * vol : 0.3;
       const pps = wf.rate;
-      drawBlueWave(g, w, mid, (x) => {
+      drawTriBand(g, w, mid, amp, (x) => {
         const ta = pos + ((x - cx) / (w / 2)) * half, tb = pos + ((x + 1 - cx) / (w / 2)) * half;
         let ia = Math.floor(ta * pps), ib = Math.max(ia + 1, Math.floor(tb * pps));
         ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
         if (ia >= ib) return null;
-        let pk = 0, lo = 0, mi = 0, hi = 0;
+        let lo = 0, mi = 0, hi = 0;
         for (let i = ia; i < ib; i++) {
-          if (wf.peak[i] > pk) pk = wf.peak[i];
           if (wf.low[i] > lo) lo = wf.low[i];
           if (wf.mid[i] > mi) mi = wf.mid[i];
           if (wf.high[i] > hi) hi = wf.high[i];
         }
-        const raw = Math.max(lo, mi, hi, 1);
-        const L = lo * gl, M = mi * gm, Hh = hi * gh;
-        return [(pk / 255) * amp * Math.min(1.3, Math.max(L, M, Hh, 1) / raw), L, M, Hh];
+        return [(lo / 255) * gl, (mi / 255) * gm, (hi / 255) * gh];
       });
       g.globalAlpha = 1;
     }
@@ -722,8 +721,8 @@ class Handoff {
     this.title = el("b");
     this.sub = el("span", { class: "dim" });
     this.where = el("span", { class: "ho-where mono" });
-    const legend = el("span", { class: "ho-legend" }, "波形：",
-      [["lo", "低频"], ["mid", "中频"], ["hi", "高频"]].map(([b, name]) => el("span", {}, el("i", { style: `background:${WAVE_COLORS[b]}` }), name)));
+    const legend = el("span", { class: "ho-legend", title: "Denon（Engine DJ）三频段波形：三段各自的音量叠在一起" }, "波形：",
+      [["lo", "低频 LOW"], ["mid", "中频 MID"], ["hi", "高频 HIGH"]].map(([b, name]) => el("span", {}, el("i", { style: `background:${WAVE_COLORS[b]}` }), name)));
     this.rows = { A: this._row(), B: this._row() };
     this.root = el("div", { class: "handoff hidden" },
       el("div", { class: "ho-head" }, this.title, this.sub, el("span", { class: "grow" }), legend, this.where),
@@ -775,18 +774,17 @@ class Handoff {
     const wf = t.wave;
     if (wf) {
       const mid = h / 2, amp = h / 2 - 2, pps = wf.rate;
-      drawBlueWave(g, w, mid, (x) => {
+      drawTriBand(g, w, mid, amp, (x) => {
         let ia = Math.floor(((x / w) * t.dur) * pps), ib = Math.max(ia + 1, Math.floor((((x + 1) / w) * t.dur) * pps));
         ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
         if (ia >= ib) return null;
-        let pk = 0, lo = 0, mi = 0, hi = 0;
+        let lo = 0, mi = 0, hi = 0;
         for (let i = ia; i < ib; i++) {
-          if (wf.peak[i] > pk) pk = wf.peak[i];
           if (wf.low[i] > lo) lo = wf.low[i];
           if (wf.mid[i] > mi) mi = wf.mid[i];
           if (wf.high[i] > hi) hi = wf.high[i];
         }
-        return [(pk / 255) * amp, lo, mi, hi];
+        return [lo / 255, mi / 255, hi / 255];
       });
     }
     // 乐句线（每 16 小节），每 32 小节标小节号

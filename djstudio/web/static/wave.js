@@ -1,6 +1,6 @@
 // 三频段波形 + 小节网格 + 段落 + 标记。滚轮缩放，拖动平移，单击定位。
 
-import { drawBlueWave } from "./wavedraw.js";
+import { drawTriBand } from "./wavedraw.js";
 
 const SECTION_COLORS = {
   intro: "rgba(120,140,170,.10)", groove: "rgba(80,160,255,.07)", breakdown: "rgba(255,200,80,.13)",
@@ -135,20 +135,19 @@ export class Wave {
       }
     }
 
-    // 波形：Prime 4 那种蓝白分层（wavedraw.js）
+    // 波形：Denon 三频段（wavedraw.js）
     const wf = this.wf;
     const pps = wf.rate;
-    drawBlueWave(g, w, mid, (x) => {
+    drawTriBand(g, w, mid, amp, (x) => {
       const ta = this.tOf(x, w), tb = this.tOf(x + 1, w);
       let ia = Math.floor(ta * pps), ib = Math.max(ia + 1, Math.floor(tb * pps));
       ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
       if (ia >= ib) return null;
-      let pk = 0, lo = 0, mi = 0, hi = 0;
+      let lo = 0, mi = 0, hi = 0;
       for (let i = ia; i < ib; i++) {
-        if (wf.peak[i] > pk) pk = wf.peak[i];
         lo = Math.max(lo, wf.low[i]); mi = Math.max(mi, wf.mid[i]); hi = Math.max(hi, wf.high[i]);
       }
-      return [pk / 255 * amp, lo, mi, hi];
+      return [lo / 255, mi / 255, hi / 255];
     });
 
     // 小节网格

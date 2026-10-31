@@ -24,6 +24,14 @@ N_FFT = 1024
 HOP = 256
 PEAK_RATE = 50  # 波形每秒点数
 BANDS = {"low": (30.0, 150.0), "mid": (150.0, 2500.0), "high": (2500.0, 11025.0)}
+# 波形显示用的三段：Denon（Engine DJ）三频段波形的分界——蓝 = 低频 ≈20–500 Hz、绿 = 中频 ≈500–2000 Hz、
+# 白 = 高频 ≈2 kHz 以上（Engine DJ 用户手册的配色说明；分界是 Engine 社区里的说法，两边会混一点）
+WAVE_BANDS = {"low": (20.0, 500.0), "mid": (500.0, 2000.0), "high": (2000.0, 11025.0)}
+# 每段画满时的有效值：-6 dBFS（一首响的母带的 kick），中高频按 0.48 份（参照 CDJ-3000 三频段显示的仿制实现，
+# cmicali/vibe-libs 的 WaveformLevelMath.h）；分析信号是 0.707·(L+R) 下混，两声道相同时比单声道高 3 dB
+WAVE_FULL_RMS = 0.5 * 2 ** 0.5
+WAVE_SHARES = {"low": 1.0, "mid": 0.48, "high": 0.48}
+WAVEFORM_VERSION = 2  # 2 = 三频段（Denon 分界、按满幅标定）；1 = 旧的三段各自拉满
 
 
 def frame_time(i: np.ndarray | float, sr: int) -> np.ndarray | float:
@@ -44,6 +52,7 @@ class Frames:
     high: np.ndarray
     flux: np.ndarray  # 全频谱通量（onset 包络）
     low_flux: np.ndarray  # 低频通量（kick）
+    wave: dict[str, np.ndarray] | None = None  # 波形显示用的三段（WAVE_BANDS）每帧有效值
 
 
 def stft_bands(x: np.ndarray, sr: int) -> Frames:
@@ -51,6 +60,8 @@ def stft_bands(x: np.ndarray, sr: int) -> Frames:
     n = 1 + max(0, (len(x) - N_FFT) // HOP)
     freqs = np.fft.rfftfreq(N_FFT, 1.0 / sr)
     masks = {k: (freqs >= lo) & (freqs < hi) for k, (lo, hi) in BANDS.items()}
+    wmasks = {k: (freqs >= lo) & (freqs < hi) for k, (lo, hi) in WAVE_BANDS.items()}
+    wave = {k: np.zeros(n, np.float32) for k in WAVE_BANDS}
     lowmask = (freqs >= 30) & (freqs < 130)
     out = {k: np.zeros(n, np.float32) for k in ("low", "mid", "high", "flux", "low_flux")}
     prev = None
@@ -64,6 +75,8 @@ def stft_bands(x: np.ndarray, sr: int) -> Frames:
         p = mag ** 2
         for k, m in masks.items():
             out[k][s:e] = p[:, m].sum(axis=1)
+        for k, m in wmasks.items():
+            wave[k][s:e] = p[:, m].sum(axis=1)
         lg = np.log1p(100.0 * mag)
         if prev is None:
             prev = lg[:1]
@@ -76,7 +89,10 @@ def stft_bands(x: np.ndarray, sr: int) -> Frames:
         out["low_flux"][s:e] = dl.sum(axis=1)
         prev = lg[-1:]
         prev_mag = mag[-1:]
-    return Frames(sr, sr / HOP, out["low"], out["mid"], out["high"], out["flux"], out["low_flux"])
+    # 功率和 → 这一帧该频段的有效值（Parseval：单边谱 ×2，除以 N 和窗的能量）
+    norm = 2.0 / (N_FFT * float(np.sum(win.astype(np.float64) ** 2)))
+    wave = {k: np.sqrt(v * norm) for k, v in wave.items()}
+    return Frames(sr, sr / HOP, out["low"], out["mid"], out["high"], out["flux"], out["low_flux"], wave)
 
 
 # ---------------------------------------------------------------- 波形
@@ -91,12 +107,24 @@ def waveform(x: np.ndarray, fr: Frames) -> dict[str, Any]:
     out: dict[str, Any] = {"rate": PEAK_RATE, "n": n}
     pk = peak / (peak.max() or 1.0)
     out["peak"] = np.round(pk * 255).astype(int).tolist()
+    # 三频段：每个点 = 这 20 ms 里该频段最响的那一帧的有效值（不取平均：kick 会被摊平），按满幅标定
+    # （WAVE_FULL_RMS × 份额 = 画满），三段之间的比例是真实的。整首统一一个系数，把最响的 kick 放到满高
+    # （响的母带不至于全部顶满），这个系数三段相同，不改变三段的比例。
+    out["v"] = WAVEFORM_VERSION
     t_frames = frame_time(np.arange(len(fr.low)), fr.sr)
-    t_pts = (np.arange(n) + 0.5) / PEAK_RATE
-    for k in ("low", "mid", "high"):
-        v = np.sqrt(np.interp(t_pts, t_frames, getattr(fr, k)))
-        v = v / (np.percentile(v, 99.5) or 1.0)
-        out[k] = np.round(np.clip(v, 0, 1) * 255).astype(int).tolist()
+    idx = np.clip(np.searchsorted(t_frames, np.arange(n) / PEAK_RATE), 0, max(0, len(t_frames) - 1))
+    levels = {}
+    for k in WAVE_BANDS:
+        rms = fr.wave[k] if fr.wave is not None else np.sqrt(getattr(fr, k))
+        if len(rms) == 0:
+            levels[k] = np.zeros(n)
+            continue
+        loud = np.maximum.reduceat(rms, idx) if len(idx) else np.zeros(n)
+        levels[k] = loud / (WAVE_FULL_RMS * WAVE_SHARES[k])
+    top = float(np.percentile(levels["low"], 99.5)) if n else 0.0
+    k_track = 1.0 / top if top > 1.0 else 1.0
+    for k in WAVE_BANDS:
+        out[k] = np.round(np.clip(levels[k] * k_track, 0, 1) * 255).astype(int).tolist()
     return out
 
 

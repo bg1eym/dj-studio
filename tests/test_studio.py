@@ -530,3 +530,27 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     log = "\n".join(p.log)
     assert p.stage == "done", log + f"\n{p.error}"
     assert f"第 {rp['bar']:g} 小节" in log and "tr1 开始" in log and "B 起播" in log, log
+
+
+def test_waveform_is_denon_tri_band():
+    """波形数据是 Denon 三频段：三段按 Denon 的分界各自取音量、按满幅标定。
+    60 Hz 正弦只出低频（蓝），1 kHz 只出中频（绿），6 kHz 只出高频（白）；-6 dBFS 的低频画满。"""
+    import numpy as np
+
+    from djstudio.library.analysis import WAVEFORM_VERSION, stft_bands, waveform
+
+    sr = 22050
+    t = np.arange(sr * 4) / sr
+
+    def levels(freq: float, rms: float) -> dict[str, float]:
+        x = (np.sqrt(2) * rms * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+        wf = waveform(x, stft_bands(x, sr))
+        assert wf["v"] == WAVEFORM_VERSION == 2
+        return {k: float(np.median(wf[k][10:-10])) / 255 for k in ("low", "mid", "high")}
+
+    lo = levels(60, 0.5 * np.sqrt(2) / 2)  # 满幅参考的一半：半高
+    assert 0.4 < lo["low"] < 0.6 and lo["mid"] < 0.05 and lo["high"] < 0.05, lo
+    mid = levels(1000, 0.05)
+    assert mid["mid"] > 0.1 and mid["low"] < 0.05 and mid["high"] < 0.05, mid
+    hi = levels(6000, 0.05)
+    assert hi["high"] > 0.1 and hi["low"] < 0.05 and hi["mid"] < 0.05, hi

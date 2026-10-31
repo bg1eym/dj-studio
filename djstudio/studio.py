@@ -19,6 +19,7 @@ from .engine.conductor import Conductor, Progress
 from .engine.link import Link, LinkError, RtMidiLink, SimLink
 from .grid import Grid
 from .library.analysis import downbeat_from_bar1
+from .library.analysis import WAVEFORM_VERSION
 from .library.audio import AUDIO_EXTS, AudioError, decoder_name, have_decoder, probe
 from .library.importer import Library
 from .library.store import Store, Track
@@ -909,6 +910,7 @@ class Studio:
         return [i for i in ids if (t := self.store.get(i)) and (
             (t.analysis or {}).get("decoder", "ffmpeg") != dec
             or "loudness" not in (t.analysis or {})  # 0.3.5 起分析里有响度（演出时统一音量用）
+            or (t.analysis or {}).get("waveform_version", 1) < WAVEFORM_VERSION  # 0.3.7 起波形是 Denon 三频段
             or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
 
     def refresh_stale(self) -> Job | None:
