@@ -1,5 +1,7 @@
 // 三频段波形 + 小节网格 + 段落 + 标记。滚轮缩放，拖动平移，单击定位。
 
+import { drawBlueWave } from "./wavedraw.js";
+
 const SECTION_COLORS = {
   intro: "rgba(120,140,170,.10)", groove: "rgba(80,160,255,.07)", breakdown: "rgba(255,200,80,.13)",
   drop: "rgba(255,90,90,.12)", outro: "rgba(160,120,200,.12)",
@@ -133,27 +135,21 @@ export class Wave {
       }
     }
 
-    // 波形：颜色 = (low, mid, high) → (r, g, b)
+    // 波形：Prime 4 那种蓝白分层（wavedraw.js）
     const wf = this.wf;
     const pps = wf.rate;
-    for (let x = 0; x < w; x++) {
+    drawBlueWave(g, w, mid, (x) => {
       const ta = this.tOf(x, w), tb = this.tOf(x + 1, w);
       let ia = Math.floor(ta * pps), ib = Math.max(ia + 1, Math.floor(tb * pps));
       ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
-      if (ia >= ib) continue;
+      if (ia >= ib) return null;
       let pk = 0, lo = 0, mi = 0, hi = 0;
       for (let i = ia; i < ib; i++) {
         if (wf.peak[i] > pk) pk = wf.peak[i];
         lo = Math.max(lo, wf.low[i]); mi = Math.max(mi, wf.mid[i]); hi = Math.max(hi, wf.high[i]);
       }
-      const s = Math.max(lo, mi, hi, 1);
-      g.strokeStyle = `rgb(${Math.round(255 * lo / s)},${Math.round(200 * mi / s + 40)},${Math.round(255 * hi / s)})`;
-      const a = pk / 255 * amp;
-      g.beginPath();
-      g.moveTo(x + 0.5, mid - a);
-      g.lineTo(x + 0.5, mid + a);
-      g.stroke();
-    }
+      return [pk / 255 * amp, lo, mi, hi];
+    });
 
     // 小节网格
     if (this.grid && this.grid.bpm > 0) {

@@ -4,9 +4,11 @@
 // 不是计划值——Mixxx 里旋钮在哪，这里就画在哪。计划值（编译出的自动化曲线）画在过渡时间线上，
 // 游标走到哪里，旋钮应该就在曲线的那个位置。波形与游标在两帧之间按播放速度外推，每个画面帧重画。
 
+import { drawBlueWave, WAVE_COLORS } from "./wavedraw.js";
+
 const NS = "http://www.w3.org/2000/svg";
 const DECK_HEX = { 1: "#ff9a3c", 2: "#46c2ff" };
-// EQ 三段的颜色，和波形一致：低 = 红、中 = 绿、高 = 蓝（波形每一竖条的颜色 = 三段能量的混合）
+// EQ 三段的颜色（旋钮、时间线曲线、EQ 操作）：低 = 红、中 = 绿、高 = 蓝。波形另用 Prime 4 那种蓝白分层（wavedraw.js）
 const BAND_HEX = { lo: "#ff5d5d", mid: "#4cd97b", hi: "#4ea3ff" };
 const SPAN_S = 7; // 波形窗口：播放头两侧各 7 秒（真实时间，两边 deck 同一比例，拍对齐时小节线上下对齐）
 const MIX = { hi: 0, mid: 1, lo: 2, filter: 3, echo: 4, reverb: 5, vu: 6 };
@@ -382,7 +384,7 @@ class DeckView {
       if (x1 - x0 > 50) { g.fillStyle = "#7d8597"; g.font = "10px sans-serif"; g.fillText(s.label, Math.max(2, x0 + 3), H - 3); }
     }
 
-    // 波形：颜色 = (低, 中, 高)；按当前 EQ / 滤波缩放各频段（看得出「低频切掉了」），整体亮度跟推子
+    // 波形：Prime 4 那种蓝白分层；按当前 EQ / 滤波缩放各频段（看得出「低频切掉了」），整体亮度跟推子
     const wf = t.wave;
     if (wf) {
       const mx = this.mx;
@@ -395,11 +397,11 @@ class DeckView {
       const vol = faderPos(ds[6]);
       g.globalAlpha = ds[1] ? 0.35 + 0.65 * vol : 0.3;
       const pps = wf.rate;
-      for (let x = 0; x < w; x++) {
+      drawBlueWave(g, w, mid, (x) => {
         const ta = pos + ((x - cx) / (w / 2)) * half, tb = pos + ((x + 1 - cx) / (w / 2)) * half;
         let ia = Math.floor(ta * pps), ib = Math.max(ia + 1, Math.floor(tb * pps));
         ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
-        if (ia >= ib) continue;
+        if (ia >= ib) return null;
         let pk = 0, lo = 0, mi = 0, hi = 0;
         for (let i = ia; i < ib; i++) {
           if (wf.peak[i] > pk) pk = wf.peak[i];
@@ -409,11 +411,8 @@ class DeckView {
         }
         const raw = Math.max(lo, mi, hi, 1);
         const L = lo * gl, M = mi * gm, Hh = hi * gh;
-        const s = Math.max(L, M, Hh, 1);
-        g.strokeStyle = `rgb(${Math.round((255 * L) / s)},${Math.round((200 * M) / s + 40)},${Math.round((255 * Hh) / s)})`;
-        const a = (pk / 255) * amp * Math.min(1.3, s / raw);
-        g.beginPath(); g.moveTo(x + 0.5, mid - a); g.lineTo(x + 0.5, mid + a); g.stroke();
-      }
+        return [(pk / 255) * amp * Math.min(1.3, Math.max(L, M, Hh, 1) / raw), L, M, Hh];
+      });
       g.globalAlpha = 1;
     }
 
@@ -723,8 +722,8 @@ class Handoff {
     this.title = el("b");
     this.sub = el("span", { class: "dim" });
     this.where = el("span", { class: "ho-where mono" });
-    const legend = el("span", { class: "ho-legend" },
-      ["lo", "mid", "hi"].map((b) => el("span", {}, el("i", { style: `background:${BAND_HEX[b]}` }), PARAM_LABEL[b])));
+    const legend = el("span", { class: "ho-legend" }, "波形：",
+      [["lo", "低频"], ["mid", "中频"], ["hi", "高频"]].map(([b, name]) => el("span", {}, el("i", { style: `background:${WAVE_COLORS[b]}` }), name)));
     this.rows = { A: this._row(), B: this._row() };
     this.root = el("div", { class: "handoff hidden" },
       el("div", { class: "ho-head" }, this.title, this.sub, el("span", { class: "grow" }), legend, this.where),
@@ -776,10 +775,10 @@ class Handoff {
     const wf = t.wave;
     if (wf) {
       const mid = h / 2, amp = h / 2 - 2, pps = wf.rate;
-      for (let x = 0; x < w; x++) {
+      drawBlueWave(g, w, mid, (x) => {
         let ia = Math.floor(((x / w) * t.dur) * pps), ib = Math.max(ia + 1, Math.floor((((x + 1) / w) * t.dur) * pps));
         ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
-        if (ia >= ib) continue;
+        if (ia >= ib) return null;
         let pk = 0, lo = 0, mi = 0, hi = 0;
         for (let i = ia; i < ib; i++) {
           if (wf.peak[i] > pk) pk = wf.peak[i];
@@ -787,11 +786,8 @@ class Handoff {
           if (wf.mid[i] > mi) mi = wf.mid[i];
           if (wf.high[i] > hi) hi = wf.high[i];
         }
-        const sMax = Math.max(lo, mi, hi, 1);
-        g.strokeStyle = `rgb(${Math.round((255 * lo) / sMax)},${Math.round((200 * mi) / sMax + 40)},${Math.round((255 * hi) / sMax)})`;
-        const a = (pk / 255) * amp;
-        g.beginPath(); g.moveTo(x + 0.5, mid - a); g.lineTo(x + 0.5, mid + a); g.stroke();
-      }
+        return [(pk / 255) * amp, lo, mi, hi];
+      });
     }
     // 乐句线（每 16 小节），每 32 小节标小节号
     g.font = "9px ui-monospace, Menlo, monospace";
