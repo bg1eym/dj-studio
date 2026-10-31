@@ -25,7 +25,7 @@
 
 ## 安装（Mac）
 
-只支持 Apple 芯片（M1 及以后）的 Mac，不做 Intel 版。打开终端，粘贴这一行（装进「应用程序」并打开；以后更新也是这一行）：
+只支持 Apple 芯片（M1 及以后）的 Mac，不做 Intel 版。在 macOS 26 Tahoe 上打包和测试（GitHub 的 macOS 26 构建机），每次构建会查应用要求的最低系统版本，不能高于 macOS 26。打开终端，粘贴这一行（装进「应用程序」并打开；以后更新也是这一行）：
 
 ```bash
 curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-arm64.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"
