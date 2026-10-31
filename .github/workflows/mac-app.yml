@@ -215,10 +215,10 @@ jobs:
           {
             echo "独立的 DJ Studio.app，Apple 芯片（M1 及以后）的 Mac。当前版本 **$VER · ${GITHUB_SHA::7}**。"
             echo
-            echo "安装 / 更新（终端里粘贴这一行，装进「应用程序」并打开）："
+            echo "安装 / 更新（终端里粘贴这一行：先关掉正在运行的 DJ Studio，再装进「应用程序」并打开）："
             echo
             echo '```bash'
-            echo 'curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-arm64.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"'
+            echo 'curl -s -m 3 -X POST http://127.0.0.1:8430/api/quit >/dev/null; pkill -f "DJ Studio.app/Contents"; sleep 1; curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-arm64.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"'
             echo '```'
           } > release-notes.md
           gh release edit "$RELEASE_TAG" --title "DJ Studio ${VER}（Mac，Apple 芯片）" --notes-file release-notes.md --prerelease=false --latest || true
