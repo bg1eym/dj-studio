@@ -49,6 +49,7 @@ for f in (wav, m4a):
     n = out.stat().st_size // 4
     check(abs(n - 220500) < 3000, f"--decode {f.suffix} → {n} 个采样（22050 Hz）")
 
+t_launch = time.time()
 p = subprocess.Popen([str(BIN)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV, text=True)
 replies, hex_lines = {}, []
 err_lines = []
@@ -78,7 +79,12 @@ def cmd(i, c, timeout=30):
 
 
 lib = cmd(1, {"cmd": "library", "tracks": [{"id": "k", "path": str(m4a), "bpm": 128.0, "first_beat": 0.0}]}, 60)
+t_lib = time.time()
 check(lib and lib["tracks"][0]["duration"] > 9, f"引擎装进曲目：{lib}")
+print(f"  引擎从启动到能用（含装进 1 首）：{t_lib - t_launch:.2f}s（点波形跳过去不再重开引擎，省掉的就是这一段）")
+t0 = time.time()
+cmd(30, {"cmd": "library", "tracks": [{"id": f"k{n}", "path": str(m4a), "bpm": 128.0, "first_beat": 0.0} for n in range(18)]}, 60)
+print(f"  再装进 18 首：{time.time() - t0:.2f}s")
 time.sleep(2)
 check(any(h.lower().startswith("f0") for h in hex_lines), f"DJStudio.js 在 Mixxx 的脚本引擎里跑起来了（收到 {len(hex_lines)} 条 SysEx）")
 for u, name in ((1, "Echo"), (2, "Reverb")):

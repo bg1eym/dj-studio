@@ -1286,11 +1286,18 @@ class Studio:
             cond = self.conductor
             if cond and cond.running:
                 cond.stop_fade = self.SEEK_FADE
-                if r:
-                    r["closing"].set()
                 cond.request_stop()
                 cond.join(10)
-            self._close_rehearsal()
+            client = r["client"] if r else None
+            if r and client is not None and client.online():
+                # 引擎还在（演出中 / 刚停下）：不重开引擎，在它上面从点的地方重新开一场——快
+                client.wait_until(lambda: not any((x := client.deck(d)) and x.playing for d in (1, 2)), 2.0)
+                s = self.rehearsal_set(full, start=(k, b))
+                c = self.compile(s, resume=True)
+                if not c.ok:
+                    raise StudioError("set 校验没通过：" + "；".join(str(i) for i in c.issues if i.level == "error"))
+                return self._start_run(r, s, c, 0, k, b, resume=True)
+            self._close_rehearsal()  # 引擎已经关了：重开
             return self._rehearse(set_id, speed, 0, builtin, (k, b))
         finally:
             self._start_lock.release()
@@ -1330,20 +1337,31 @@ class Studio:
         c = self.compile(s, resume=start is not None)
         if not c.ok:
             raise StudioError("set 校验没通过")
+        # 引擎的曲库里放整套 set 的每一首：演出中点波形跳到哪一首（包括往回跳）都不用重开引擎
+        c_full = self.compile(full)
         # 演出（内置引擎、原速）出声；预演和倍速不出声
-        link = self._engine_link(self._sim_rows(s, c), speed, audio=builtin and speed == 1.0)
-        link.sim({"cmd": "queue", "ids": [t.id for t in s.tracks]})
+        link = self._engine_link(self._sim_rows(full, c_full), speed, audio=builtin and speed == 1.0)
         client = EngineClient(link)
         if not client.wait_until(client.online, 15):
             link.close()
             raise StudioError("内置引擎没有启动起来")
         audio = link.audio() if hasattr(link, "audio") else None
+        r = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
+             "audio": audio, "closing": threading.Event()}
+        self._rehearsal = r
+        return self._start_run(r, s, c, from_transition, track0, bar0, resume=start is not None)
+
+    def _start_run(self, r: dict[str, Any], s: SetFile, c: Compiled, from_transition: int, track0: int, bar0: float,
+                   resume: bool) -> Progress:
+        """在 r 这个（已经在线的）引擎上从 (track0, bar0) 开始放 s。点波形跳过去时引擎不重开，只重新开一场。"""
+        client = r["client"]
+        link = client.link
+        set_id, speed, builtin = r["set"], r["speed"], r["builtin"]
+        link.sim({"cmd": "queue", "ids": [t.id for t in s.tracks]})
         self.last_play = {"set": set_id, "from": from_transition, "speed": speed, "track": track0, "bar": bar0}
         self.resume_point = None  # 开始新的一场：之前停下的位置作废
-        closing = threading.Event()
-        self._rehearsal = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
-                           "audio": audio, "closing": closing, "track": track0, "bar": bar0,
-                           "gain_db": [row.get("gain_db") for row in self._sim_rows(s, c)]}
+        r.update(track=track0, bar=bar0, gain_db=[row.get("gain_db") for row in self._sim_rows(s, c)])
+        closing = r["closing"]
         log_path = self.cfg.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{set_id}.log" if builtin else None
 
         def on_log(line: str) -> None:
@@ -1353,12 +1371,14 @@ class Studio:
             self.emit("log", line)
 
         cond = Conductor(client, c, on_progress=lambda p: self.emit("progress", p.to_dict()), on_log=on_log,
-                         stop_fade=self.STOP_FADE_BUILTIN if builtin else 4.0, resume=start is not None)
+                         stop_fade=self.STOP_FADE_BUILTIN if builtin else 4.0, resume=resume)
         self.conductor = cond
 
-        def reap() -> None:  # 播完后留几秒最后画面再关引擎；手动停止的淡出完立刻关
+        def reap() -> None:  # 播完后留几秒最后画面再关引擎；手动停止的淡出完立刻关；点波形接着用这个引擎的不关
             cond.join(None)
             closing.wait(3)
+            if self.conductor is not cond and self._rehearsal is r:
+                return  # 这个引擎被新的一场（点波形跳过去）接着用了
             link.close()  # 先关引擎（声音停）再清状态：状态清了 = 引擎一定已经关了
             if self._rehearsal and self._rehearsal["client"] is client:
                 self._rehearsal = None

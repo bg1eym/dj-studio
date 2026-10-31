@@ -240,6 +240,15 @@ class Conductor:
     def _wait(self, pred: Callable[[], bool], timeout: float, what: str) -> None:
         deadline = time.monotonic() + timeout
         lost_since: float | None = None
+        # 引擎一有新消息（状态帧 / 事件）就重新看一次，不再固定 0.25 秒看一次（起播、装载、点波形跳过去都快一截）。
+        # 有的 pred 会取走事件（drain）：成立过一次就记住，不再调第二次
+        hit = [False]
+
+        def check() -> bool:
+            if not hit[0] and self.c.online() and pred():
+                hit[0] = True
+            return hit[0]
+
         while True:
             if self._stop.is_set():
                 raise StopRequested()
@@ -259,11 +268,11 @@ class Conductor:
                     lost_since = None
                     self.progress.engine_ok = True
                     self._publish()
-                if pred():
+                if check():
                     return
             if time.monotonic() > deadline:
                 raise ConductorError(f"等待超时：{what}（{timeout:.0f}s）")
-            self.c.wait_until(lambda: self._stop.is_set(), 0.25)
+            self.c.wait_until(lambda: self._stop.is_set() or check(), 0.25)
 
     # ------------------------------------------------------------ 装载
 
@@ -363,6 +372,9 @@ class Conductor:
         pid = prog["id"]
         st: dict[str, Any] = {"tl": None, "since": time.monotonic(), "started": False}
         cursor = [self.c.mark() if cursor is None else cursor]
+        # 程序已经下发（有回执）：之后收到的状态帧才算这个程序的。之前那帧可能还是上一场同名程序的（点波形跳过去时引擎不重开，
+        # 上一场的 tr1 刚被中止）——不能拿它当这一场被中止
+        fresh_after = self.c.last_status_at
         bpm = prog["bpm"][0][1] if prog.get("bpm") else 120.0
         a_dur = prog["a"]["dur"] / 1000.0
         # 硬上限：A 整首时长 + 程序长度 + 余量（防止任何情况下无限等）
@@ -387,7 +399,7 @@ class Conductor:
                     self.log(f"!! 小节错位 {ev.get('diff')} 拍")
                 elif e == "done":
                     return True
-            pg = self.c.program()
+            pg = self.c.program() if self.c.last_status_at > fresh_after else None
             if pg and pg.get("id") == pid:
                 if pg.get("st") == "aborted":
                     raise ConductorError(f"{pid} 被中止")

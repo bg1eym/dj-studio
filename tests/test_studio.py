@@ -624,9 +624,10 @@ def test_markdown_score_drives_the_builtin_flow(tmp_path, monkeypatch):
     while (studio.conductor.progress.index or 0) < 1 and time.time() - t0 < 60:
         time.sleep(0.05)
     assert studio.conductor.progress.index == 1, "\n".join(studio.conductor.progress.log)  # 交接完成了
-    old_cond = studio.conductor
+    old_cond, old_client = studio.conductor, studio._rehearsal["client"]
     studio.seek(1, 3.3)
     assert not old_cond.running and studio.conductor is not old_cond
+    assert studio._rehearsal["client"] is old_client and old_client.link._p.poll() is None  # 同一个引擎，没有重开
     assert studio.last_play["track"] == 0 and studio.last_play["bar"] == tr.start + tr.play_at + 2.25  # 落在拍上：第 3 小节第 2 拍
     studio.conductor.join(60)
     p = studio.conductor.progress
