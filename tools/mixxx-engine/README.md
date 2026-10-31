@@ -9,6 +9,7 @@
 
 没有界面、曲库、皮肤、广播、黑胶控制、HID，也不带测试框架。Mixxx 的核心是一个静态库，链接时只把用到的目标文件放进程序。
 声音从系统默认输出设备出（PortAudio，和 Mixxx 的 SoundManager 一样在声卡回调里处理引擎）。
+**跟着系统走**：主线程每 0.5 秒问一次 CoreAudio 现在的默认输出（`kAudioHardwarePropertyDefaultOutputDevice`），换了（插耳机、连 AirPods、在菜单栏换输出）就关掉声音输出、`Pa_Terminate` + `Pa_Initialize`（PortAudio 只在初始化时列设备）、在新的默认设备上重开；中间零点几秒引擎不处理，两个 deck 一起停这一下，彼此仍然对齐。`{"cmd":"audio","reopen":true}` 强制重开一次（CI 冒烟测试用）。
 
 ## 四种用法
 

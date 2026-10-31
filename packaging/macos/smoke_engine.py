@@ -95,6 +95,16 @@ if a and a.get("on"):
     ratio = (b["played_ms"] - p0) / ((time.time() - t0) * 1000)
     check(abs(ratio - 1) < 0.03, f"声卡取数据的速度 = 墙钟的 {ratio:.3f} 倍（设备 {b.get('device')}，"
           f"设备采样率 {b.get('device_rate')}，引擎 {b.get('rate')}，延迟 {b.get('latency_ms', 0):.1f} ms，断音 {b.get('underruns')} 次）")
+    # 跟着系统换输出（插耳机 / 连 AirPods）：重开声音输出以后接着出声，引擎还在
+    r = cmd(5, {"cmd": "audio", "reopen": True})
+    check(r and r.get("on") and r.get("switches") == 1, f"声音输出重开一次（换设备的那条路）：{r}")
+    t1, p1 = time.time(), r["played_ms"]
+    time.sleep(2)
+    c2 = cmd(6, {"cmd": "audio"})
+    ratio2 = (c2["played_ms"] - p1) / ((time.time() - t1) * 1000)
+    check(abs(ratio2 - 1) < 0.05, f"重开以后声卡照样取数据：{ratio2:.3f} 倍墙钟（设备 {c2.get('device')}）")
+    st = cmd(7, {"cmd": "state"})
+    check(st is not None and st.get("audio", {}).get("on"), "重开以后引擎照常回状态")
 cmd(3, {"cmd": "quit"})
 p.wait(10)
 if p.returncode != 0:

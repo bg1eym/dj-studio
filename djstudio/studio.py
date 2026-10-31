@@ -228,14 +228,33 @@ class Studio:
                 self._client.link.close()
                 self._client = None
 
+    AUDIO_REFRESH_S = 2.0  # 演出中每隔这么久重新问一次声音输出（换了耳机：设备名和延迟都变，播放头按新的延迟对时）
+
+    def _audio_info(self, r: dict[str, Any]) -> dict[str, Any] | None:
+        audio = r.get("audio")
+        if not audio or r.get("closing", threading.Event()).is_set():
+            return audio
+        now = time.monotonic()
+        if now - r.get("audio_at", 0.0) >= self.AUDIO_REFRESH_S:
+            r["audio_at"] = now
+            link = r["client"].link
+            try:
+                fresh = link.audio(timeout=1.0) if hasattr(link, "audio") else None
+            except Exception:  # noqa: BLE001  引擎正在关：用上一次的
+                fresh = None
+            if fresh:
+                r["audio"] = audio = fresh
+        return audio
+
     def engine_state(self) -> dict[str, Any]:
         r = self._rehearsal
         if r:  # 预演中：网页看的是模拟器里的引擎
             c = r["client"]
+            audio = self._audio_info(r)
             return {"connected": True, "online": c.online(), "version": c.version, "age": _age(c),
-                    "status": c.status, "at": _heard_at(c, r.get("audio")), "link": c.link.name, "rehearsal": True,
+                    "status": c.status, "at": _heard_at(c, audio), "link": c.link.name, "rehearsal": True,
                     "speed": r["speed"], "set": r["set"], "from": r["from"], "track": r["track"], "bar": r["bar"],
-                    "gain_db": r.get("gain_db"), "builtin": r.get("builtin", False), "audio": r.get("audio")}
+                    "gain_db": r.get("gain_db"), "builtin": r.get("builtin", False), "audio": audio}
         if self.builtin:
             return {"connected": False, "online": False, "builtin": True}
         c = self._client

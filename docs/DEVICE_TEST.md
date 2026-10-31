@@ -73,6 +73,7 @@ Mixxx 的行为已经按 2.5.6 源码逐条核对过（见 [MIXXX_NOTES.md](MIXX
 | 按谱找曲子能读到「下载 / 桌面 / 文稿 / 音乐」 | macOS 的文件夹权限（TCC）：从终端启动时第一次会弹窗问；没核对过 App 方式启动 | 放进打碟谱后看「在电脑里找到 N 首」 |
 | 自动更新、关旧服务在 Mac 上能用 | `git pull --ff-only`（需要能免密拉取）；`lsof -t -iTCP:8430 -sTCP:LISTEN` + `ps -ww`（macOS 自带）；只在 Linux 上测过 | 启动时终端里的「已更新到最新版本」「之前打开的 DJ Studio 还在运行，先关掉它」；右上角提交号和 GitHub 上一致 |
 | 引擎按 44100 Hz 输出、MacBook 扬声器设备是 48000 Hz 时，系统（AUHAL）负责转换，不变调、不变速 | PortAudio 的 Mac 输出不改设备采样率，由 AUHAL 转换。CI（Apple 芯片构建机，虚拟声卡 48000 Hz）实测声卡取数据的速度 = 墙钟的 1.012 倍；不转换的话会是 1.088 倍 | 网页上的播放头和听到的 kick 对齐；`~/DJStudio/logs/` 里的引擎声音信息（device_rate、underruns） |
+| 换输出设备：演出中插耳机 / 连 AirPods / 在菜单栏换输出，声音跟过去 | 引擎每 0.5 秒问 CoreAudio 的默认输出，换了就重开到新设备（Pa_Terminate + Pa_Initialize 刷新设备列表）；命令行程序没有 CFRunLoop，所以先把 kAudioHardwarePropertyRunLoop 设成 NULL，让 HAL 用自己的线程更新默认设备。CI 只测了「重开以后接着出声」，没法真的插耳机 | 演出中插 / 拔耳机、连 / 断 AirPods：1 秒内声音换过去，网页右上角「声音：…」跟着变，两首不错拍；`~/DJStudio/logs/` 里有「声音输出跟着系统换了」 |
 | 网页播放头和声音对齐 | 状态帧带「听到的时刻」= 收到时刻 + 声卡报的输出延迟（PortAudio outputLatency + 一个 512 帧缓冲）；蓝牙耳机的实际延迟常比报的大 | 用 MacBook 扬声器看 kick 是否正好在播放头过拍线时响 |
 | 谱上「第 1 小节第 1 拍」秒数和 Mac 上 Mixxx（CoreAudio 解码 MP3）一致 | 谱按文件时间写；解码器的编码延迟处理可能差几十毫秒，只影响吸附到哪一拍（容差 ±0.2 拍） | 生成 set 时的提示里没有「可能对到了别的拍」 |
 

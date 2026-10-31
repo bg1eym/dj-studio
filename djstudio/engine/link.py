@@ -191,9 +191,9 @@ class EngineLink(SimLink):
                "DJSTUDIO_AUDIO": "1" if audio else "0"}
         super().__init__(library, speed, cmd=[str(binary)], env=env)
 
-    def audio(self) -> dict[str, Any]:
-        """声音输出的情况：on、device、latency_ms、underruns、error。"""
-        r = self.sim({"cmd": "audio"})
+    def audio(self, timeout: float = 5.0) -> dict[str, Any]:
+        """声音输出的情况：on、device、latency_ms、underruns、switches（跟着系统换过几次输出）、error。"""
+        r = self.sim({"cmd": "audio"}, timeout)
         r.pop("_id", None)
         return r
 

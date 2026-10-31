@@ -8,3 +8,7 @@ target_compile_features(djstudio-engine PRIVATE cxx_std_20)
 if(TARGET Opus::Opus)
   target_link_libraries(djstudio-engine PRIVATE Opus::Opus)
 endif()
+# 跟着系统默认输出走（插耳机 / 连 AirPods 自动换过去）：直接问 CoreAudio 现在的默认输出设备
+if(APPLE)
+  target_link_libraries(djstudio-engine PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+endif()

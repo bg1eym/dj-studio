@@ -30,6 +30,10 @@
 //   引擎在声卡回调里处理（每次 512 帧）；主线程只跑脚本、定时器和命令。
 
 #include <portaudio.h>
+#ifdef __APPLE__
+#include <CoreAudio/CoreAudio.h>
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 #include <QCoreApplication>
 #include <QDir>
@@ -161,6 +165,8 @@ class EngineController : public MidiController {
 
 // 声音输出：系统默认输出设备，每次回调固定 512 帧。和 Mixxx 的 SoundManager 一样，引擎就在声卡回调里处理
 // （render），主线程只管脚本、定时器和命令——主线程偶尔卡一下也不会断音。
+// 跟着系统走：系统的默认输出换了（插耳机、连 AirPods、在菜单栏换输出），主线程查到后关掉重开到新的默认设备。
+// PortAudio 只在 Pa_Initialize 时列一次设备、记一次默认设备，所以重开时 Pa_Terminate + Pa_Initialize。
 class AudioOut {
   public:
     using Render = std::function<void(float*)>; // 写 kBufferSamples 个交错立体声采样
@@ -171,6 +177,72 @@ class AudioOut {
         if (!fakePath.isEmpty()) {
             return openFake(fakePath);
         }
+#ifdef __APPLE__
+        // 命令行程序没有跑 CFRunLoop：让 CoreAudio 用自己的线程处理通知，默认设备换了这里才查得到新的
+        CFRunLoopRef runLoop = nullptr;
+        const AudioObjectPropertyAddress rl{kAudioHardwarePropertyRunLoop, kAudioObjectPropertyScopeGlobal, 0};
+        AudioObjectSetPropertyData(kAudioObjectSystemObject, &rl, 0, nullptr, sizeof(runLoop), &runLoop);
+#endif
+        m_follow = true;
+        return openDevice();
+    }
+
+    // 主线程定时调（每 0.5 秒查一次）：系统默认输出换了就重开到新的设备。force = 不管换没换都重开（测试用）。
+    // 重开要零点几秒：这段时间引擎不处理（两个 deck 一起停这么一下，彼此还是对齐的）。返回 true = 重开过。
+    bool followDefault(bool force = false) {
+        if (!m_follow) {
+            return false;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (!force && now - m_lastCheck < std::chrono::milliseconds(500)) {
+            return false;
+        }
+        m_lastCheck = now;
+        const quint32 id = systemDefaultOutput();
+        if (!force && (id == 0 || id == m_systemDevice)) {
+            return false;
+        }
+        const QString before = m_device;
+        closeDevice();
+        const bool ok = openDevice();
+        m_switches++;
+        if (ok) {
+            std::fprintf(stderr, "声音输出跟着系统换了：「%s」→「%s」\n", before.toUtf8().constData(), m_device.toUtf8().constData());
+        } else {
+            std::fprintf(stderr, "声音输出换设备没成功：%s\n", m_error.toUtf8().constData());
+        }
+        return true;
+    }
+
+  private:
+    // 系统现在的默认输出设备（CoreAudio 的设备号；拿不到 = 0）
+    static quint32 systemDefaultOutput() {
+#ifdef __APPLE__
+        const AudioObjectPropertyAddress a{kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, 0};
+        AudioDeviceID id = 0;
+        UInt32 size = sizeof(id);
+        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, nullptr, &size, &id) != noErr) {
+            return 0;
+        }
+        return static_cast<quint32>(id);
+#else
+        return 0;
+#endif
+    }
+    void closeDevice() {
+        if (m_stream) {
+            Pa_StopStream(m_stream); // 等正在跑的回调做完
+            Pa_CloseStream(m_stream);
+            m_stream = nullptr;
+        }
+        if (m_initialized) {
+            Pa_Terminate();
+            m_initialized = false;
+        }
+    }
+    bool openDevice() {
+        m_error.clear();
+        m_systemDevice = systemDefaultOutput();
         if (Pa_Initialize() != paNoError) {
             m_error = QStringLiteral("PortAudio 初始化失败");
             return false;
@@ -204,20 +276,15 @@ class AudioOut {
         m_latencyMs = Pa_GetStreamInfo(m_stream)->outputLatency * 1000.0;
         return true;
     }
+
+  public:
     void close() {
+        m_follow = false;
         if (m_fake.joinable()) {
             m_fakeStop = true;
             m_fake.join();
         }
-        if (m_stream) {
-            Pa_StopStream(m_stream);
-            Pa_CloseStream(m_stream);
-            m_stream = nullptr;
-        }
-        if (m_initialized) {
-            Pa_Terminate();
-            m_initialized = false;
-        }
+        closeDevice();
     }
     bool active() const {
         return m_stream != nullptr || m_fake.joinable();
@@ -231,6 +298,7 @@ class AudioOut {
         o["played_ms"] = static_cast<double>(m_played.load()) * 1000.0 / kSampleRate; // 声卡已经取走的
         o["rate"] = kSampleRate;           // 引擎输出的采样率
         o["started_ms"] = static_cast<double>(m_startedMs.load()); // 声卡第一次取数据的墙钟（Unix 毫秒；对时检查用）
+        o["switches"] = m_switches; // 跟着系统换过几次输出设备
         if (m_deviceRate > 0) {
             o["device_rate"] = m_deviceRate; // 设备本身的采样率（不同时由系统转换）
         }
@@ -322,6 +390,10 @@ class AudioOut {
     int m_carryPos = kBufferFrames;
     PaStream* m_stream = nullptr;
     bool m_initialized = false;
+    bool m_follow = false; // 开的是真声卡：跟着系统默认输出走
+    quint32 m_systemDevice = 0; // 开的时候系统的默认输出（CoreAudio 设备号）
+    int m_switches = 0;
+    std::chrono::steady_clock::time_point m_lastCheck{};
     QString m_device;
     double m_latencyMs = 0;
     double m_deviceRate = 0;
@@ -499,8 +571,15 @@ class Engine {
         });
         reader.detach();
 
-        const qint64 t0 = mixxx::Time::elapsed().toIntegerMillis();
+        qint64 t0 = mixxx::Time::elapsed().toIntegerMillis();
+        bool hadAudio = m_audio.active();
         while (!m_quit && !eof) {
+            m_audio.followDefault(); // 系统换了输出（插耳机 / 连 AirPods）就跟过去
+            if (hadAudio && !m_audio.active()) {
+                // 声卡没了（换设备没成功）：改按墙钟走，从现在的位置接着走，不一下子追上之前的时间
+                t0 = mixxx::Time::elapsed().toIntegerMillis() - static_cast<qint64>(engineMs() / speed);
+            }
+            hadAudio = m_audio.active();
             std::deque<std::string> lines;
             {
                 QMutexLocker lock(&inLock);
@@ -966,6 +1045,9 @@ class Engine {
             r = state();
             r["_id"] = c["_id"];
         } else if (cmd == "audio") {
+            if (c["reopen"].toBool()) {
+                m_audio.followDefault(true); // 测试：不管系统换没换都重开一次
+            }
             r = m_audio.info();
             r["_id"] = c["_id"];
         } else if (cmd == "get") {
