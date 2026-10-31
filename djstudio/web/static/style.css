@@ -259,6 +259,8 @@ header.top a.brand { color: var(--text); }
 .drop:hover, .drop.over { border-color: var(--accent); background: #142033; }
 .drop-big { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
 .score-docs { margin-top: 10px; text-align: center; font-size: 13px; }
+.set-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #262c38; }
+.set-pick { max-width: 60%; font-size: 14px; padding: 4px 6px; }
 .score-docs a { color: var(--accent); }
 .up-line { display: flex; gap: 10px; align-items: center; font-size: 13px; }
 .up-name { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

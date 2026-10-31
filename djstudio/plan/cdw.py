@@ -52,6 +52,14 @@ class PlanRow:
 
 
 @dataclass
+class CueCheck:
+    track: int  # 曲目编号（谱上的 #）
+    cue: PlanCue
+    bar: float  # 谱上写的小节（这个 hot cue 应该在的地方）
+    what: str  # 哪一项（报错用）
+
+
+@dataclass
 class PlanEffect:
     deck: str  # "A" / "B"
     kind: str  # "reverb" / "echo"
@@ -113,8 +121,10 @@ class Plan:
     tracks: list[PlanTrack]
     transitions: list[PlanTransition]
     warnings: list[str] = field(default_factory=list)
-    start_bar: int = 1  # 开场曲从谱上第几小节起播
-    ending: tuple[int | None, float] | None = None  # 终曲淡出：(从谱上第几小节，淡出几小节)；None = 播完
+    start_bar: float = 1  # 开场曲从谱上第几小节起播
+    ending: tuple[float | None, float] | None = None  # 终曲淡出：(从谱上第几小节，淡出几小节)；None = 播完
+    # 谱上用时间写的 IN / OUT / STOP / FADE：读谱时还不知道是第几小节，曲子分析完后（convert）核对和谱上写的小节是同一拍
+    cue_checks: list[CueCheck] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 取值

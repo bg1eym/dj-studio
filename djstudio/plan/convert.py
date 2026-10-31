@@ -29,9 +29,10 @@ from pathlib import Path
 from typing import Any
 
 from ..grid import BEATS_PER_BAR, Grid
-from ..setspec import SPEC_VERSION
+from ..setspec import SPEC_VERSION, fmt_time
 from ..setfile import SetFile
 from .cdw import Knobs, Plan, PlanRow, PlanTrack, PlanTransition
+from .mdplan import bar_beat
 
 EQ_CUT_DB = -25.0  # 谱：7 点 = 全切（-25 dB）
 EQ_MAX_DB = 6.0  # 谱：5 点 = 满（+6 dB）
@@ -396,6 +397,25 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
             notes.append(Note("info", f"#{pt.no:02d} {pt.title}",
                               f"谱的第 1 拍比网格 {a.residual_ms:+.0f}ms（其它曲子中位 {med:+.0f}ms）。"
                               "谱的作者测起音的位置和这里不完全一样；同步按网格走，两个 kick 照样对齐"))
+
+    # 谱上用时间写的 IN / OUT / STOP / FADE：换成这首的拍，必须和谱上写的小节是同一拍（hot cue 说了算，不将就）
+    for chk in plan.cue_checks:
+        k = next((n for n, pt in enumerate(plan.tracks) if pt.no == chk.track), None)
+        lt, al = (matches[k], aligns[k]) if k is not None else (None, None)
+        if lt is None or al is None or lt.grid is None or chk.cue.time is None:
+            continue
+        g2 = Grid(lt.grid.bpm, lt.grid.first_beat, al.downbeat, lt.grid.duration)
+        beat = g2.time_beat(chk.cue.time)
+        j = round(beat)
+        res_ms = (beat - j) * g2.beat_len * 1000
+        on = g2.beat_bar(j) - al.k  # 谱上的小节（带拍）
+        where = f"#{chk.track:02d} {plan.tracks[k].title}"
+        name = f"hot cue {chk.cue.name.upper()}（第 {chk.cue.line} 行，{fmt_time(chk.cue.time)}）"
+        if abs(on - chk.bar) > 1e-6:
+            notes.append(Note("error", where, f"{name} 在谱上第 {bar_beat(on)}，{chk.what}写的是第 {bar_beat(chk.bar)}："
+                                              f"以 hot cue 为准，改成第 {bar_beat(on)}（或者把 hot cue 改对）"))
+        elif abs(res_ms) > OUTLIER_MS:
+            notes.append(Note("warn", where, f"{name} 离这里的拍 {res_ms:+.0f}ms：Engine DJ 的网格和这里不完全一样，按拍放在第 {bar_beat(on)}"))
 
     keylocked = [pt for pt in plan.tracks if pt.keylock]
     if keylocked and keylock_note:

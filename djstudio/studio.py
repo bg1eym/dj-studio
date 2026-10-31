@@ -112,6 +112,7 @@ class Job:
     result: Any = None
     started: float = field(default_factory=time.time)
     finished: float | None = None
+    plan: str = ""  # 一键分析：是哪一份打碟谱的（首页只把当前谱的分析结果当「可以演出了」）
 
     stages: list[str] = field(default_factory=list)  # 分步任务（一键分析）的步骤名
     weights: list[float] = field(default_factory=list)
@@ -145,7 +146,7 @@ class Job:
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "state": self.state, "log": self.log[-300:], "result": self.result,
                 "started": self.started, "finished": self.finished, "stages": self.stages, "stage": self.stage,
-                "progress": round(self.progress, 4), "detail": self.detail}
+                "progress": round(self.progress, 4), "detail": self.detail, "plan": self.plan}
 
 
 class Studio:
@@ -163,7 +164,7 @@ class Studio:
         self.last_play: dict[str, Any] | None = None  # {"set", "from", "speed", "track", "bar"}：这一场从哪开始
         self.resume_point: dict[str, Any] | None = None  # 手动停下的位置（第几首第几小节）：「继续」从这里接着放
         self._start_lock = threading.Lock()  # 同一时间只启动一次（启动引擎要几秒，网页上连点会开出两个引擎、两套声音）
-        self._plan_cache: tuple[Any, Any] | None = None
+        self._plan_cache: dict[tuple[str, float], Any] = {}  # (路径, 修改时间) → 读出来的谱
         # 预演用的引擎：默认 Node 模拟器；开发时可以换成真 Mixxx 测试台（HarnessLink，同一套行协议）
         self.rehearsal_link_factory: Callable[..., Link] = _default_engine_link
         self.job: Job | None = None
@@ -777,6 +778,41 @@ class Studio:
 
     PLAN_SUFFIXES = (".pdf", ".md", ".markdown")  # PDF 模板，或按《打碟谱规范》（docs/SCORE_SPEC.md）写的 Markdown
 
+    def plans(self) -> list[dict[str, Any]]:
+        """放进来过的打碟谱（每一份 = 一套 set），新的在前：标题、几首、是不是当前的、生成过的 set。"""
+        from .plan.cdw import PdfError, PlanError
+        from .plan.convert import _slug
+
+        if not self.plans_dir.exists():
+            return []
+        cur = self.current_plan()
+        out = []
+        for path in sorted((p for p in self.plans_dir.iterdir() if p.suffix.lower() in self.PLAN_SUFFIXES
+                            and not p.name.startswith(".") and p.is_file()), key=lambda p: -p.stat().st_mtime):
+            row: dict[str, Any] = {"file": path.name, "current": path == cur, "mtime": path.stat().st_mtime}
+            try:
+                plan = self.load_plan(path)
+                row.update(title=plan.title, n_tracks=len(plan.tracks))
+            except (PlanError, PdfError) as e:
+                row.update(title=path.stem, error=str(e))
+            sid = _slug(path.stem)
+            row["set"] = sid if self.set_path(sid).exists() else None
+            out.append(row)
+        return out
+
+    def select_plan(self, name: str) -> dict[str, Any] | None:
+        """换成以前放进来的那一份打碟谱（那一套 set）：它变成当前的，曲子齐了就重新生成 set。"""
+        path = self.plans_dir / Path(name).name
+        if path.suffix.lower() not in self.PLAN_SUFFIXES or not path.is_file():
+            raise StudioError(f"没有这份打碟谱：{name}")
+        if (self.job and self.job.state == "running") or (self.conductor and self.conductor.running):
+            raise StudioError("正在分析或演出，等它完了再换")
+        path.touch()  # 最近的 = 当前的
+        with self._auto_lock:
+            self._auto_key = None
+        self.find_plan_tracks()  # 缺的曲子去电脑里找；齐了自动开始分析
+        return self.plan_status()
+
     def current_plan(self) -> Path | None:
         """最近放进来的打碟谱。"""
         if not self.plans_dir.exists():
@@ -791,10 +827,11 @@ class Studio:
         from .plan import cdw, mdplan
 
         key = (str(path), path.stat().st_mtime)
-        if self._plan_cache and self._plan_cache[0] == key:
-            return self._plan_cache[1]
+        if key in self._plan_cache:
+            return self._plan_cache[key]
         plan = (mdplan.parse if path.suffix.lower() in mdplan.SUFFIXES else cdw.parse)(path)
-        self._plan_cache = (key, plan)
+        self._plan_cache = {k: v for k, v in self._plan_cache.items() if k[0] != key[0]}
+        self._plan_cache[key] = plan
         return plan
 
     def _wait_analysis(self, job: Job, lo: float, hi: float, what: str) -> None:
@@ -988,8 +1025,11 @@ class Studio:
         if not path:
             raise StudioError("还没有打碟谱：把谱（.md 或 PDF）拖进来")
         if self.builtin:
-            return self.start_job("分析", lambda job: self._auto(job, path, settle), self.BUILTIN_STAGES, self.BUILTIN_WEIGHTS)
-        return self.start_job("分析", lambda job: self._auto(job, path, settle), self.AUTO_STAGES, self.AUTO_WEIGHTS)
+            job = self.start_job("分析", lambda job: self._auto(job, path, settle), self.BUILTIN_STAGES, self.BUILTIN_WEIGHTS)
+        else:
+            job = self.start_job("分析", lambda job: self._auto(job, path, settle), self.AUTO_STAGES, self.AUTO_WEIGHTS)
+        job.plan = path.name
+        return job
 
     def _auto(self, job: Job, path: Path, settle: float) -> dict[str, Any]:
         from .plan.convert import convert, match_tracks
@@ -1076,7 +1116,7 @@ class Studio:
             # 6 准备 Mixxx：部署引擎、写 AutoDJ 队列、启动 Mixxx、等引擎上线
             step("准备 Mixxx")
             self._prepare(job, s.id, settle)
-        return {"set": s.id, "duration": c.duration,
+        return {"set": s.id, "plan": path.name, "duration": c.duration,
                 "notes": [vars(n) for n in conv.notes if n.level != "info"],
                 "issues": [{"level": i.level, "where": i.where, "msg": i.msg} for i in c.issues]}
 

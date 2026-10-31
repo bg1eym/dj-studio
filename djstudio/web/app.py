@@ -206,6 +206,16 @@ def create_app(studio: Studio) -> FastAPI:
         st = studio.plan_status()
         return {**st, "finder": studio.finder} if st else None
 
+    @app.get("/api/plans")
+    def api_plans() -> list[dict[str, Any]]:
+        """放进来过的打碟谱（一份 = 一套 set），新的在前。"""
+        return studio.plans()
+
+    @app.post("/api/plans/select")
+    def api_plans_select(body: dict[str, Any] = Body(...)) -> dict[str, Any] | None:
+        st = studio.select_plan(str(body.get("file") or ""))
+        return {**st, "finder": studio.finder} if st else None
+
     @app.post("/api/auto")
     def api_auto() -> dict[str, Any]:
         return studio.auto_prepare().to_dict()

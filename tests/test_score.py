@@ -217,7 +217,7 @@ def test_header_errors():
     with pytest.raises(PlanError, match="手法"):
         score(ok_rows, HEAD.replace("- 手法：长交接\n", ""))
     with pytest.raises(PlanError, match="规范"):
-        score(ok_rows, HEAD.replace("# 测试谱\n", "# 测试谱\n\n- 规范：v3\n"))
+        score(ok_rows, HEAD.replace("# 测试谱\n", "# 测试谱\n\n- 规范：v4\n"))
     with pytest.raises(PlanError, match="曲目"):
         mdplan.parse_text("# 随便写的笔记\n\n今天练了长交接。\n")
     plan = score(ok_rows, HEAD.replace("- 进场", "- 主速：128 → 130，B 第 9–12 小节换\n- 进场"))
@@ -272,7 +272,7 @@ def test_upload_md_score_and_download_docs(tmp_path):
     assert r.status_code == 422 and "行" in r.json()["detail"] and "结束" in r.json()["detail"]
     assert client.get("/api/plan").json()["file"] == "我的谱.md"  # 读不了的谱不算当前打碟谱
     spec = client.get("/api/score/spec.md")
-    assert spec.status_code == 200 and spec.text.startswith("# 打碟谱规范 v2")
+    assert spec.status_code == 200 and spec.text.startswith("# 打碟谱规范 v3")
     tmpl = client.get("/api/score/template.md", params={"download": 1})
     assert tmpl.status_code == 200 and "attachment" in tmpl.headers["content-disposition"]
     assert mdplan.parse_text(tmpl.text).title == "我的 set 打碟谱"
@@ -337,3 +337,103 @@ def test_too_many_points_keep_in_out_stop_first():
     s = s.model_copy(update={"tracks": [s.tracks[0].model_copy(update={"hot_cues": mine}), s.tracks[1]]})
     s = fill_hot_cues(s, compile_with(s, tracks))
     assert [(h.pad, h.name) for h in s.tracks[0].hot_cues][:2] == [(1, "IN"), (2, "OUT")]
+
+
+# ---------------------------------------------------------------- 谱上的 hot cue 说了算（IN / OUT / STOP / FADE）
+
+def with_cues(rows_cues: dict[int, str], text: str | None = None) -> str:
+    """模板里给 #1 / #2 加 hot cue 表（#3 的表模板里已经有）。"""
+    t = text or TEMPLATE.read_text(encoding="utf-8")
+    extra = ""
+    for no, rows in rows_cues.items():
+        extra += f"### #{no} 加的\n\n| 垫 | 名字 | 颜色 | 位置 | 注释 |\n|---|---|---|---|---|\n{rows}\n\n"
+    return t.replace("### #3 Track Three", extra + "### #3 Track Three")
+
+
+def test_template_entry_comes_from_the_in_cue():
+    tr = mdplan.parse(TEMPLATE).transitions[1]
+    assert tr.b_in == 33 and tr.b1_at_a == 97  # 「进场：B 的 IN 落在 A 的第 97 小节」，IN 在 #3 的 33.1
+
+
+def test_matching_in_out_stop_cues_parse():
+    t = with_cues({1: "| 2 | OUT | | 121.1 | |", 2: "| 1 | IN | | 1.1 | |\n| 7 | MIX OUT | | 93 | |\n| 8 | STOP | | 97.1 | |"})
+    plan = mdplan.parse_text(t)
+    assert plan.transitions[0].b_in == 1 and not plan.cue_checks
+    # 开场按 #1 的 IN
+    base = TEMPLATE.read_text(encoding="utf-8").replace("- 开场：从第 1 小节起播\n", "")
+    plan = mdplan.parse_text(with_cues({1: "| 1 | IN | | 17.1 | |"}, base))
+    assert plan.start_bar == 17
+    # 结尾只写淡出几小节：从 FADE 开始
+    t3 = t.replace("- 结尾：从第 177 小节淡出，淡出 16 小节", "- 结尾：淡出 16 小节").replace(
+        "| 8 | DROP 2 | 橙 | 113.1 | 第二个 drop |", "| 8 | FADE | | 161.1 | |")
+    assert mdplan.parse_text(t3).ending == (161.0, 16.0)
+
+
+@pytest.mark.parametrize("cues,words", [
+    ({2: "| 1 | IN | | 5.1 | |"}, "以 hot cue 为准"),  # 进场写 B 第 1 小节，IN 在 5
+    ({1: "| 2 | OUT | | 117.1 | |"}, "表的第一行就是 OUT"),
+    ({2: "| 8 | STOP | | 96.1 | |"}, "改成一样的"),
+    ({1: "| 8 | STOP | | 160.1 | |"}, "要写「停」"),  # 过渡 1 的最后一行是「结束」
+    ({2: "| 1 | IN | | 1.3 | |"}, "第 1 拍"),
+    ({2: "| 1 | IN | | 1.1 | |\n| 2 | MIX IN | | 1.1 | |"}, "两个 IN"),
+    ({1: "| 1 | IN | | 9.1 | |"}, "开场写的是第 1 小节"),
+])
+def test_cues_that_disagree_with_the_score_are_errors(cues, words):
+    with pytest.raises(PlanError) as e:
+        mdplan.parse_text(with_cues(cues))
+    assert words in str(e.value) and "第 " in str(e.value), str(e.value)
+
+
+def test_fade_cue_needs_ending_and_must_match():
+    t = TEMPLATE.read_text(encoding="utf-8").replace("| 8 | DROP 2 | 橙 | 113.1 | 第二个 drop |", "| 8 | FADE | | 161.1 | |")
+    with pytest.raises(PlanError, match="以 hot cue 为准"):
+        mdplan.parse_text(t)
+    with pytest.raises(PlanError, match="淡出 M 小节"):
+        mdplan.parse_text(t.replace("- 结尾：从第 177 小节淡出，淡出 16 小节\n", ""))
+
+
+def test_entry_without_b_bar_needs_an_in_cue():
+    t = TEMPLATE.read_text(encoding="utf-8").replace("| 1 | IN | 绿 | 33.1 | 从 drop 满推子切进来（过渡 2 的进场按它） |\n", "")
+    with pytest.raises(PlanError, match="写 IN"):
+        mdplan.parse_text(t)
+
+
+def test_time_written_in_cue_is_checked_against_the_beat_grid():
+    """IN 用时间写：曲子分析完后换成拍，必须和进场写的小节是同一拍；差几十毫秒提示。"""
+    bar = 4 * 60 / 132
+    t = TEMPLATE.read_text(encoding="utf-8").replace("| 1 | IN | 绿 | 33.1 |", f"| 1 | IN | 绿 | 0:{0.12 + 32 * bar:06.3f} |")
+    t = t.replace("- 进场：B 的 IN 落在 A 的第 97 小节", "- 进场：B 的第 33 小节落在 A 的第 97 小节")
+    plan = mdplan.parse_text(t)
+    assert len(plan.cue_checks) == 1 and plan.cue_checks[0].bar == 33
+    assert convert(plan, lib()).ok
+    plan = mdplan.parse_text(t.replace("B 的第 33 小节落在", "B 的第 34 小节落在").replace("| 97 停 | 33 |", "| 97 停 | 34 |"))
+    conv = convert(plan, lib())
+    assert not conv.ok and any("hot cue IN" in n.msg and "33.1" in n.msg for n in conv.notes if n.level == "error")
+    late = t.replace(f"0:{0.12 + 32 * bar:06.3f}", f"0:{0.12 + 32 * bar + 0.04:06.3f}")  # 晚 40ms
+    conv = convert(mdplan.parse_text(late), lib())
+    assert conv.ok and any("+40ms" in n.msg for n in conv.notes if n.level == "warn")
+    with pytest.raises(PlanError, match="用时间写"):
+        mdplan.parse_text(t.replace("- 进场：B 的第 33 小节落在 A 的第 97 小节", "- 进场：B 的 IN 落在 A 的第 97 小节"))
+
+
+def test_switch_between_sets(tmp_path):
+    """换一套 set：新放进来的谱是当前的，以前的都还在列表里，可以换回去。"""
+    import os
+    import time as _time
+
+    from tests.test_web import make_client
+
+    client = make_client(tmp_path)
+    old = TEMPLATE.read_text(encoding="utf-8").replace("# 我的 set 打碟谱", "# 旧的 14 首")
+    new = TEMPLATE.read_text(encoding="utf-8").replace("# 我的 set 打碟谱", "# 新的 18 首")
+    assert client.put("/api/upload", params={"name": "old.md"}, content=old.encode()).status_code == 200
+    plans_dir = tmp_path / "home" / "plans"
+    os.utime(plans_dir / "old.md", (_time.time() - 60, _time.time() - 60))
+    assert client.put("/api/upload", params={"name": "new.md"}, content=new.encode()).status_code == 200
+    plans = client.get("/api/plans").json()
+    assert [(p["file"], p["title"], p["current"]) for p in plans] == [("new.md", "新的 18 首", True), ("old.md", "旧的 14 首", False)]
+    assert client.get("/api/plan").json()["title"] == "新的 18 首"
+    st = client.post("/api/plans/select", json={"file": "old.md"}).json()
+    assert st["title"] == "旧的 14 首" and client.get("/api/plan").json()["file"] == "old.md"
+    assert [p["current"] for p in client.get("/api/plans").json()] == [True, False]  # 换回去的在最前
+    assert client.post("/api/plans/select", json={"file": "../etc/passwd"}).status_code >= 400

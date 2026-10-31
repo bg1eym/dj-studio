@@ -307,7 +307,7 @@ async function addFiles(list) {
     try {
       const r = await putFile(u.file, (fr) => { u.frac = fr; renderHomeUploads(); });
       u.state = "ok";
-      if (r.kind === "plan") S.plan = r.plan;
+      if (r.kind === "plan") { S.plan = r.plan; S.homeNew = false; S.homeSkipJob = S.job ? S.job.started : null; }
     } catch (e) {
       u.state = "err";
       u.msg = e.message;
@@ -328,12 +328,44 @@ function schedulePlanReload() {
   }, 400);
 }
 
+// 首页最上面一行：现在是哪一套 set（哪一份打碟谱），换一套 / 新 set
+function setBar() {
+  const bar = h("div", { class: "set-bar" });
+  const fill = (plans) => {
+    bar.innerHTML = "";
+    bar.append(h("span", { class: "dim" }, "Set"));
+    if (plans.length) {
+      const sel = h("select", { class: "set-pick", title: "放进来过的打碟谱，一份 = 一套 set",
+        onchange: (e) => guard(async () => {
+          const st = await api("POST", "/api/plans/select", { file: e.target.value });
+          S.plan = st; S.homeNew = false; S.homeSkipJob = S.job ? S.job.started : null;
+          renderHome(true);
+        }) },
+        plans.map((pl) => h("option", { value: pl.file, selected: pl.current && !S.homeNew },
+          `${pl.title}${pl.n_tracks ? `（${pl.n_tracks} 首）` : ""}${pl.error ? "（读不了）" : ""}`)),
+        S.homeNew ? h("option", { value: "", selected: true, disabled: true }, "新 set（拖打碟谱进来）") : null);
+      bar.append(sel);
+    } else {
+      bar.append(h("span", {}, "还没有"));
+    }
+    bar.append(h("span", { class: "grow" }), S.homeNew
+      ? h("button", { onclick: () => { S.homeNew = false; renderHome(true); } }, "取消")
+      : h("button", { onclick: () => { S.homeNew = true; renderHome(true); }, title: "换一套歌：放新的打碟谱进来，以前的 set 都留着" }, "＋ 新 set"));
+  };
+  fill(S.plans || []);
+  api("GET", "/api/plans").then((plans) => { S.plans = plans; fill(plans); }).catch(() => {});
+  return bar;
+}
+
 // 首页现在该显示哪一屏
 function homeMode() {
   const p = S.plan;
-  const job = S.job && S.job.name === "分析" && S.job.started !== S.homeSkipJob ? S.job : null;
+  const aj = S.job && S.job.name === "分析" && S.job.started !== S.homeSkipJob ? S.job : null;
+  // 只认当前这份谱的分析：换了一套 set（新放进来的谱）以后，上一套的「可以演出了」不算
+  const job = aj && (!aj.plan || (p && !p.error && aj.plan === p.file)) ? aj : null;
   const prog = S.progress;
   if (S.state && S.state.playing) return "live";
+  if (S.homeNew) return "drop";
   if (job && job.state === "running") return "job";
   if (prog && prog.finished_at && S.homeDone !== prog.started_at) return "live"; // 播完 / 停下：先停在演出画面，点「回到开始」再回来
   if (job && job.state === "error") return "error";
@@ -385,13 +417,14 @@ async function renderHome(force = false) {
   root.innerHTML = "";
   const card = h("div", { class: "home" });
   root.append(card);
+  card.append(setBar());
   if (mode === "drop" || mode === "plan") {
     const input = h("input", { type: "file", multiple: true, accept: "audio/*,.pdf,application/pdf,.md,.markdown,text/markdown", class: "hidden",
       onchange: (e) => { addFiles([...e.target.files]); e.target.value = ""; } });
     const drop = h("div", { class: "drop" + (mode === "plan" ? " small" : ""), onclick: () => input.click() },
-      h("div", { class: "drop-big" }, mode === "drop" ? "把打碟谱拖到这里（.md 或 PDF）" : "缺的曲子拖到这里"),
+      h("div", { class: "drop-big" }, mode === "drop" ? (S.homeNew ? "新 set：把这一套的打碟谱拖到这里（.md 或 PDF）" : "把打碟谱拖到这里（.md 或 PDF）") : "缺的曲子拖到这里"),
       h("div", { class: "dim" }, mode === "drop"
-        ? "曲子可以一起拖进来（文件或整个文件夹）。没拖进来的，会按谱上的文件名去「下载 / 桌面 / 文稿 / 音乐」里找。"
+        ? "这一套的曲子可以一起拖进来（文件或整个文件夹）。没拖进来的，会按谱上的文件名去「下载 / 桌面 / 文稿 / 音乐」里找。以前的 set 都还在，上面可以换回去。"
         : "文件或整个文件夹都行；也可以点这里选文件。"));
     // 写谱用的：规范 + 模板（复制模板改成自己的 set）
     const docs = h("div", { class: "dim score-docs" }, "自己写谱：",
@@ -518,7 +551,7 @@ function renderHomeJob() {
       h("a", { href: `/api/sets/${r.set}/cuesheet.md`, target: "_blank", title: "按播放规范（docs/SET_SPEC.md）生成的 hot cue：打击垫 1–8、名字、颜色、位置" }, "Hot Cue 表（Prime 4+）"),
       h("a", { href: `/api/sets/${r.set}/cuesheet.md?download=1` }, "下载 .md"),
       h("span", { class: "grow" }),
-      h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeSkipJob = job.started; renderHome(true); } }, "换一份打碟谱")));
+      h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeNew = true; renderHome(true); } }, "＋ 新 set")));
   }
   el.append(h("details", { class: "job-log" }, h("summary", {}, "详细日志"), h("div", { class: "log" }, job.log.join("\n"))));
 }
