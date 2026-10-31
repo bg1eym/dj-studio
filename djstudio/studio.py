@@ -780,19 +780,25 @@ class Studio:
     def inbox_dir(self) -> Path:
         return self.cfg.home / "inbox" / "上传"
 
+    PLAN_SUFFIXES = (".pdf", ".md", ".markdown")  # PDF 模板，或按《打碟谱规范》（docs/SCORE_SPEC.md）写的 Markdown
+
     def current_plan(self) -> Path | None:
         """最近放进来的打碟谱。"""
-        pdfs = sorted(self.plans_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime) if self.plans_dir.exists() else []
-        return pdfs[-1] if pdfs else None
+        if not self.plans_dir.exists():
+            return None
+        plans = sorted((p for p in self.plans_dir.iterdir()
+                        if p.suffix.lower() in self.PLAN_SUFFIXES and not p.name.startswith(".") and p.is_file()),
+                       key=lambda p: p.stat().st_mtime)
+        return plans[-1] if plans else None
 
     def load_plan(self, path: Path) -> Any:
         """读打碟谱（按文件修改时间缓存：35 页的 PDF 读一次要一两秒）。"""
-        from .plan.cdw import parse
+        from .plan import cdw, mdplan
 
         key = (str(path), path.stat().st_mtime)
         if self._plan_cache and self._plan_cache[0] == key:
             return self._plan_cache[1]
-        plan = parse(path)
+        plan = (mdplan.parse if path.suffix.lower() in mdplan.SUFFIXES else cdw.parse)(path)
         self._plan_cache = (key, plan)
         return plan
 
@@ -985,7 +991,7 @@ class Studio:
         settle = self.AUTO_SETTLE if settle is None else settle
         path = plan_path or self.current_plan()
         if not path:
-            raise StudioError("还没有打碟谱：把 PDF 拖进来")
+            raise StudioError("还没有打碟谱：把谱（.md 或 PDF）拖进来")
         if self.builtin:
             return self.start_job("分析", lambda job: self._auto(job, path, settle), self.BUILTIN_STAGES, self.BUILTIN_WEIGHTS)
         return self.start_job("分析", lambda job: self._auto(job, path, settle), self.AUTO_STAGES, self.AUTO_WEIGHTS)

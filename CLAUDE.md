@@ -21,7 +21,11 @@
 以及 Denon Prime 4+ 格式的 hot cue（8 个打击垫的用途、名字、颜色、位置、中文注释）。生成的 set 写 `"spec": "1"`。
 规范的表和代码由 `tests/test_setspec.py` 比对，改一边要同时改另一边。
 
-**《打碟谱》模板（如《CDW 技法实战 set 打碟谱》）由网页首页自动转换**（`djstudio/plan/`，确定性规则，见 docs/SET_FORMAT.md「从打碟谱自动生成」），不需要 Claude 手工转。模板变了就扩展 `djstudio/plan/cdw.py` 并加测试。其它格式的方案按下面的步骤手工转：
+**用户自己写谱**，按《打碟谱规范》[docs/SCORE_SPEC.md](docs/SCORE_SPEC.md)（Markdown，模板 docs/score_template.md），拖到网页首页自动转换（`djstudio/plan/mdplan.py`）。
+规范的表由 `tests/test_score.py` 比对代码，模板必须能解析、换算、编译通过；规范改了升版本号（`mdplan.SCORE_SPEC_VERSION`）。
+帮用户把别的格式的方案改写成打碟谱时，照 SCORE_SPEC.md 写 .md，拖进去零错误再交给用户。
+
+**《打碟谱》PDF 模板（如《CDW 技法实战 set 打碟谱》）也由网页首页自动转换**（`djstudio/plan/`，确定性规则，见 docs/SET_FORMAT.md「从打碟谱自动生成」），不需要 Claude 手工转。模板变了就扩展 `djstudio/plan/cdw.py` 并加测试。其它格式的方案按下面的步骤手工转：
 
 1. 在曲库里找到每首歌的 id（`GET /api/tracks` 或网页曲库）；找不到的先让用户导入。
 2. **小节号以本应用的波形为准**（第 1 小节 = 曲中最早的小节线，小节线由用户确认）。方案若用别的编号，先对齐，并在 note 里写明。

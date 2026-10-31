@@ -1,6 +1,6 @@
 # DJ Studio
 
-**自动打碟 Web App**：放进打碟谱 PDF → 自动找到曲子并分析 → 按谱在 Mixxx 的引擎里自动混完整套，网页上看每个旋钮怎么动，耳朵听结果。
+**自动打碟 Web App**：放进打碟谱（自己按规范写的 .md，或 PDF 模板）→ 自动找到曲子并分析 → 按谱在 Mixxx 的引擎里自动混完整套，网页上看每个旋钮怎么动，耳朵听结果。
 
 - **独立的 Mac 应用（DJ Studio.app）**：网页服务、Python、声音引擎都在里面，不用装 Homebrew / Python / ffmpeg / Node，也不碰你装的 Mixxx。
 - **声音引擎** `djstudio-engine`：只用 Mixxx 2.5.6 源码里打碟要用的部分（deck、混音器、EQ / 滤波 / Echo / Reverb、同步、控制器脚本引擎、解码），
@@ -9,6 +9,13 @@
 - 过渡手法：**长交接**（longhand）/ **瞬时切换**（instant）/ **自定义**（custom，逐小节旋钮位）。
 - 只绑 `127.0.0.1`，只在本机浏览器使用。
 - 还保留连本机 Mixxx 的模式（`DJSTUDIO_ENGINE=mixxx`，经 IAC 虚拟 MIDI），见 [docs/DEVICE_TEST.md](docs/DEVICE_TEST.md)。
+
+## 打碟谱规范（自己写谱）
+
+谱由你写，DJ Studio 照谱打碟：[docs/SCORE_SPEC.md](docs/SCORE_SPEC.md)《打碟谱规范》说明怎么写——曲目表、Prime 4+ 的 Hot Cue（8 个打击垫）、
+每段过渡逐小节的旋钮位（EQ / Filter 钟点位、推子 0–10、Echo / Reverb 湿度、换速）。
+复制模板 [docs/score_template.md](docs/score_template.md)（一份能直接跑的 3 首例子）改成自己的，存成 .md 拖到首页；写错了网页会报第几行。
+首页也能下载规范和模板。
 
 ## Set 播放规范
 
@@ -67,7 +74,7 @@ git clone https://github.com/bg1eym/dj-studio ~/dj-studio && cd ~/dj-studio && p
 
 网页只有一页：
 
-1. **放进打碟谱**：把打碟谱 PDF 拖进网页（曲子可以一起拖，文件或整个文件夹都行）。
+1. **放进打碟谱**：把打碟谱（按《打碟谱规范》写的 .md，或 PDF 模板）拖进网页（曲子可以一起拖，文件或整个文件夹都行）。
    谱上的曲子没拖进来的，程序按谱上的文件名去「下载 / 桌面 / 文稿 / 音乐」里找（编号、下划线、艺人写法不同都认；时长不对的不要），
    找到就复制进托管曲库。找不到的会列出来，拖进来就行。
 2. **分析**：曲子齐了自动开始，一个进度条，不用管——
@@ -80,7 +87,7 @@ git clone https://github.com/bg1eym/dj-studio ~/dj-studio && cd ~/dj-studio && p
 → 准备 Mixxx（部署引擎脚本、写 AutoDJ 队列、启动、等引擎上线）；开始演出只能从头、原速。
 
 右上角「高级」里是控制台（预演、单独准备）、曲库（波形、小节线、校正网格）、Set（逐段编辑、曲线预览、JSON）和体检。
-不是《打碟谱》模板的编排方案，交给 Claude 转成 set JSON 后在 Set 页粘贴。
+别的格式的编排方案：照《打碟谱规范》改写成 .md（或交给 Claude 转成 set JSON 后在 Set 页粘贴）。
 
 ### 更新
 

@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -18,6 +19,7 @@ from ..library.analysis import downbeat_from_bar1
 from ..library.audio import AUDIO_EXTS
 from ..library.importer import browse
 from ..library.store import Track
+from ..plan.mdplan import score_doc
 from ..mixxx.db import MixxxTrack
 from ..engine.bundled import engine_binary
 from ..selfupdate import version_text
@@ -164,12 +166,13 @@ def create_app(studio: Studio) -> FastAPI:
 
     @app.put("/api/upload")
     async def api_upload(request: Request, name: str) -> dict[str, Any]:
-        """网页拖进来的文件（请求体就是文件内容）。音频进托管曲库并开始分析；PDF 当作打碟谱。"""
+        """网页拖进来的文件（请求体就是文件内容）。音频进托管曲库并开始分析；PDF / .md 当作打碟谱。"""
         fname = Path(name).name.strip()
         ext = Path(fname).suffix.lower()
-        if not fname or fname.startswith(".") or (ext != ".pdf" and ext not in AUDIO_EXTS):
-            raise HTTPException(400, f"不认识的文件：{name}（要音频文件或打碟谱 PDF）")
-        dest_dir = studio.plans_dir if ext == ".pdf" else studio.inbox_dir
+        is_plan = ext in studio.PLAN_SUFFIXES
+        if not fname or fname.startswith(".") or (not is_plan and ext not in AUDIO_EXTS):
+            raise HTTPException(400, f"不认识的文件：{name}（要音频文件，或打碟谱 .md / PDF）")
+        dest_dir = studio.plans_dir if is_plan else studio.inbox_dir
         dest_dir.mkdir(parents=True, exist_ok=True)
         tmp = dest_dir / f".{fname}.part"
         size = 0
@@ -182,11 +185,11 @@ def create_app(studio: Studio) -> FastAPI:
             raise HTTPException(400, f"{fname} 是空文件")
         dest = dest_dir / fname
         tmp.replace(dest)
-        if ext == ".pdf":
+        if is_plan:
             dest.touch()  # 最近放进来的打碟谱 = 当前打碟谱
             st = studio.plan_status()
             if st and st.get("error"):
-                dest.rename(dest.with_suffix(".pdf.bad"))
+                dest.replace(dest.with_name(dest.name + ".bad"))
                 raise HTTPException(422, f"读不了这份打碟谱：{st['error']}")
             studio.find_plan_tracks()  # 谱上还缺的歌去电脑里找；齐了自动开始分析
             return {"kind": "plan", "plan": st}
@@ -305,6 +308,21 @@ def create_app(studio: Studio) -> FastAPI:
         start = (track, bar) if track is not None and bar is not None else None
         s = studio.rehearsal_set(studio.load(sid), rehearse_from, start)
         return {"set": json.loads(s.to_json()), "compiled": compiled_json(studio.compile(s, resume=start is not None))}
+
+    @app.get("/api/score/{name}")
+    def api_score_doc(name: str, download: int = 0) -> Response:
+        """《打碟谱规范》和打碟谱模板（docs/SCORE_SPEC.md、docs/score_template.md）：写谱时照着用。"""
+        files = {"spec.md": ("SCORE_SPEC.md", "打碟谱规范.md"), "template.md": ("score_template.md", "打碟谱模板.md")}
+        if name not in files:
+            raise HTTPException(404, name)
+        src, save_as = files[name]
+        path = score_doc(src)
+        if path is None:
+            raise HTTPException(404, f"找不到 {src}")
+        disp = "attachment" if download else "inline"
+        return Response(path.read_text(encoding="utf-8"),
+                        media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
+                        headers={"Content-Disposition": f"{disp}; filename=\"{src}\"; filename*=UTF-8''{quote(save_as)}"})
 
     @app.get("/api/sets/{sid}/cuesheet.md")
     def api_cuesheet(sid: str, download: int = 0) -> Response:

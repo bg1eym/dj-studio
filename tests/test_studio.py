@@ -543,6 +543,81 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     assert f"第 {rp['bar']:g} 小节" in log and "tr1 开始" in log and "B 起播" in log, log
 
 
+def test_markdown_score_drives_the_builtin_flow(tmp_path, monkeypatch):
+    """按《打碟谱规范》写的 .md 谱：拖进来 → 找曲子 → 分析 → 生成 set（谱上写的 hot cue、「停」）→ 在模拟器里播完。"""
+    def boom(*a, **k):
+        raise AssertionError("内置引擎不该碰 Mixxx")
+
+    for name in ("mixxx_running", "launch_mixxx", "quit_mixxx"):
+        monkeypatch.setattr(process, name, boom)
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a.wav", "b.wav"):
+        bpm, fb, db = SPECS[name]
+        write_wav(src / name, techno(bpm, fb, db, LAYOUT, seed=hash(name) % 100))
+    cfg = Config(home=tmp_path / "home", library=tmp_path / "Music" / "DJStudio", mixxx_dir=tmp_path / "no-mixxx",
+                 browse_roots=[tmp_path], find_dirs=[src])
+    studio = Studio(cfg, link_factory=boom)
+    ba, fa, da = SPECS["a.wav"]
+    bb, fb_, db_ = SPECS["b.wav"]
+    score = f"""# Markdown 测试谱
+
+- 规范：v1
+
+## 曲目
+
+| # | 曲名 | 文件名 | 原 BPM | 播放 BPM | 第 1 小节（秒） |
+|---|---|---|---|---|---|
+| 1 | A | a.wav | {ba:g} | {ba:g} | {fa + da * 60 / ba:.4f} |
+| 2 | B | b.wav | {bb:g} | {ba:g} | {fb_ + db_ * 60 / bb:.4f} |
+
+## Hot Cue
+
+### #2 B
+
+| 垫 | 名字 | 位置 | 注释 |
+|---|---|---|---|
+| 4 | DROP 1 | 33.1 | 谱上写的 drop |
+
+## 过渡 1：A → B
+
+- 手法：长交接
+- 进场：B 的第 1 小节落在 A 的第 25 小节
+- 主速：{ba:g}
+
+| A 小节 | B 小节 | A LOW | B LOW | B 推子 |
+|---|---|---|---|---|
+| 21 | — | 12点 | — | — |
+| 25 | 1 | | 7点 | 5 |
+| 33 | 9 | 10点 | 12点 | 10 |
+| 41 停 | 17 | 7点 | | |
+"""
+    studio.plans_dir.mkdir(parents=True, exist_ok=True)
+    (studio.plans_dir / "测试谱.md").write_text(score, encoding="utf-8")
+    st = studio.plan_status()
+    assert st and not st.get("error") and st["file"] == "测试谱.md" and st["n_transitions"] == 1, st
+    studio.find_plan_tracks()  # 按谱上的文件名找到曲子 → 自动开始分析
+    t0 = time.time()
+    while (studio.finder.get("state") == "running" or not studio.job) and time.time() - t0 < 30:
+        time.sleep(0.1)
+    job = wait_job(studio.job, 120)
+    assert job.state == "ok", "\n".join(job.log)
+    s = studio.load(job.result["set"])
+    assert s.id.startswith("plan-") and s.spec == "1"  # 中文文件名：set id 带哈希
+    tr = s.transitions[0]
+    assert tr.params == {"a_end": "stop"} and tr.events == [[20.0, "A.stop"]] and tr.play_at == 4
+    b_pads = {h.pad: h for h in s.tracks[1].hot_cues}
+    assert b_pads[4].bar == 33 + s.tracks[1].plan_bar_offset and b_pads[4].note == "谱上写的 drop"
+    a_pads = {h.pad: h for h in s.tracks[0].hot_cues}
+    assert b_pads[2].name == "MIX IN" and b_pads[2].bar == tr.b_in and s.tracks[1].main_cue == tr.b_in
+    assert a_pads[7].bar == tr.start and a_pads[8].bar == tr.start + 20 and a_pads[8].note == "A 在这里停"
+    studio.play(s.id, speed=40)
+    studio.conductor.join(60)
+    p = studio.conductor.progress
+    assert p.stage == "done", "\n".join(p.log) + f"\n{p.error}"
+
+
 def test_waveform_is_denon_tri_band():
     """波形数据是 Denon 三频段：三段按 Denon 的分界各自取音量、按满幅标定。
     60 Hz 正弦只出低频（蓝），1 kHz 只出中频（绿），6 kHz 只出高频（白）；-6 dBFS 的低频画满。"""

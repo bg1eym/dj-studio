@@ -258,6 +258,8 @@ header.top a.brand { color: var(--text); }
 .drop.small { padding: 18px 20px; }
 .drop:hover, .drop.over { border-color: var(--accent); background: #142033; }
 .drop-big { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+.score-docs { margin-top: 10px; text-align: center; font-size: 13px; }
+.score-docs a { color: var(--accent); }
 .up-line { display: flex; gap: 10px; align-items: center; font-size: 13px; }
 .up-name { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .up-bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }

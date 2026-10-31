@@ -245,7 +245,9 @@ function updateEngineBadge() {
 // ------------------------------------------------------------------ 首页：一页走完 放进打碟谱 → 分析 → 演出
 
 const UP = { files: [], busy: false };
-const UPLOAD_EXTS = ["pdf", "mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "opus"];
+const PLAN_EXTS = ["pdf", "md", "markdown"]; // 打碟谱：PDF 模板，或按《打碟谱规范》写的 .md
+const isPlanFile = (name) => PLAN_EXTS.includes(name.toLowerCase().split(".").pop());
+const UPLOAD_EXTS = ["pdf", "md", "markdown", "mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "opus"];
 
 function putFile(file, onprog) {
   return new Promise((resolve, reject) => {
@@ -263,35 +265,41 @@ function putFile(file, onprog) {
   });
 }
 
-// 拖进来的可以是文件，也可以是整个文件夹（里面的音频和 PDF 都收，别的跳过）
+// 拖进来的可以是文件，也可以是整个文件夹（里面的音频和 PDF 都收，别的跳过；文件夹里的 .md 多半是说明文字，不当打碟谱）
 function filesFromDrop(dt) {
   const entries = [...(dt.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
   if (!entries.length) return Promise.resolve([...dt.files]);
   const out = [];
-  const walk = async (entry) => {
-    if (entry.isFile) { out.push(await new Promise((res, rej) => entry.file(res, rej))); return; }
+  const walk = async (entry, inDir) => {
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      if (inDir) f.djsInDir = true;
+      out.push(f);
+      return;
+    }
     if (!entry.isDirectory) return;
     const reader = entry.createReader();
     for (;;) {
       const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
       if (!batch.length) break;
-      for (const e of batch) await walk(e).catch(() => {});
+      for (const e of batch) await walk(e, true).catch(() => {});
     }
   };
-  return Promise.all(entries.map((e) => walk(e).catch(() => {}))).then(() => out);
+  return Promise.all(entries.map((e) => walk(e, false).catch(() => {}))).then(() => out);
 }
 
 async function addFiles(list) {
   for (const f of list) {
     const ext = f.name.toLowerCase().split(".").pop();
     if (f.name.startsWith(".") || !UPLOAD_EXTS.includes(ext)) continue; // 文件夹里的封面、文本之类直接跳过
+    if (f.djsInDir && ext !== "pdf" && isPlanFile(f.name)) continue;
     UP.files.push({ name: f.name, file: f, state: "queued", frac: 0 });
   }
   renderHomeUploads();
   if (UP.busy) return;
   UP.busy = true;
   // 打碟谱先传：一读到谱，就能开始在电脑里找曲子
-  const order = () => UP.files.filter((u) => u.state === "queued").sort((a, b) => (b.name.toLowerCase().endsWith(".pdf") ? 1 : 0) - (a.name.toLowerCase().endsWith(".pdf") ? 1 : 0));
+  const order = () => UP.files.filter((u) => u.state === "queued").sort((a, b) => (isPlanFile(b.name) ? 1 : 0) - (isPlanFile(a.name) ? 1 : 0));
   for (let q = order(); q.length; q = order()) {
     const u = q[0];
     u.state = "sending";
@@ -378,17 +386,22 @@ async function renderHome(force = false) {
   const card = h("div", { class: "home" });
   root.append(card);
   if (mode === "drop" || mode === "plan") {
-    const input = h("input", { type: "file", multiple: true, accept: "audio/*,.pdf,application/pdf", class: "hidden",
+    const input = h("input", { type: "file", multiple: true, accept: "audio/*,.pdf,application/pdf,.md,.markdown,text/markdown", class: "hidden",
       onchange: (e) => { addFiles([...e.target.files]); e.target.value = ""; } });
     const drop = h("div", { class: "drop" + (mode === "plan" ? " small" : ""), onclick: () => input.click() },
-      h("div", { class: "drop-big" }, mode === "drop" ? "把打碟谱 PDF 拖到这里" : "缺的曲子拖到这里"),
+      h("div", { class: "drop-big" }, mode === "drop" ? "把打碟谱拖到这里（.md 或 PDF）" : "缺的曲子拖到这里"),
       h("div", { class: "dim" }, mode === "drop"
         ? "曲子可以一起拖进来（文件或整个文件夹）。没拖进来的，会按谱上的文件名去「下载 / 桌面 / 文稿 / 音乐」里找。"
         : "文件或整个文件夹都行；也可以点这里选文件。"));
+    // 写谱用的：规范 + 模板（复制模板改成自己的 set）
+    const docs = h("div", { class: "dim score-docs" }, "自己写谱：",
+      h("a", { href: "/api/score/spec.md", target: "_blank" }, "打碟谱规范"), " · ",
+      h("a", { href: "/api/score/template.md?download=1" }, "下载模板"),
+      "（Denon Prime 4+ 的旋钮位、推子、效果器、Hot Cue 怎么写）");
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
     drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); filesFromDrop(e.dataTransfer).then(addFiles); });
-    card.append(h("div", { id: "home-plan" }), drop, input, h("div", { id: "home-uploads" }));
+    card.append(h("div", { id: "home-plan" }), drop, input, docs, h("div", { id: "home-uploads" }));
     renderHomePlan();
     renderHomeUploads();
   } else {

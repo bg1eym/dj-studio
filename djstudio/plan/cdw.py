@@ -44,10 +44,11 @@ class Knobs:
 class PlanRow:
     a_bar: int
     b_bar: int | None
-    end: bool  # A 在这一小节结束（「146 结束」）
+    end: bool  # A 在这一小节结束（「146 结束」= A 播到自己的结尾；「129 停」= A 在这一小节开头停）
     a: Knobs
     b: Knobs | None  # B 还没起播时为 None（「—」）
     marks: str = ""
+    stop: bool = False  # 「停」：A 在这一小节的第 1 拍停（Markdown 谱）；False =「结束」，A 自己播完
 
 
 @dataclass
@@ -65,7 +66,7 @@ class PlanTransition:
     a_name: str
     b_name: str
     technique: str  # longhand / instant
-    b1_at_a: int  # B 的第 1 小节落在 A 的第几小节
+    b1_at_a: int  # B 的进场小节（b_in，PDF 模板里是第 1 小节）落在 A 的第几小节
     tempo_from: float
     tempo_to: float
     ramp_b: tuple[int, int] | None  # 换速在 B 的第 m–n 小节
@@ -73,6 +74,20 @@ class PlanTransition:
     effects: list[PlanEffect] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
     header: str = ""
+    b_in: int = 1  # B 从自己的第几小节进（落在 A 的第 b1_at_a 小节）。PDF 模板里总是 1
+
+
+@dataclass
+class PlanCue:
+    """谱上写的 hot cue（Prime 4+ 的打击垫 1–8）。位置二选一：谱上的小节（可以带拍）或离文件开头的秒数。"""
+
+    pad: int
+    name: str  # 英文，显示在 Prime 屏幕上
+    color: str  # #RRGGBB
+    bar: float | None  # 谱上的小节：33.5 = 第 33 小节第 3 拍
+    time: float | None  # 秒
+    note: str = ""
+    line: int = 0  # 谱文件里的行号（报错用）
 
 
 @dataclass
@@ -87,8 +102,9 @@ class PlanTrack:
     technique: str | None
     file_name: str = ""
     bar1_s: float | None = None  # 第 1 小节第 1 拍在文件里的秒数
-    cues: list[tuple[int, str]] = field(default_factory=list)  # (小节, breakdown / break / drop …)
+    cues: list[tuple[float, str]] = field(default_factory=list)  # (小节, breakdown / break / drop …)
     key: str = ""
+    hot_cues: list[PlanCue] = field(default_factory=list)  # 谱上写明的 hot cue（Markdown 谱）；没写的按规范自动补
 
 
 @dataclass
@@ -97,6 +113,8 @@ class Plan:
     tracks: list[PlanTrack]
     transitions: list[PlanTransition]
     warnings: list[str] = field(default_factory=list)
+    start_bar: int = 1  # 开场曲从谱上第几小节起播
+    ending: tuple[int | None, float] | None = None  # 终曲淡出：(从谱上第几小节，淡出几小节)；None = 播完
 
 
 # ---------------------------------------------------------------- 取值
@@ -154,7 +172,7 @@ def parse(path: Path) -> Plan:
     _prep(pages, tracks)
     trans = _transitions(pages)
     plan = Plan(title=title, tracks=tracks, transitions=trans)
-    _check(plan)
+    check(plan)
     return plan
 
 
@@ -340,7 +358,8 @@ def _row(no: int, r: dict[str, str]) -> PlanRow:
     return PlanRow(int(m.group(1)), b_bar, bool(m.group(2)), a, b, r.get("动作", "").strip())
 
 
-def _check(plan: Plan) -> None:
+def check(plan: Plan) -> None:
+    """两种谱共用的一致性检查（编号连续、A 小节递增、B 小节对得上、换速和播放 BPM）。"""
     n = len(plan.tracks)
     if [t.no for t in plan.tracks] != list(range(1, n + 1)):
         raise PlanError(f"曲目编号不连续：{[t.no for t in plan.tracks]}")
@@ -351,8 +370,8 @@ def _check(plan: Plan) -> None:
         for r in tr.rows:
             if prev and r.a_bar <= prev.a_bar:
                 raise PlanError(f"过渡 {tr.no}：A 小节没有递增（{prev.a_bar} → {r.a_bar}）")
-            if r.b_bar is not None and r.b_bar != r.a_bar - (tr.b1_at_a - 1):
-                raise PlanError(f"过渡 {tr.no}：第 {r.a_bar} 行 B 小节 {r.b_bar} 与页眉「B = A – {tr.b1_at_a - 1}」对不上")
+            if r.b_bar is not None and r.b_bar != r.a_bar - tr.b1_at_a + tr.b_in:
+                raise PlanError(f"过渡 {tr.no}：第 {r.a_bar} 行 B 小节 {r.b_bar} 与「B 第 {tr.b_in} 小节 = A 第 {tr.b1_at_a} 小节」对不上")
             prev = r
         if not tr.rows[-1].end:
             plan.warnings.append(f"过渡 {tr.no}：最后一行没有标「结束」，按 A 在这里结束处理")
@@ -367,5 +386,5 @@ def _check(plan: Plan) -> None:
             plan.warnings.append(f"过渡 {tr.no}：换速后 {tr.tempo_to:g} 与 #{nxt.no} 的播放 BPM {nxt.bpm_play:g} 不同")
 
 
-__all__ = ["Plan", "PlanError", "PlanRow", "PlanTrack", "PlanTransition", "PlanEffect", "Knobs", "PdfError",
-           "parse", "clock", "fader"]
+__all__ = ["Plan", "PlanError", "PlanRow", "PlanTrack", "PlanTransition", "PlanEffect", "PlanCue", "Knobs", "PdfError",
+           "parse", "clock", "fader", "check"]

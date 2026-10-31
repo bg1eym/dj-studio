@@ -44,6 +44,11 @@ PADS: tuple[Pad, ...] = (
     Pad(8, "END", "#A45CFF", "紫", "交完：A 在这里停或推子到底；自己播完的 = 曲末；终曲 = 淡出结束"),
 )
 PAD_BY_NAME = {p.name: p for p in PADS}
+# 打碟谱里可以直接写的颜色名（Engine DJ 里选最接近的那个）。前 6 个就是上面打击垫用的颜色
+COLOR_NAMES: dict[str, str] = {
+    "白": "#FFFFFF", "绿": "#22D45A", "蓝": "#2F7BFF", "橙": "#FF8C1A", "红": "#FF3B3B", "紫": "#A45CFF",
+    "黄": "#FFD60A", "青": "#00C8FF", "粉": "#FF5FA2",
+}
 NAME_MAX = 16  # Prime 4+ 屏幕上 hot cue 名字的长度上限（按 16 个 ASCII 字符算）
 LOOP_COLOR = "#00C8FF"
 
@@ -133,8 +138,10 @@ def fill_hot_cues(s: SetFile, c: Compiled, sections: dict[str, list[dict[str, An
         # DROP 2 = 下一个 drop，BREAK 2 = 两个 drop 之间最后的 breakdown。没有 drop 时 BREAK 1 / 2 = 前两个 breakdown
         pts = structure_points(st.cues, sections.get(st.id))
         hi = end if end is not None else (last or 1e9)
-        drops = [p for p in pts["drop"] if mix_in <= p[0] < hi]
-        breaks = [p for p in pts["break"] if mix_in <= p[0] < hi]
+        # 手写过的 BREAK / DROP 垫子占了的位置不再自动放（谱上只写了 BREAK 2 / DROP 2 时，不在同一处再补 BREAK 1 / DROP 1）
+        taken = {round(h.bar, 3) for h in st.hot_cues if _kind(h.name)}
+        drops = [p for p in pts["drop"] if mix_in <= p[0] < hi and round(p[0], 3) not in taken]
+        breaks = [p for p in pts["break"] if mix_in <= p[0] < hi and round(p[0], 3) not in taken]
         picks: dict[str, tuple[float, str]] = {}
         lo = mix_in - 1e-6
         for k, (dname, bname) in enumerate((("DROP 1", "BREAK 1"), ("DROP 2", "BREAK 2"))):
@@ -238,7 +245,7 @@ def cue_sheet_md(s: SetFile, c: Compiled) -> str:
         for h in st.hot_cues:
             ours, plan = _bar_txt(h.bar, st.plan_bar_offset)
             t = fmt_time(info.grid.bar_time(h.bar)) if info else "?"
-            cname = next((p.color_name for p in PADS if p.color == h.color), "")
+            cname = next((k for k, v in COLOR_NAMES.items() if v == h.color), "")
             lines.append(f"| {h.pad} | {h.name} | {cname} {h.color} | {ours} | {plan} | {t} | {h.note} |")
         if st.loops:
             lines += ["", "| 保存 loop | 名字 | 小节.拍 | 谱上 | 时间 | 长度 | 注释 |", "|---|---|---|---|---|---|---|"]

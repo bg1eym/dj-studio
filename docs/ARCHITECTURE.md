@@ -41,7 +41,9 @@ Mixxx + DJStudio.js（控制器映射）
 `Studio.auto_prepare()` 是一个分 6 步的后台任务（`Job.stages` / `progress`，网页一个进度条）：音频分析 → 读打碟谱
 （`plan/cdw.py`：pypdf 取带坐标的文字，按表头的 x 分列）→ Mixxx 扫描 + 分析（`_sync`）→ 网格核对与自动校正（`_fix_grids`）
 → 打碟谱转 set（`plan/convert.py`：曲目匹配、小节对齐、钟点位换算；小节相位按谱写回曲库后再转一次）→ 准备（`_prepare`）。
-网页上传走 `PUT /api/upload?name=…`（请求体就是文件），音频复制进托管曲库，PDF 存到 `~/DJStudio/plans/`（最新的就是当前打碟谱）。
+网页上传走 `PUT /api/upload?name=…`（请求体就是文件），音频复制进托管曲库，打碟谱（PDF 或 .md）存到 `~/DJStudio/plans/`（最新的就是当前打碟谱）。
+读谱按扩展名分：`.md` → `plan/mdplan.py`（《打碟谱规范》docs/SCORE_SPEC.md，按表头认列，报错带行号），`.pdf` → `plan/cdw.py`；两者都产出 `cdw.Plan`。
+`GET /api/score/spec.md`、`/api/score/template.md` 给出规范和模板（打包的 App 里在 `djstudio/docs/`）。
 
 放进打碟谱后 `Studio.find_plan_tracks()` 在后台把谱上还缺的歌去 `Config.find_dirs`（默认 下载 / 桌面 / 文稿 / 音乐）里找：
 `plan/convert.py` 的 `file_matches` 按文件名比（去掉编号和标点后的字符相似度、词集合相似度取大的，门槛 0.85），

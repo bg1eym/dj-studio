@@ -10,6 +10,8 @@ ENGINE = os.path.join(ROOT, "tools", "mixxx-engine", "dist")
 VERSION = os.environ.get("DJSTUDIO_APP_VERSION", "0.0.0")
 
 datas = collect_data_files("djstudio")  # 网页文件、引擎脚本（DJStudio.js / .midi.xml）
+# 《打碟谱规范》和模板：首页可以下载（djstudio/plan/mdplan.py score_doc）
+datas += [(os.path.join(ROOT, "docs", f), os.path.join("djstudio", "docs")) for f in ("SCORE_SPEC.md", "score_template.md")]
 datas.append((os.path.join(ENGINE, "res", "controllers", "common-controller-scripts.js"),
               os.path.join("engine", "res", "controllers")))
 binaries = [(os.path.join(ENGINE, "djstudio-engine"), "engine")]

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -85,7 +86,8 @@ class Alignment:
     residual_ms: float  # 谱的第 1 拍 − 最近的网格拍
     bar1_s: float  # 按谱的小节相位，本应用第 1 小节的起点（秒）——相位和曲库不同时写回曲库
     rephase: bool  # 小节相位和曲库里的不同
-    cue_dev: list[tuple[int, str, float | None]] = field(default_factory=list)  # (谱小节, 标签, 偏差小节)
+    cue_dev: list[tuple[float, str, float | None]] = field(default_factory=list)  # (谱小节, 标签, 偏差小节)
+    last_bar: float | None = None  # 曲子结束在谱上的第几小节（文件末尾的位置）
 
 
 @dataclass
@@ -215,7 +217,8 @@ def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
     db = j % BEATS_PER_BAR
     g2 = Grid(g.bpm, g.first_beat, db, g.duration)
     k = round(g2.beat_bar(j)) - 1
-    al = Alignment(db, k, round(res, 1), round(g2.bar_time(1), 5), db != g.downbeat)
+    al = Alignment(db, k, round(res, 1), round(g2.bar_time(1), 5), db != g.downbeat,
+                   last_bar=round(g2.last_bar - k, 2) if g.duration else None)
     if al.rephase:
         notes.append(Note("info", where, f"小节线按谱定（和原来自动估的差 {(db - g.downbeat) % 4} 拍）"))
     # 段落核对：谱上的 breakdown / drop 小节 vs 本应用切出的段落起点
@@ -234,7 +237,7 @@ def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
     near = [d for d in devs if abs(d) <= 4]
     if near and not al.rephase:
         same = len(near) >= 3 and len(set(near)) == 1 and near[0] != 0
-        txt = "、".join(f"第 {b} 小节 {lab.split()[0]} {d:+g}" for b, lab, d in al.cue_dev if d is not None and abs(d) <= 4)
+        txt = "、".join(f"第 {b:g} 小节 {lab.split()[0]} {d:+g}" for b, lab, d in al.cue_dev if d is not None and abs(d) <= 4)
         notes.append(Note("warn" if same else "info", where,
                           f"谱上的段落和本应用切出的段落：{txt}" + ("——整体差一个常数，小节号可能错位" if same else "")))
     if pt.bars and g.duration:
@@ -298,6 +301,7 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
         raise ValueError(f"{where}：表格第一行在 B 起播之后")
     last = tr.rows[-1].a_bar - a0
 
+    stop = tr.rows[-1].stop  # 「停」：A 在最后一行那一小节的第 1 拍停；否则 A 自己播完
     a_rows = [(r.a_bar - a0, r.a) for r in tr.rows]
     b_rows = [(r.a_bar - a0, r.b) for r in tr.rows if r.b is not None]
     lanes: dict[str, list[list[Any]]] = {}
@@ -309,16 +313,27 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
         if p == "vol" or not _neutral(lb, p):
             lanes[f"B.{p}"] = lb
 
+    bars = float(last)
+    # 效果「第 a–b 小节」：a 的第 1 拍打开，b 结束时关。A 的效果开到 A 结束 / 停的那一小节：不关，让尾巴自己响完
+    # （过渡结束 3 秒后出场 deck 归位，见 DJStudio.js）
     for fx in tr.effects:
-        t0 = fx.bar0 - a0 if fx.deck == "A" else play_at + fx.bar0 - 1
+        if fx.deck == "A":
+            t0, t1 = fx.bar0 - a0, fx.bar1 + 1 - a0
+            keep = fx.bar1 + 1 >= tr.rows[-1].a_bar
+        else:
+            t0, t1 = play_at + fx.bar0 - tr.b_in, play_at + fx.bar1 + 1 - tr.b_in
+            keep = False
         name = f"{fx.deck}.{fx.kind}"
-        lanes[name] = [[max(0.0, t0), 0.0], [max(0.0, t0), round(fx.wet, 3), "step"]]
+        lane = lanes.setdefault(name, [[max(0.0, t0), 0.0]])
+        lane.append([max(0.0, t0), round(fx.wet, 3), "step"])
+        if not keep:
+            lane += [[t1, round(fx.wet, 3)], [t1, 0.0, "step"]]
+            bars = max(bars, float(t1))
 
     tempo: list[list[Any]] = [[0, tr.tempo_from]]
-    bars = float(last)
     if tr.ramp_b:
         m, n = tr.ramp_b
-        t0, t1 = play_at + m - 1, play_at + n
+        t0, t1 = play_at + m - tr.b_in, play_at + n + 1 - tr.b_in
         tempo = [[0, tr.tempo_from], [t0, tr.tempo_from], [t1, tr.tempo_to]]
         bars = max(bars, float(t1))
     elif tr.tempo_to != tr.tempo_from:
@@ -327,18 +342,21 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
 
     if not tr.rows[-1].end:
         notes.append(Note("warn", where, "最后一行没标「结束」，A 仍按自己播完处理"))
-    note = f"打碟谱过渡 {tr.no}：{'长交接' if tr.technique == 'longhand' else '瞬时切换'}，B 第 1 小节 = A 第 {tr.b1_at_a} 小节"
+    elif not stop and a.last_bar is not None and abs(a.last_bar - (tr.rows[-1].a_bar + 1)) > 2:
+        notes.append(Note("warn", where, f"谱上 A 在第 {tr.rows[-1].a_bar} 小节结束，A 实际播到第 {a.last_bar - 1:.1f} 小节才完"
+                                         f"（「结束」= A 自己播完，时间线等它停）。要在这里停 A，写「{tr.rows[-1].a_bar} 停」"))
+    note = f"打碟谱过渡 {tr.no}：{'长交接' if tr.technique == 'longhand' else '瞬时切换'}，B 第 {tr.b_in} 小节 = A 第 {tr.b1_at_a} 小节"
     if a.k or b.k:
         note += f"（谱上的小节号换成本应用：A {a.k:+d}，B {b.k:+d}）"
     out = {
         "technique": "custom",
         "start": float(a0 + a.k),
-        "b_in": float(1 + b.k),
+        "b_in": float(tr.b_in + b.k),
         "play_at": float(play_at),
         "bars": bars,
-        "params": {"a_end": "playout"},
+        "params": {"a_end": "stop" if stop else "playout"},
         "lanes": lanes,
-        "events": [],
+        "events": [[float(last), "A.stop"]] if stop else [],
         "tempo": tempo,
         "label": "长交接" if tr.technique == "longhand" else "瞬时切换",
         "note": note,
@@ -349,8 +367,9 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
 # ---------------------------------------------------------------- 总装
 
 def _slug(s: str) -> str:
-    s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
-    return s or "plan"
+    """谱文件名 → set id。全是中文的文件名：「plan-」加一小段哈希（不同的谱不会撞成同一个 set）。"""
+    out = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
+    return out or "plan-" + hashlib.sha1(s.encode("utf-8")).hexdigest()[:6]
 
 
 def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | None = None,
@@ -391,7 +410,7 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
                              "note": f"谱 #{pt.no:02d}；谱上第 1 小节 = {pt.bar1_s if pt.bar1_s is not None else '—'}s"
                                      + (f"，本应用第 {1 + al.k} 小节" if al.k else "")}
         if i == 0:
-            t["start"] = float(1 + al.k)
+            t["start"] = float(plan.start_bar + al.k)
         # 谱上的段落标记（breakdown / drop …）换成本应用的小节号；hot cue 按 docs/SET_SPEC.md 由它们定
         cues: dict[str, float] = {}
         for bar, label in pt.cues:
@@ -401,6 +420,25 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
             cues[name] = float(bar + al.k)
         t["cues"] = cues
         t["plan_bar_offset"] = al.k
+        # 谱上写明的 hot cue（Markdown 谱）：照写的设；没写的垫子编译后按规范补（setspec.fill_hot_cues 不覆盖写了的）
+        hot = []
+        g2 = Grid(lt.grid.bpm, lt.grid.first_beat, al.downbeat, lt.grid.duration) if lt.grid else None
+        for c in pt.hot_cues:
+            if c.bar is not None:
+                bar = c.bar + al.k
+            elif g2 is not None and c.time is not None:
+                bar = g2.beat_bar(round(g2.time_beat(c.time)))  # cue 落在拍上
+            else:
+                continue
+            if bar < 1:
+                notes.append(Note("error", f"#{pt.no:02d} {pt.title}", f"打击垫 {c.pad}「{c.name}」在曲子的第 1 小节之前"))
+                continue
+            hot.append({"pad": c.pad, "name": c.name, "bar": round(bar, 4), "color": c.color, "note": c.note or "谱上写的"})
+        if hot:
+            t["hot_cues"] = hot
+            mix_in = next((h for h in hot if h["pad"] == 2), None)
+            if mix_in:
+                t["main_cue"] = mix_in["bar"]  # 主 Cue = MIX IN（docs/SET_SPEC.md 7.3）
         tracks.append(t)
     trans = []
     for tr in plan.transitions:
@@ -409,12 +447,20 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
         d, tn = transition(tr, a, b)
         trans.append(d)
         notes += tn
+    ending: dict[str, Any] = {"mode": "playout"}
+    if plan.ending:
+        at, n = plan.ending
+        last_al = aligns[-1]
+        assert last_al
+        ending = {"mode": "fade", "bars": n, "bar": None if at is None else float(at + last_al.k)}
+    if any(n.level == "error" for n in notes):
+        return Converted(None, matches, aligns, notes)
     sid = set_id or _slug(Path(source).stem if source else plan.title)
     s = SetFile.model_validate({
         "schema": "djset/2", "spec": SPEC_VERSION, "id": sid, "name": plan.title, "created": time.strftime("%Y-%m-%d"),
         "source": source, "note": "由打碟谱自动生成（djstudio.plan），按播放规范 docs/SET_SPEC.md：旋钮钟点位 → dB、"
                                   "推子、效果器、hot cue（Prime 4+ 的 8 个打击垫）都按那里的表。",
         "keylock": False, "tracks": tracks, "transitions": trans,
-        "ending": {"mode": "playout"},
+        "ending": ending,
     })
     return Converted(s, matches, aligns, notes)

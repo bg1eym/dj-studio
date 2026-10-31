@@ -4,6 +4,7 @@
 它规定 **EQ、Filter、效果器、推子、速度、音量** 的写法和换算，以及 **Denon Prime 4+ 格式的 hot cue**（8 个打击垫的用途、名字、颜色、位置、注释）。
 
 - set 文件的语法（字段、时间线、手法参数）见 [SET_FORMAT.md](SET_FORMAT.md)；这里是「值该怎么定」。
+- 用户自己写的打碟谱按《打碟谱规范》[SCORE_SPEC.md](SCORE_SPEC.md)（Prime 4+ 的说法：钟点位、推子 0–10、打击垫），读进来按本规范换成 set。
 - 代码里的同一份：`djstudio/setspec.py`（hot cue）、`djstudio/compiler.py`（推子、EQ 原生值）、`djstudio/plan/convert.py`（钟点位）。
   `tests/test_setspec.py` 逐行比对本文的表和代码：**改表要同时改代码，改代码要同时改表**，否则测试失败。
 - 按本规范生成的 set 文件写 `"spec": "1"`；规范有不兼容的改动时升版本号。
