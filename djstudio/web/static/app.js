@@ -445,11 +445,14 @@ function renderHomePlan() {
   const missing = p.tracks.filter((t) => !t.track);
   const f = p.finder || {};
   const job = S.job && S.job.state === "running" ? S.job : null;
+  const findMsg = f.state === "running" ? h("div", { class: "dim" }, "正在电脑里按谱上的文件名找曲子…")
+    : f.state === "done" && f.found && f.found.length ? h("div", { class: "dim" }, `在电脑里找到 ${f.found.length} 首，已放进曲库`)
+      : f.state === "error" ? h("div", { class: "warn-box" }, `在电脑里找曲子时出错：${f.error}`) : null;
+  // 原生 append 会把 null 当成文字「null」：只放有的
   el.append(planHeader(p),
     h("div", { class: "home-count" }, h("span", { class: "big-pct" }, `${have} / ${p.n_tracks}`), h("span", {}, " 首曲子已就位")),
-    f.state === "running" ? h("div", { class: "dim" }, "正在电脑里按谱上的文件名找曲子…")
-      : f.state === "done" && f.found && f.found.length ? h("div", { class: "dim" }, `在电脑里找到 ${f.found.length} 首，已放进曲库`)
-        : f.state === "error" ? h("div", { class: "warn-box" }, `在电脑里找曲子时出错：${f.error}`) : null);
+    ...(findMsg ? [findMsg] : []));
+  if (p.warnings && p.warnings.length) el.append(h("div", { class: "warn-box" }, p.warnings.map((w) => h("div", {}, w))));
   if (missing.length && f.state !== "running") {
     el.append(h("div", { class: "missing" }, h("div", {}, "还缺这几首，把文件拖到下面："),
       missing.map((t) => h("div", { class: "mono" }, `#${String(t.no).padStart(2, "0")} ${t.title}`, h("span", { class: "dim" }, t.file ? `  （${t.file}）` : "")))));

@@ -263,3 +263,13 @@ def test_upload_md_score_and_download_docs(tmp_path):
     assert tmpl.status_code == 200 and "attachment" in tmpl.headers["content-disposition"]
     assert mdplan.parse_text(tmpl.text).title == "我的 set 打碟谱"
     assert client.get("/api/score/other.md").status_code == 404
+
+
+def test_warnings_carry_line_numbers_in_order():
+    """提示（不挡着用，但网页首页会显示）带行号，按谱里的先后排。"""
+    t = TEMPLATE.read_text(encoding="utf-8").replace("| 7 | MIX OUT | 红 | 121.1 |", "| 7 | MIX OUT | 红 | 120.1 |") \
+        .replace("- 说明：drop 对 drop", "- 混音：drop 对 drop")
+    w = mdplan.parse_text(t).warnings
+    assert len(w) == 2 and "MIX OUT" in w[0] and "混音" in w[1]
+    lines = [int(re.match(r"第 (\d+) 行", x).group(1)) for x in w]
+    assert lines == sorted(lines)

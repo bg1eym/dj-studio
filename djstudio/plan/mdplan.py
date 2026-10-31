@@ -250,6 +250,8 @@ def parse_text(text: str, name: str = "") -> Plan:
         raise PlanError("有两段过渡用了同一个编号")
     check(plan)
     _check_cues(plan)
+    # 提示按谱里的行号排（没有行号的放最后）
+    plan.warnings.sort(key=lambda w: int(m.group(1)) if (m := re.match(r"第 (\d+) 行", w)) else 1 << 30)
     return plan
 
 
