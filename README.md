@@ -10,6 +10,12 @@
 - 只绑 `127.0.0.1`，只在本机浏览器使用。
 - 还保留连本机 Mixxx 的模式（`DJSTUDIO_ENGINE=mixxx`，经 IAC 虚拟 MIDI），见 [docs/DEVICE_TEST.md](docs/DEVICE_TEST.md)。
 
+## Set 播放规范
+
+所有 set（打碟谱自动生成的、手工转的）都按 [docs/SET_SPEC.md](docs/SET_SPEC.md)：EQ / Filter / 效果器 / 推子 / 速度 / 音量的取值和换算表，
+以及 Denon Prime 4+ 格式的 hot cue（8 个打击垫：START、MIX IN、BREAK 1、DROP 1、BREAK 2、DROP 2、MIX OUT、END，固定颜色，带中文注释）。
+网页上「Hot Cue 表（Prime 4+）」导出每首歌的 cue 位置（小节.拍 / 谱上小节 / 时间），照着在 Engine DJ 里设。
+
 ## 安装（Mac）
 
 只支持 Apple 芯片（M1 及以后）的 Mac，不做 Intel 版。打开终端，粘贴这一行（装进「应用程序」并打开；以后更新也是这一行）：

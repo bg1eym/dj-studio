@@ -454,6 +454,9 @@ class DeckView {
       g.fillText(m.label, xm + 4, top + 13);
     }
 
+    // hot cue（Prime 4+ 的打击垫 1–8）：细色线 + 下面的号码小旗和名字
+    drawHotCues(g, t.hotcues || [], (b) => X(barTime(b)), top, H, w);
+
     // 已播部分压暗；播放头
     g.fillStyle = "rgba(0,0,0,.28)";
     g.fillRect(0, top, cx, H - top);
@@ -714,6 +717,24 @@ function laneAt(pts, x) {
   return pts[0][1];
 }
 
+// hot cue 小旗：位置一条细色线，底部一个带打击垫号的色块（compact = 整首波形上只画号码），后面跟名字
+function drawHotCues(g, cues, xOf, top, H, w, compact = false) {
+  g.font = "bold 10px ui-monospace, Menlo, monospace";
+  for (const hc of cues) {
+    const x = Math.round(xOf(hc.bar));
+    if (x < -60 || x > w + 2) continue;
+    g.fillStyle = hc.color;
+    g.globalAlpha = 0.75;
+    g.fillRect(x, top, 1, H - top);
+    g.globalAlpha = 1;
+    const label = compact ? String(hc.pad) : `${hc.pad} ${hc.name}`;
+    const tw = g.measureText(label).width + 6;
+    g.fillRect(x, H - 13, tw, 12);
+    g.fillStyle = "#0b0d11";
+    g.fillText(label, x + 3, H - 3);
+  }
+}
+
 // ------------------------------------------------------------------ 交接概览：两首歌的整首波形 + 进出点 + 小节计数
 
 class Handoff {
@@ -833,12 +854,13 @@ class Handoff {
         const label = `${m.label} ${Math.floor(barOf(m.t) + 1e-3)}`;
         const tw = g.measureText(label).width;
         const lx = m.right ? Math.max(2, x - tw - 4) : Math.min(w - tw - 2, x + 4);
-        const ly = m.top ? 2 : H - 16; // 起点类标签在上、终点类在下，挨得近也不重叠
+        const ly = m.top ? 2 : H - 30; // 起点类标签在上、终点类在下（最底下一行留给 hot cue 的号码），挨得近也不重叠
         g.fillStyle = "rgba(15,17,21,.8)";
         g.fillRect(lx - 2, ly, tw + 4, 14);
         g.fillStyle = m.color;
         g.fillText(label, lx, ly + 11);
       }
+      drawHotCues(g, t.hotcues, (b) => X(t.bar1 + (b - 1) * (240 / t.bpm)), 0, H, w, true);
       const pos = posOf(t);
       if (pos !== null) {
         const xp = X(pos);
@@ -926,7 +948,7 @@ export class LiveView {
       this._trackData(ct.id);
       const data = this.loaded.get(ct.id) || {};
       return { idx: k, id: ct.id, no: k + 1 + off, title: st.title || ct.title || ct.id, deck, bpm: ct.bpm, bar1: ct.bar1_time,
-        dur: ct.duration, bars: ct.bars, wave: data.wave || null, sections: data.sections || [], marks: [] };
+        dur: ct.duration, bars: ct.bars, wave: data.wave || null, sections: data.sections || [], marks: [], hotcues: st.hot_cues || [] };
     };
     const A = track(ai, prog.a.deck);
     const B = bi === null ? null : track(bi, prog.b.deck);
@@ -1013,7 +1035,7 @@ export class LiveView {
       if (k === null || !comp) { if (dv.track) dv.setTrack(null); }
       else if (!dv.track || dv.track.idx !== k || dv.track.prog !== prog) {
         const ct = comp.tracks[k], stt = comp.set.tracks[k];
-        const t = { idx: k, no: k + 1 + (comp._offset || 0), id: ct.id, title: stt.title || ct.id, bpm: ct.bpm, bar1: ct.bar1_time, prog, markers: this._markers(k, prog), wave: null, sections: [] };
+        const t = { idx: k, no: k + 1 + (comp._offset || 0), id: ct.id, title: stt.title || ct.id, bpm: ct.bpm, bar1: ct.bar1_time, prog, markers: this._markers(k, prog), hotcues: stt.hot_cues || [], wave: null, sections: [] };
         dv.setTrack(t);
         this._trackData(ct.id).then((x) => { if (dv.track === t) { t.wave = x.wave || null; t.sections = x.sections || []; } });
       }

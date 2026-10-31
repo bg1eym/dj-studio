@@ -2,6 +2,7 @@
 
 一套 set = 一个 JSON 文件，放在 `~/DJStudio/sets/<id>.json`（网页 Set 页的「JSON」可以直接粘贴）。
 **全部以小节为单位、人读单位**；编译器负责换算成拍和 Mixxx 原生值。
+**值怎么定（EQ / Filter / 效果器 / 推子的换算表，Prime 4+ 的 hot cue）见播放规范 [SET_SPEC.md](SET_SPEC.md)**；这里只讲文件语法。
 
 ## 小节号
 
@@ -14,6 +15,7 @@
 ```jsonc
 {
   "schema": "djset/2",
+  "spec": "1",                          // 按播放规范 SET_SPEC.md 第几版生成；手写的可以空着
   "id": "rw2023",                       // 文件名，字母数字 - _
   "name": "CDW @ Rock Werchter 2023 复刻",
   "created": "2026-10-28",
@@ -27,7 +29,13 @@
       "start": 1,                       // 仅开场曲：从第几小节起播
       "play_bpm": null,                 // 这首独奏时的主控 BPM；null = 原生 BPM
       "downbeat": null,                 // 一般不用：临时覆盖小节相位（0..3，相对 Mixxx 网格）
-      "cues": {"drop": 65, "break": 129}, // 命名小节标记，仅展示 / 备忘
+      "cues": {"drop": 65, "break": 129}, // 命名小节标记（谱上的段落），hot cue 的 BREAK / DROP 按它们定
+      "plan_bar_offset": 0,             // 谱上第 b 小节 = 本应用第 b + 这个数 小节
+      "main_cue": 1,                    // Prime 4+ 的主 Cue（CUE 键），规范里 = 进点
+      "hot_cues": [                     // Prime 4+ 的 hot cue：打击垫 1–8，用途 / 名字 / 颜色见 SET_SPEC.md 第 7 节
+        {"pad": 2, "name": "MIX IN", "bar": 1, "color": "#22D45A", "note": "开场：从第 1 小节起播"}
+      ],
+      "loops": [],                      // Prime 4+ 的保存 loop：{"pad", "name", "bar", "beats", "note"}
       "note": ""
     }
   ],
@@ -69,7 +77,7 @@ B:            b_in ────────────────────�
 
 | 参数 | 单位 | 中性值 |
 |---|---|---|
-| `vol` | **推子位置** 0..1（和 Mixxx 推子同一条曲线：0.5 = -10 dB，0.7 = -6 dB，1 = 0 dB；编译时换成 Mixxx 的 volume 值） | 1（B 在起播前默认 0） |
+| `vol` | **推子位置** 0..1（和 Mixxx 推子同一条曲线：0.5 = -12.4 dB，0.7 = -7.0 dB，1 = 0 dB，全表见 SET_SPEC.md；编译时换成 Mixxx 的 volume 值） | 1（B 在起播前默认 0） |
 | `lo` / `mid` / `hi` | dB，-60..+12；≤ -40 视为 kill | 0 |
 | `filter` | -1..1，负 = LPF，正 = HPF | 0 |
 | `echo` / `reverb` | 湿度 0..1（效果单元 1 / 2） | 0 |

@@ -450,6 +450,17 @@ def test_builtin_engine_full_flow_never_touches_mixxx(tmp_path, monkeypatch):
     assert job.state == "ok", "\n".join(job.log)
     # 以前连 Mixxx 时按 Mixxx 网格切的段落：再分析一次时按自己的网格重切
     # 换了解码器（这里假装是别的解码器分析的）的也重新分析
+    # 按播放规范（docs/SET_SPEC.md）生成：Prime 4+ 的 hot cue、主 Cue；hot cue 表
+    gen = studio.load(job.result["set"])
+    assert gen.spec == "1"
+    a_pads, b_pads = ({h.pad: h for h in st.hot_cues} for st in gen.tracks)
+    tr0 = gen.transitions[0]
+    assert a_pads[1].name == "START" and a_pads[2].name == "MIX IN" and a_pads[2].bar == gen.tracks[0].start
+    assert a_pads[7].name == "MIX OUT" and a_pads[7].bar == tr0.start and 8 in a_pads
+    assert b_pads[2].bar == tr0.b_in and gen.tracks[1].main_cue == tr0.b_in and 7 not in b_pads
+    assert all(h.note and h.name.isascii() for st in gen.tracks for h in st.hot_cues)
+    sheet = studio.cue_sheet(gen.id)
+    assert "Prime 4+" in sheet and "| 2 | MIX IN |" in sheet and "| 7 | MIX OUT |" in sheet
     t, u = (studio.store.get(x.id) for x in studio.load(job.result["set"]).tracks)
     assert t.analysis["decoder"] == "ffmpeg"
     assert studio.refresh_stale() is None  # 启动时：分析都是新的，不重做

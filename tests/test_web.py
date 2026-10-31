@@ -92,6 +92,11 @@ def test_live_view_assets_and_rehearsal_api(client):
     assert client.post("/api/sets/x3/rehearse", json={"speed": 100}).status_code == 400
     r = client.post("/api/sets/x3/rehearse", json={"speed": 2})
     assert r.status_code == 400 and "校验" in r.json()["error"]  # 曲目不在曲库：和真播一样先过校验
+    # Prime 4+ 的 hot cue 表：浏览器里直接看（text/plain），download=1 存成 .md
+    r = client.get("/api/sets/x3/cuesheet.md")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain") and "Hot Cue 表" in r.text
+    r = client.get("/api/sets/x3/cuesheet.md", params={"download": 1})
+    assert "attachment" in r.headers["content-disposition"] and r.headers["content-type"].startswith("text/markdown")
 
 
 def test_upload_audio_and_reject_bad_files(client, tmp_path):

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ..grid import BEATS_PER_BAR, Grid
+from ..setspec import SPEC_VERSION
 from ..setfile import SetFile
 from .cdw import Knobs, Plan, PlanRow, PlanTrack, PlanTransition
 
@@ -391,6 +392,15 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
                                      + (f"，本应用第 {1 + al.k} 小节" if al.k else "")}
         if i == 0:
             t["start"] = float(1 + al.k)
+        # 谱上的段落标记（breakdown / drop …）换成本应用的小节号；hot cue 按 docs/SET_SPEC.md 由它们定
+        cues: dict[str, float] = {}
+        for bar, label in pt.cues:
+            name, n = label, 2
+            while name in cues:  # 同名的第 2、3 个：「drop #2」「drop #3」
+                name, n = f"{label} #{n}", n + 1
+            cues[name] = float(bar + al.k)
+        t["cues"] = cues
+        t["plan_bar_offset"] = al.k
         tracks.append(t)
     trans = []
     for tr in plan.transitions:
@@ -401,8 +411,9 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
         notes += tn
     sid = set_id or _slug(Path(source).stem if source else plan.title)
     s = SetFile.model_validate({
-        "schema": "djset/2", "id": sid, "name": plan.title, "created": time.strftime("%Y-%m-%d"),
-        "source": source, "note": "由打碟谱自动生成（djstudio.plan）。旋钮钟点位 → dB 的换算见 docs/SET_FORMAT.md。",
+        "schema": "djset/2", "spec": SPEC_VERSION, "id": sid, "name": plan.title, "created": time.strftime("%Y-%m-%d"),
+        "source": source, "note": "由打碟谱自动生成（djstudio.plan），按播放规范 docs/SET_SPEC.md：旋钮钟点位 → dB、"
+                                  "推子、效果器、hot cue（Prime 4+ 的 8 个打击垫）都按那里的表。",
         "keylock": False, "tracks": tracks, "transitions": trans,
         "ending": {"mode": "playout"},
     })

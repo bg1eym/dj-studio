@@ -360,6 +360,7 @@ async function renderHome(force = false) {
       h("div", { class: "panel row home-live-bar" },
         h("b", {}, (S.showCompiled && S.showCompiled.set && S.showCompiled.set.name) || S.showSetId || ""),
         h("span", { class: "grow" }),
+        h("a", { href: `/api/sets/${S.showSetId}/cuesheet.md`, target: "_blank", class: "dim", style: "margin-right:12px" }, "Hot Cue 表"),
         playing ? h("button", { class: "danger", onclick: (e) => busy(e, "停止中…", stopShow) }, "■ 停止")
           : [resume && resume.set === S.showSetId
               ? h("button", { class: "primary", title: "从停下的位置接着放", onclick: (e) => busy(e, "启动中…", resumeShow) }, `▶ 继续（${resume.label}）`)
@@ -498,6 +499,8 @@ function renderHomeJob() {
         S.showSetId = r.set; S.showCompiled = null; S.homeDone = null;
         await loadState(); renderHome(true);
       }); } }, "先在模拟器里预演（不碰 Mixxx，没有声音）"),
+      h("a", { href: `/api/sets/${r.set}/cuesheet.md`, target: "_blank", title: "按播放规范（docs/SET_SPEC.md）生成的 hot cue：打击垫 1–8、名字、颜色、位置" }, "Hot Cue 表（Prime 4+）"),
+      h("a", { href: `/api/sets/${r.set}/cuesheet.md?download=1` }, "下载 .md"),
       h("span", { class: "grow" }),
       h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeSkipJob = job.started; renderHome(true); } }, "换一份打碟谱")));
   }

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -306,6 +306,13 @@ def create_app(studio: Studio) -> FastAPI:
         s = studio.rehearsal_set(studio.load(sid), rehearse_from, start)
         return {"set": json.loads(s.to_json()), "compiled": compiled_json(studio.compile(s, resume=start is not None))}
 
+    @app.get("/api/sets/{sid}/cuesheet.md")
+    def api_cuesheet(sid: str, download: int = 0) -> Response:
+        """Prime 4+ 的 hot cue 表（Markdown）：照着在 Engine DJ / Prime 4+ 上设 cue。浏览器里直接看；download=1 存成 .md。"""
+        disp = "attachment" if download else "inline"
+        return Response(studio.cue_sheet(sid), media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
+                        headers={"Content-Disposition": f'{disp}; filename="{sid}-hotcues.md"'})
+
     @app.post("/api/sets/{sid}/rehearse")
     def api_rehearse(sid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         speed = float(body.get("speed") or 1.0)
@@ -329,8 +336,12 @@ def create_app(studio: Studio) -> FastAPI:
         s = parse_set(body)
         if s.id != sid:
             raise HTTPException(400, "set id 与地址不一致")
+        c = studio.compile(s)
+        if s.spec and c.ok:  # 按播放规范写的 set：缺的 hot cue 按规范补上（手写过的垫子不动）
+            s = studio.fill_hot_cues(s, c)
+            c = studio.compile(s)
         studio.save(s)
-        return {"set": json.loads(s.to_json()), "compiled": compiled_json(studio.compile(s))}
+        return {"set": json.loads(s.to_json()), "compiled": compiled_json(c)}
 
     @app.delete("/api/sets/{sid}")
     def api_set_delete(sid: str) -> dict[str, Any]:

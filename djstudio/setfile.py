@@ -38,6 +38,44 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+class HotCue(_Model):
+    """Denon Prime 4+（Engine DJ）的 hot cue：打击垫 1–8，名字显示在 Prime 屏幕上（ASCII，≤ 16 个字符），
+    颜色在 Engine DJ 里设；位置用本应用的小节号（可以带拍：33.25 = 第 33 小节第 2 拍）。用途和颜色见 docs/SET_SPEC.md。"""
+
+    pad: int = Field(ge=1, le=8)
+    name: str = Field(min_length=1, max_length=16)
+    bar: float = Field(ge=1)
+    color: str = "#FFFFFF"
+    note: str = ""  # 中文注释：这个点用来干什么
+
+    @field_validator("name")
+    @classmethod
+    def _ascii(cls, v: str) -> str:
+        if not v.isascii():
+            raise ValueError(f"hot cue 名字 {v!r} 只能用英文 / 数字（Prime 4+ 屏幕上显示），中文写在 note 里")
+        return v
+
+    @field_validator("color")
+    @classmethod
+    def _color(cls, v: str) -> str:
+        if not HEX_COLOR_RE.match(v):
+            raise ValueError(f"hot cue 颜色 {v!r} 应为 #RRGGBB")
+        return v.upper()
+
+
+class SavedLoop(_Model):
+    """Prime 4+ 的保存 loop（loop 模式的打击垫 1–8）：从 bar 起 beats 拍。"""
+
+    pad: int = Field(ge=1, le=8)
+    name: str = Field(min_length=1, max_length=16)
+    bar: float = Field(ge=1)
+    beats: float = Field(gt=0, le=64)
+    note: str = ""
+
+
 class SetTrack(_Model):
     id: str = ""  # 曲库 track id（library.store 里的 id）
     title: str = ""
@@ -47,7 +85,19 @@ class SetTrack(_Model):
     downbeat: int | None = Field(None, ge=0, le=3)  # 覆盖曲库里的 downbeat
     play_bpm: float | None = Field(None, gt=40, lt=250)  # 独奏时的主控 BPM；None = 原生
     cues: dict[str, float] = Field(default_factory=dict)  # 命名小节标记（drop/break/out…），仅展示与引用
+    hot_cues: list[HotCue] = Field(default_factory=list)  # Prime 4+ 的 hot cue（≤ 8 个，打击垫不重复），见 docs/SET_SPEC.md
+    main_cue: float | None = None  # Prime 4+ 的主 Cue 点（CUE 键）：小节号；规范里 = 进点
+    loops: list[SavedLoop] = Field(default_factory=list)  # Prime 4+ 的保存 loop（可选）
+    plan_bar_offset: int | None = None  # 谱（Engine DJ）上第 b 小节 = 本应用第 b + 这个数 小节；cue 表里同时写两种编号
     note: str = ""
+
+    @field_validator("hot_cues", "loops")
+    @classmethod
+    def _unique_pads(cls, v: list[Any]) -> list[Any]:
+        pads = [c.pad for c in v]
+        if len(pads) != len(set(pads)):
+            raise ValueError(f"打击垫号重复：{pads}")
+        return sorted(v, key=lambda c: c.pad)
 
 
 Point = list[Any]  # [bar, value] 或 [bar, value, "step"]
@@ -116,6 +166,7 @@ class Ending(_Model):
 
 class SetFile(_Model):
     schema_: Literal["djset/2"] = Field(SCHEMA, alias="schema")
+    spec: str = ""  # 按哪一版播放规范生成（docs/SET_SPEC.md，现在是 "1"）；手写的 set 可以空着
     id: str = Field(pattern=r"^[A-Za-z0-9_\-]+$")
     name: str = ""
     created: str = ""

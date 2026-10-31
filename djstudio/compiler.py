@@ -86,7 +86,7 @@ VOL_MIN_DB = -20.0  # [ChannelN],volume = ControlAudioTaperPot(-20, 0, 1)（engi
 def fader_gain(pos: float) -> float:
     """推子位置 0..1 → Mixxx 的 volume 值（增益）。与 Mixxx 自己的推子同一条曲线：
     ControlAudioTaperPotBehavior::parameterToValue（control/controlbehavior.cpp:206），minDB -20、maxDB 0、neutral 1。
-    位置 0.5 = -10 dB，0.7 = -6 dB，1 = 0 dB。"""
+    位置 0.5 → 0.240（-12.4 dB），0.7 → 0.446（-7.0 dB），1 → 1（0 dB）；全表见 docs/SET_SPEC.md 第 5 节。"""
     if pos <= 0:
         return 0.0
     if pos >= 1:
@@ -302,4 +302,9 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], res
     t_solo = (end_bar - established) * BEATS_PER_BAR * 60.0 / lb
     c.schedule.append(Segment("solo" if end.mode == "playout" else "ending", last_i, t_now, t_now + max(0.0, t_solo),
                               last_t.title or last_t.id))
+    # hot cue / 主 Cue / 保存 loop：按播放规范（docs/SET_SPEC.md）检查
+    from .setspec import check_hot_cues
+
+    for level, where, msg in check_hot_cues(s, infos):
+        (err if level == "error" else warn)(where, msg)
     return c

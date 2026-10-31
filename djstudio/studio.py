@@ -329,6 +329,23 @@ class Studio:
     def save(self, s: SetFile) -> None:
         save_set(s, self.set_path(s.id))
 
+    def fill_hot_cues(self, s: SetFile, c: Compiled) -> SetFile:
+        """按播放规范给每首填 hot cue：breakdown / drop 以 set 里的谱上标记为准，没有就用分析切出的段落。"""
+        from .setspec import fill_hot_cues
+
+        sections = {}
+        for st in s.tracks:
+            t = self.find_track(st)
+            if t and t.analysis:
+                sections[st.id] = t.analysis.get("sections") or []
+        return fill_hot_cues(s, c, sections)
+
+    def cue_sheet(self, set_id: str) -> str:
+        from .setspec import cue_sheet_md
+
+        s = self.load(set_id)
+        return cue_sheet_md(s, self.compile(s))
+
     # ------------------------------------------------------------ 体检
 
     def doctor(self) -> list[dict[str, str]]:
@@ -913,16 +930,30 @@ class Studio:
             or (t.analysis or {}).get("waveform_version", 1) < WAVEFORM_VERSION  # 0.3.7 起波形是 Denon 三频段
             or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
 
+    def _plan_set_outdated(self) -> bool:
+        """打碟谱生成过的 set 不是按现在这版播放规范（docs/SET_SPEC.md）生成的（比如没有 hot cue）→ 要重新生成。"""
+        from .plan.convert import _slug
+        from .setspec import SPEC_VERSION
+
+        path = self.current_plan()
+        if not path or not self.set_path(_slug(path.stem)).exists():
+            return False
+        try:
+            return self.load(_slug(path.stem)).spec != SPEC_VERSION
+        except Exception:  # noqa: BLE001  读不了就当过时，重新生成
+            return True
+
     def refresh_stale(self) -> Job | None:
-        """启动时：谱上的歌是按旧解码器 / 旧方式分析的（升级之后）→ 自动重做一键分析，拍线和波形才和声音对得上。
-        不然首页显示「可以开始」，点了用的还是旧网格。"""
+        """启动时：谱上的歌是按旧解码器 / 旧方式分析的（升级之后），或者生成的 set 不是按现在的播放规范生成的
+        → 自动重做一键分析（只重新分析过时的歌），拍线、波形、hot cue 才是新的。
+        不然首页显示「可以开始」，点了用的还是旧的。"""
         try:
             st = self.plan_status()
         except Exception:  # noqa: BLE001  启动时尽力而为
             return None
         if not st or st.get("error") or not all(r["track"] for r in st["tracks"]):
             return None
-        if not self._stale([r["track"] for r in st["tracks"]]):
+        if not self._stale([r["track"] for r in st["tracks"]]) and not self._plan_set_outdated():
             return None
         with self._auto_lock:
             self._auto_key = None  # 同一份谱、同一组歌，但分析过时了：要再跑一次
@@ -1026,12 +1057,16 @@ class Studio:
         if not conv.ok or conv.set is None:
             raise StudioError("打碟谱转成 set 没成功：" + "；".join(str(n) for n in conv.notes if n.level == "error"))
         s = conv.set
+        c = self.compile(s)
+        # 按播放规范（docs/SET_SPEC.md）填 Prime 4+ 的 hot cue / 主 Cue / 保存 loop
+        s = self.fill_hot_cues(s, c)
         self.save(s)
         c = self.compile(s)
         errs = [str(i) for i in c.issues if i.level == "error"]
         if errs:
             raise StudioError("生成的 set 校验没通过：\n" + "\n".join(errs))
-        job.say(f"set「{s.name}」已生成（{s.id}），约 {c.duration / 60:.1f} 分钟")
+        job.say(f"set「{s.name}」已生成（{s.id}），约 {c.duration / 60:.1f} 分钟；"
+                f"按播放规范 v{s.spec} 填好了 hot cue（Prime 4+ 的打击垫 1–8，表在演出页「Hot Cue 表」）")
 
         if self.builtin:
             step("准备内置引擎")
