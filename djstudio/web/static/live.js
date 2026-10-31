@@ -424,18 +424,9 @@ class DeckView {
       if (x1 - x0 > 50) { g.fillStyle = "#7d8597"; g.font = "10px sans-serif"; g.fillText(s.label, Math.max(2, x0 + 3), H - 3); }
     }
 
-    // 波形：Denon 三频段（wavedraw.js）；按当前 EQ / 滤波缩放各频段（看得出「低频切掉了」），整体亮度跟推子
+    // 波形：Denon 三频段（wavedraw.js），就是原曲的波形——和 Prime 4+ 上一样，不随 EQ / 滤波 / 推子变
     const wf = t.wave;
     if (wf) {
-      const mx = this.mx;
-      let gl = 1, gm = 1, gh = 1;
-      if (mx) {
-        gl = Math.min(1.6, mx[MIX.lo]); gm = Math.min(1.6, mx[MIX.mid]); gh = Math.min(1.6, mx[MIX.hi]);
-        const k = Math.min(1, Math.abs(mx[MIX.filter] - 0.5) * 2);
-        if (mx[MIX.filter] < 0.5) { gh *= 1 - k; gm *= 1 - 0.7 * k; } else { gl *= 1 - k; gm *= 1 - 0.7 * k; }
-      }
-      const vol = faderPos(ds[6]);
-      g.globalAlpha = ds[1] ? 0.35 + 0.65 * vol : 0.3;
       const pps = wf.rate;
       drawTriBand(g, w, mid, amp, (x) => {
         const ta = pos + ((x - cx) / (w / 2)) * half, tb = pos + ((x + 1 - cx) / (w / 2)) * half;
@@ -448,9 +439,8 @@ class DeckView {
           if (wf.mid[i] > mi) mi = wf.mid[i];
           if (wf.high[i] > hi) hi = wf.high[i];
         }
-        return [(lo / 255) * gl, (mi / 255) * gm, (hi / 255) * gh];
+        return [lo / 255, mi / 255, hi / 255];
       });
-      g.globalAlpha = 1;
     }
 
     // 拍 / 小节 / 乐句线
