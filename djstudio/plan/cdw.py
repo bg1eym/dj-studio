@@ -52,11 +52,13 @@ class PlanRow:
 
 
 @dataclass
-class CueCheck:
+class CueRef:
+    """谱上「从哪个 hot cue 进 / 起播 / 淡出」，而那个 hot cue 是用时间写的：曲子分析完后（convert）换成拍再用。"""
+
     track: int  # 曲目编号（谱上的 #）
     cue: PlanCue
-    bar: float  # 谱上写的小节（这个 hot cue 应该在的地方）
-    what: str  # 哪一项（报错用）
+    target: str  # "start"（开场）/ "entry"（过渡 transition 里 B 进场）/ "fade"（结尾淡出）
+    transition: int = 0
 
 
 @dataclass
@@ -82,7 +84,8 @@ class PlanTransition:
     effects: list[PlanEffect] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
     header: str = ""
-    b_in: int = 1  # B 从自己的第几小节进（落在 A 的第 b1_at_a 小节）。PDF 模板里总是 1
+    b_in: float = 1  # B 从自己的第几小节进（落在 A 的第 b1_at_a 小节；可以带拍）。PDF 模板里总是 1
+    b_in_cue: PlanCue | None = None  # 进场引用的是用时间写的 hot cue：b_in 在 convert 里按它算
 
 
 @dataclass
@@ -122,9 +125,9 @@ class Plan:
     transitions: list[PlanTransition]
     warnings: list[str] = field(default_factory=list)
     start_bar: float = 1  # 开场曲从谱上第几小节起播
-    ending: tuple[float | None, float] | None = None  # 终曲淡出：(从谱上第几小节，淡出几小节)；None = 播完
-    # 谱上用时间写的 IN / OUT / STOP / FADE：读谱时还不知道是第几小节，曲子分析完后（convert）核对和谱上写的小节是同一拍
-    cue_checks: list[CueCheck] = field(default_factory=list)
+    # 终曲淡出：(从谱上第几小节 | None = 曲末前, 淡出几小节 | None = 一直淡到曲末)；None = 播完
+    ending: tuple[float | None, float | None] | None = None
+    cue_refs: list[CueRef] = field(default_factory=list)  # 引用了用时间写的 hot cue 的地方
 
 
 # ---------------------------------------------------------------- 取值

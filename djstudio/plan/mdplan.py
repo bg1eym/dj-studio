@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..setspec import COLOR_NAMES, NAME_MAX, default_color
-from .cdw import TECH, CueCheck, Knobs, Plan, PlanCue, PlanEffect, PlanError, PlanRow, PlanTrack, PlanTransition, check, clock, fader
+from .cdw import TECH, CueRef, Knobs, Plan, PlanCue, PlanEffect, PlanError, PlanRow, PlanTrack, PlanTransition, check, clock, fader
 
 SCORE_SPEC_VERSION = "3"
-# v1 / v2 的谱写法一样：hot cue 按 v2 放（垫子没有固定用途）；v3 起谱上的 IN / OUT / STOP / FADE 说了算
+# v1 / v2 的谱写法一样：hot cue 按 v2 放（垫子没有固定用途）；v3 起过渡 / 开场 / 结尾可以引用谱上的 hot cue
 ACCEPTED_VERSIONS = ("1", "2", "3")
 SUFFIXES = (".md", ".markdown")
 DASHES = ("—", "-", "–", "－", "--")
@@ -230,7 +230,7 @@ def parse_text(text: str, name: str = "") -> Plan:
             head.append(ln)
 
     warnings: list[str] = []
-    start_bar, start_line, ending, ending_line = _head(head, warnings)
+    start_bar, start_line, start_ref, ending = _head(head, warnings)
     sec_tracks = [s for s in sections if _key(s.title) in ("曲目", "曲目表")]
     if not sec_tracks:
         raise PlanError("这不是打碟谱：没有「## 曲目」这一段（见《打碟谱规范》）")
@@ -239,18 +239,25 @@ def parse_text(text: str, name: str = "") -> Plan:
     for s in sections:
         if _key(s.title) in ("hotcue", "hotcues"):
             _hot_cues(s, by_no)
-    checks: list[CueCheck] = []
+    refs: list[CueRef] = []
     trans = []
     for s in sections:
         m = re.match(r"^过渡\s*0*(\d+)\s*(?:[：:]\s*(.*))?$", s.title)
         if m:
-            trans.append(_transition(int(m.group(1)), (m.group(2) or "").strip(), s, by_no, warnings, checks))
-    start_bar, ending = _opener_and_ending(tracks, start_bar, start_line, ending, ending_line, checks)
+            trans.append(_transition(int(m.group(1)), (m.group(2) or "").strip(), s, by_no, warnings, refs))
+    if start_ref:  # 「开场：从 1 号垫起播」
+        cue = ref_cue(tracks[0], start_ref, start_line)
+        if cue.bar is not None:
+            start_bar = cue.bar
+        else:
+            start_bar = 1
+            refs.append(CueRef(tracks[0].no, cue, "start"))
+    start_bar, ending = _opener_and_ending(tracks, start_bar, start_line, ending, refs)
     if not trans and len(tracks) > 1:
         raise PlanError("没有任何「## 过渡 N：A → B」段落")
     trans.sort(key=lambda t: t.no)
     plan = Plan(title=title, tracks=tracks, transitions=trans, warnings=warnings, start_bar=start_bar, ending=ending,
-                cue_checks=checks)
+                cue_refs=refs)
     if len({t.no for t in trans}) != len(trans):
         raise PlanError("有两段过渡用了同一个编号")
     check(plan)
@@ -259,23 +266,27 @@ def parse_text(text: str, name: str = "") -> Plan:
     return plan
 
 
-def _head(head: list[_Line], warnings: list[str]) -> tuple[float | None, int, tuple[float | None, float] | None, int]:
-    """开头设置 → (开场小节 | None = 没写, 那一行, 结尾, 那一行)。"""
+def _head(head: list[_Line], warnings: list[str]) -> tuple[float | None, int, str, tuple[float | None, float | None] | None]:
+    """开头设置 → (开场小节 | None, 开场那一行, 开场引用的 hot cue（「从 1 号垫起播」）, 结尾)。"""
     start_bar: float | None = None
-    ending: tuple[float | None, float] | None = None
-    start_line = ending_line = 0
+    start_ref = ""
+    ending: tuple[float | None, float | None] | None = None
+    start_line = 0
     for no, k, v in _bullets(head):
         if k == "规范":
             m = re.search(r"(\d+)", v)
             if not m or m.group(1) not in ACCEPTED_VERSIONS:
                 raise _err(no, f"这份谱写的是规范「{v}」，本应用认的是 v{SCORE_SPEC_VERSION}")
         elif k == "开场":
-            m = re.search(r"(\d+)", v)
-            if not m or int(m.group(1)) < 1:
-                raise _err(no, f"开场「{v}」：写「从第 N 小节起播」")
-            start_bar, start_line = int(m.group(1)), no
+            m = re.search(r"第\s*(\d+)\s*小节", v) or re.fullmatch(r"\s*(\d+)\s*", v)
+            if m and int(m.group(1)) >= 1:
+                start_bar, start_line = int(m.group(1)), no
+            else:  # 从某个 hot cue 起播：「从 1 号垫起播」「从 IN 起播」
+                ref = re.sub(r"^\s*从\s*|\s*(开始)?起播\s*$|\s*开始\s*$", "", v).strip()
+                if not ref:
+                    raise _err(no, f"开场「{v}」：写「从第 N 小节起播」或「从 1 号垫起播」")
+                start_bar, start_line, start_ref = None, no, ref  # 曲目表和 Hot Cue 读完再找
         elif k == "结尾":
-            ending_line = no
             if re.fullmatch(r"(最后一首)?(自己)?播完", v.replace(" ", "")):
                 ending = None
                 continue
@@ -289,20 +300,33 @@ def _head(head: list[_Line], warnings: list[str]) -> tuple[float | None, int, tu
                 raise _err(no, f"结尾「{v}」：写「播完」或「从第 N 小节淡出，淡出 M 小节」")
             if ending[1] <= 0:
                 raise _err(no, "淡出的小节数要大于 0")
-    return start_bar, start_line, ending, ending_line
+    return start_bar, start_line, start_ref, ending
 
 
-# ---------------------------------------------------------------- 谱上的 hot cue 说了算（IN / OUT / STOP / FADE）
+# ---------------------------------------------------------------- 引用谱上的 hot cue
 
-AUTH = {"IN": ("IN", "MIX IN"), "OUT": ("OUT", "MIX OUT"), "STOP": ("STOP",), "FADE": ("FADE",)}
+AUTH = {"IN": ("IN", "MIX IN"), "FADE": ("FADE",)}  # 没写从哪进 / 从哪淡出时，按这首叫 IN / FADE 的垫子
 
 
 def _pad(track: PlanTrack, key: str) -> PlanCue | None:
-    """这首谱上写的 IN / OUT / STOP / FADE（名字不分大小写；MIX IN / MIX OUT 也认）。"""
     hits = [c for c in track.hot_cues if c.name.strip().upper() in AUTH[key]]
-    if len(hits) > 1:
-        raise _err(hits[1].line, f"#{track.no} 写了两个 {key}（第 {hits[0].line} 行也有）")
     return hits[0] if hits else None
+
+
+def ref_cue(track: PlanTrack, ref: str, line: int) -> PlanCue:
+    """「3 号垫」「垫 3」「hot cue 3」「DROP」「IN」「1 号垫（DROP）」→ 这首谱上写的那个 hot cue。"""
+    t = re.sub(r"[（(][^）)]*[）)]\s*$", "", ref).strip().strip("「」\"'“”").strip()
+    t = re.sub(r"^(hot\s*cue|打击垫|垫子?|pad)\s*", "", t, flags=re.I).strip()
+    m = re.fullmatch(r"([1-8])\s*(号)?\s*(垫子?|pad)?", t, flags=re.I)
+    hit = None
+    if m:
+        hit = next((c for c in track.hot_cues if c.pad == int(m.group(1))), None)
+    else:
+        hit = next((c for c in track.hot_cues if c.name.strip().upper() == t.upper()), None)
+    if hit is None:
+        have = "、".join(f"{c.pad} 号垫 {c.name}" for c in track.hot_cues) or "还没写 Hot Cue"
+        raise _err(line, f"#{track.no} 的 Hot Cue 里没有「{ref}」（这首有：{have}）")
+    return hit
 
 
 def bar_beat(bar: float) -> str:
@@ -310,42 +334,28 @@ def bar_beat(bar: float) -> str:
     return f"{whole}.{round((bar - whole) * 4) + 1}"
 
 
-def _on_downbeat(c: PlanCue, track: PlanTrack) -> int:
-    if c.bar is not None and abs(c.bar - round(c.bar)) > 1e-9:
-        raise _err(c.line, f"#{track.no} 的 {c.name.upper()} 在 {bar_beat(c.bar)}（第 {bar_beat(c.bar).split('.')[1]} 拍）："
-                           "进出要对在小节的第 1 拍上（写成 小节.1）")
-    return int(round(c.bar or 0))
-
-
 def _opener_and_ending(tracks: list[PlanTrack], start_bar: float | None, start_line: int,
-                       ending: tuple[float | None, float] | None, ending_line: int,
-                       checks: list[CueCheck]) -> tuple[float, tuple[float | None, float] | None]:
+                       ending: tuple[float | None, float | None] | None,
+                       refs: list[CueRef]) -> tuple[float, tuple[float | None, float | None] | None]:
+    """开场：写了小节就按小节；写了「从某个 hot cue 起播」就按那个垫子；都没写、#1 有叫 IN 的垫子就从 IN，不然第 1 小节。
+    结尾：最后一首有叫 FADE 的垫子、结尾没写从第几小节淡出 → 从 FADE 淡出（没写淡出几小节 = 一直淡到曲末）。"""
     first, last = tracks[0], tracks[-1]
-    cue = _pad(first, "IN")
-    if cue and cue.bar is not None:
-        b = _on_downbeat(cue, first)
-        if start_bar is None:
-            start_bar = b
-        elif start_bar != b:
-            raise _err(start_line, f"开场写的是第 {start_bar:g} 小节，#1 的 hot cue IN 在第 {bar_beat(b)}（第 {cue.line} 行）："
-                                   "以 hot cue 为准，改成一样的，或者把「开场」这一行删掉")
-    elif cue:
-        checks.append(CueCheck(first.no, cue, start_bar or 1, f"开场（第 {start_line} 行）" if start_line else "开场（第 1 小节）"))
-    cue = _pad(last, "FADE")
-    if cue:
-        if ending is None:
-            raise _err(cue.line, f"#{last.no} 写了 FADE：开头要写「- 结尾：淡出 M 小节」（淡出几小节）")
-        at, n = ending
+    cue: PlanCue | None = None
+    if start_bar is None:
+        cue = _pad(first, "IN")
+    if cue is not None:
         if cue.bar is not None:
-            if at is None:
-                ending = (cue.bar, n)
-            elif abs(at - cue.bar) > 1e-9:
-                raise _err(ending_line, f"结尾写的是从第 {at:g} 小节淡出，#{last.no} 的 hot cue FADE 在第 {bar_beat(cue.bar)}"
-                                        f"（第 {cue.line} 行）：以 hot cue 为准，改成一样的，或者只写「淡出 {n:g} 小节」")
-        elif at is None:
-            raise _err(ending_line, f"FADE 用时间写的，「结尾」里要写从第几小节淡出（程序会核对是不是同一拍）")
+            start_bar = cue.bar
         else:
-            checks.append(CueCheck(last.no, cue, at, f"结尾（第 {ending_line} 行）"))
+            refs.append(CueRef(first.no, cue, "start"))
+    fade = _pad(last, "FADE")
+    if fade is not None and (ending is None or ending[0] is None):
+        n = ending[1] if ending else None
+        if fade.bar is not None:
+            ending = (fade.bar, n)
+        else:
+            ending = (None, n)
+            refs.append(CueRef(last.no, fade, "fade"))
     return (start_bar if start_bar is not None else 1), ending
 
 
@@ -446,7 +456,7 @@ def _color(text: str, default: str, line: int) -> str:
     raise _err(line, f"看不懂的颜色「{t}」：写 {' / '.join(COLOR_NAMES)}，或 #RRGGBB")
 
 
-_ENTRY = re.compile(r"(?:B\s*的?\s*第\s*(\d+)\s*小节|B\s*的?\s*(?:hot\s*cue\s*)?IN)?[^A]*?(?:落)?在\s*A\s*的?\s*第\s*(\d+)\s*小节", re.I)
+_ENTRY = re.compile(r"(?:落)?在\s*A\s*的?\s*第\s*(\d+)\s*小节")
 _TEMPO = re.compile(r"^(\d+(?:\.\d+)?)\s*(?:(?:→|->|－>|到)\s*(\d+(?:\.\d+)?))?\s*"
                     r"(?:[，,；;]?\s*(?:在\s*)?B\s*的?\s*第\s*(\d+)\s*(?:[–\-—~～到至]\s*(\d+))?\s*小节\s*(?:内|里)?\s*换(?:速)?)?\s*$")
 _FX = re.compile(r"^(A|B)\s*(?:的)?\s*(?:Main\s*FX\s*)?(Reverb|Echo|混响|回声)\s*[，,]?\s*"
@@ -456,7 +466,7 @@ KNOWN_KEYS = ("手法", "进场", "主速", "效果", "说明", "备注", "为�
 
 
 def _transition(no: int, names: str, sec: _Section, by_no: dict[int, PlanTrack], warnings: list[str],
-                checks: list[CueCheck]) -> PlanTransition:
+                refs: list[CueRef]) -> PlanTransition:
     where = f"过渡 {no}"
     a_t, b_t = by_no.get(no), by_no.get(no + 1)
     if not a_t or not b_t:
@@ -464,7 +474,7 @@ def _transition(no: int, names: str, sec: _Section, by_no: dict[int, PlanTrack],
     parts = re.split(r"→|->", names, maxsplit=1) if names else []
     a_name, b_name = (parts + ["", ""])[:2]
     technique = None
-    entry: tuple[int | None, int] | None = None
+    entry: tuple[str, int] | None = None  # (B 从哪进：「第 N 小节」/ hot cue / 空, A 的第几小节)
     entry_line = sec.line
     tempo: tuple[float, float, tuple[int, int] | None] | None = None
     effects: list[PlanEffect] = []
@@ -477,8 +487,9 @@ def _transition(no: int, names: str, sec: _Section, by_no: dict[int, PlanTrack],
         elif k == "进场":
             m = _ENTRY.search(v)
             if not m:
-                raise _err(line, f"进场「{v}」：写「B 的第 N 小节落在 A 的第 X 小节」（B 写了 hot cue IN 时可以只写「落在 A 的第 X 小节」）")
-            entry, entry_line = (int(m.group(1)) if m.group(1) else None, int(m.group(2))), line
+                raise _err(line, f"进场「{v}」：写「B 的第 N 小节落在 A 的第 X 小节」，或「B 的 3 号垫落在 A 的第 X 小节」")
+            mb = re.search(r"B\s*的?\s*(.*?)\s*$", v[:m.start()])
+            entry, entry_line = ((mb.group(1) if mb else "").strip(), int(m.group(1))), line
         elif k == "主速":
             m = _TEMPO.match(v)
             if not m:
@@ -510,25 +521,22 @@ def _transition(no: int, names: str, sec: _Section, by_no: dict[int, PlanTrack],
         raise _err(sec.line, f"{where}：少了「- 手法：长交接」或「- 手法：瞬时切换」")
     if not entry:
         raise _err(sec.line, f"{where}：少了「- 进场：B 的第 N 小节落在 A 的第 X 小节」")
-    b_given, x = entry
-    # B 从哪进：谱上写了 B 的 hot cue IN 就以它为准
-    cue = _pad(b_t, "IN")
-    if cue and cue.bar is not None:
-        b_cue = _on_downbeat(cue, b_t)
-        if b_given is not None and b_given != b_cue:
-            raise _err(entry_line, f"{where}：进场写的是 B 的第 {b_given} 小节，#{b_t.no} 的 hot cue IN 在第 {bar_beat(b_cue)}"
-                                   f"（第 {cue.line} 行）：以 hot cue 为准，改成一样的，或者只写「落在 A 的第 {x} 小节」")
-        b_in = b_cue
-    elif cue:
-        if b_given is None:
-            raise _err(entry_line, f"{where}：#{b_t.no} 的 IN 用时间写的，进场里要写 B 的第几小节（程序会核对是不是同一拍）")
-        b_in = b_given
-        checks.append(CueCheck(b_t.no, cue, b_in, f"{where} 的进场（第 {entry_line} 行）"))
-    elif b_given is None:
-        raise _err(entry_line, f"{where}：进场要写 B 的第几小节（「B 的第 N 小节落在 A 的第 X 小节」），"
-                               f"或者在 Hot Cue 里给 #{b_t.no} 写 IN")
+    b_ref, x = entry
+    # B 从哪进：「第 N 小节」，或者 B 的某个 hot cue（3 号垫 / 名字）；没写就按 B 叫 IN 的垫子
+    b_in: float | None = None
+    b_cue: PlanCue | None = None
+    mb = re.fullmatch(r"第\s*(\d+)\s*小节", b_ref)
+    if mb:
+        b_in = int(mb.group(1))
     else:
-        b_in = b_given
+        cue = ref_cue(b_t, b_ref, entry_line) if b_ref else _pad(b_t, "IN")
+        if cue is None:
+            raise _err(entry_line, f"{where}：进场要写 B 从哪进——「B 的第 N 小节」，或者 B 的哪个 hot cue（「B 的 3 号垫」「B 的 DROP」）")
+        if cue.bar is not None:
+            b_in = cue.bar
+        else:
+            b_cue = cue  # 用时间写的：曲子分析完后换成拍
+            refs.append(CueRef(b_t.no, cue, "entry", no))
     if tempo is None:
         tempo = (a_t.bpm_play, b_t.bpm_play, None)
         if a_t.bpm_play != b_t.bpm_play:
@@ -537,11 +545,11 @@ def _transition(no: int, names: str, sec: _Section, by_no: dict[int, PlanTrack],
     t0, t1, ramp = tempo
     if t0 != t1 and ramp is None:
         raise _err(sec.line, f"{where}：主速 {t0:g} → {t1:g} 要写在 B 的哪几小节换：「- 主速：{t0:g} → {t1:g}，B 第 m–n 小节换」")
-    if ramp and ramp[0] < b_in:
-        raise _err(sec.line, f"{where}：换速从 B 第 {ramp[0]} 小节开始，B 第 {b_in} 小节才进场")
+    if b_in is not None and ramp and ramp[0] < int(b_in):
+        raise _err(sec.line, f"{where}：换速从 B 第 {ramp[0]} 小节开始，B 第 {b_in:g} 小节才进场")
     for fx in effects:
-        if fx.deck == "B" and fx.bar0 < b_in:
-            raise _err(sec.line, f"{where}：B 的 {fx.kind} 从 B 第 {fx.bar0} 小节开始，B 第 {b_in} 小节才进场")
+        if b_in is not None and fx.deck == "B" and fx.bar0 < int(b_in):
+            raise _err(sec.line, f"{where}：B 的 {fx.kind} 从 B 第 {fx.bar0} 小节开始，B 第 {b_in:g} 小节才进场")
 
     tables = _tables(sec.body, ROW_COLS)
     if not tables:
@@ -555,26 +563,8 @@ def _transition(no: int, names: str, sec: _Section, by_no: dict[int, PlanTrack],
         raise _err(t.rows[0][0], f"{where}：表的第一行是 A 第 {rows[0].a_bar} 小节，晚于 B 进场（A 第 {x} 小节）")
     if not any(r.a_bar == x for r in rows):
         raise _err(t.line, f"{where}：B 进场那一小节（A 第 {x} 小节）要有一行")
-    # A 从哪出、在哪停：谱上写了 A 的 hot cue OUT / STOP 就以它为准
-    first_line, last_line = t.rows[0][0], t.rows[-1][0]
-    cue = _pad(a_t, "OUT")
-    if cue and cue.bar is not None:
-        if abs(cue.bar - rows[0].a_bar) > 1e-9:
-            raise _err(cue.line, f"#{a_t.no} 的 hot cue OUT 在第 {bar_beat(cue.bar)}，{where} 的旋钮表从第 {rows[0].a_bar} 小节开始"
-                                 f"（第 {first_line} 行）：以 hot cue 为准，表的第一行就是 OUT 那一小节")
-    elif cue:
-        checks.append(CueCheck(a_t.no, cue, rows[0].a_bar, f"{where} 旋钮表的第一行（第 {first_line} 行）"))
-    cue = _pad(a_t, "STOP")
-    if cue:
-        if not rows[-1].stop:
-            raise _err(last_line, f"#{a_t.no} 写了 hot cue STOP（第 {cue.line} 行）：{where} 的最后一行要写「停」，A 在 STOP 那一小节停")
-        if cue.bar is not None and abs(cue.bar - rows[-1].a_bar) > 1e-9:
-            raise _err(cue.line, f"#{a_t.no} 的 hot cue STOP 在第 {bar_beat(cue.bar)}，{where} 的最后一行在第 {rows[-1].a_bar} 小节停"
-                                 f"（第 {last_line} 行）：以 hot cue 为准，改成一样的")
-        if cue.bar is None:
-            checks.append(CueCheck(a_t.no, cue, rows[-1].a_bar, f"{where} 最后一行的「停」（第 {last_line} 行）"))
     return PlanTransition(no, a_name.strip() or a_t.title.split(" — ")[0], b_name.strip() or b_t.title.split(" — ")[0],
-                          technique, x, t0, t1, ramp, rows, effects, notes, "", b_in)
+                          technique, x, t0, t1, ramp, rows, effects, notes, "", b_in if b_in is not None else 1, b_cue)
 
 
 PARAMS = (("LOW", "lo"), ("MID", "mid"), ("HIGH", "hi"), ("FILTER", "filter"), ("推子", "vol"))
@@ -597,7 +587,8 @@ def _knobs(where: str, side: str, r: dict[str, str], base: dict[str, float | Non
     return Knobs(v["lo"] or 0.0, v["mid"] or 0.0, v["hi"] or 0.0, v["filter"] or 0.0, float(v["vol"]))  # type: ignore[arg-type]
 
 
-def _rows(where: str, t: _Table, x: int, b_in: int) -> list[PlanRow]:
+def _rows(where: str, t: _Table, x: int, b_in: float | None) -> list[PlanRow]:
+    """b_in = None：B 从用时间写的 hot cue 进，读谱时还不知道是第几小节（B 小节这一列不核对）。"""
     rows: list[PlanRow] = []
     a_prev: dict[str, float | None] = {"lo": 0.0, "mid": 0.0, "hi": 0.0, "filter": 0.0, "vol": 10.0}
     b_prev: dict[str, float | None] = {"lo": 0.0, "mid": 0.0, "hi": 0.0, "filter": 0.0, "vol": None}
@@ -621,9 +612,9 @@ def _rows(where: str, t: _Table, x: int, b_in: int) -> list[PlanRow]:
                 raise _err(line, f"A 第 {a_bar} 小节时 B 还没进场（A 第 {x} 小节才进）：B 的格子写「—」或空着")
             b, b_bar = None, None
         else:
-            b_bar = a_bar - x + b_in
-            if b_txt and not _dash(b_txt) and _number(b_txt, line, "B 小节") != b_bar:
-                raise _err(line, f"B 小节写的是 {b_txt}，按「B 第 {b_in} 小节落在 A 第 {x} 小节」应该是 {b_bar}")
+            b_bar = a_bar - x + b_in if b_in is not None and b_in == int(b_in) else None
+            if b_bar is not None and b_txt and not _dash(b_txt) and _number(b_txt, line, "B 小节") != b_bar:
+                raise _err(line, f"B 小节写的是 {b_txt}，按「B 第 {b_in:g} 小节落在 A 第 {x} 小节」应该是 {int(b_bar)}")
             b = _knobs(where, "B", r, b_prev, line)
             b_prev = vars(b).copy()
         rows.append(PlanRow(a_bar, b_bar, bool(mark), a, b, r.get("动作", ""), stop=(mark == "停")))

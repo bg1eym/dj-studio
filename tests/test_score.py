@@ -101,7 +101,7 @@ def test_template_converts_and_compiles():
     got = [[(h.pad, h.name, h.bar) for h in t.hot_cues] for t in s.tracks]
     assert got[0] == [(1, "IN", 1), (2, "OUT", 121), (3, "HIGH DOWN", 129), (4, "BASS OUT", 145), (5, "REVERB LPF", 153)]
     assert got[1] == [(1, "IN", 1), (2, "FADER UP", 9), (3, "BASS IN", 17), (4, "OUT", 93), (5, "ECHO", 96), (6, "STOP", 97)]
-    assert got[2] == [(1, "IN", 33), (2, "FADE", 177), (7, "VOCAL", 40.5), (8, "DROP 2", 113)]  # 7、8 是谱上自己加的
+    assert got[2] == [(1, "DROP", 33), (2, "FADE", 177), (7, "VOCAL", 40.5), (8, "DROP 2", 113)]  # 1、7、8 是谱上自己写的
     h = {x.name: x for x in s.tracks[1].hot_cues}
     assert h["IN"].color == "#22D45A" and h["OUT"].color == "#FF3B3B" and h["STOP"].color == "#A45CFF"
     assert h["BASS IN"].color == "#FFD60A" and h["ECHO"].color == "#00C8FF"
@@ -339,7 +339,7 @@ def test_too_many_points_keep_in_out_stop_first():
     assert [(h.pad, h.name) for h in s.tracks[0].hot_cues][:2] == [(1, "IN"), (2, "OUT")]
 
 
-# ---------------------------------------------------------------- 谱上的 hot cue 说了算（IN / OUT / STOP / FADE）
+# ---------------------------------------------------------------- 过渡引用谱上的 hot cue（不占额外的垫子，不另设规矩）
 
 def with_cues(rows_cues: dict[int, str], text: str | None = None) -> str:
     """模板里给 #1 / #2 加 hot cue 表（#3 的表模板里已经有）。"""
@@ -350,70 +350,72 @@ def with_cues(rows_cues: dict[int, str], text: str | None = None) -> str:
     return t.replace("### #3 Track Three", extra + "### #3 Track Three")
 
 
-def test_template_entry_comes_from_the_in_cue():
-    tr = mdplan.parse(TEMPLATE).transitions[1]
-    assert tr.b_in == 33 and tr.b1_at_a == 97  # 「进场：B 的 IN 落在 A 的第 97 小节」，IN 在 #3 的 33.1
+ENTRY2 = "- 进场：B 的 1 号垫（DROP）落在 A 的第 97 小节"
 
 
-def test_matching_in_out_stop_cues_parse():
-    t = with_cues({1: "| 2 | OUT | | 121.1 | |", 2: "| 1 | IN | | 1.1 | |\n| 7 | MIX OUT | | 93 | |\n| 8 | STOP | | 97.1 | |"})
-    plan = mdplan.parse_text(t)
-    assert plan.transitions[0].b_in == 1 and not plan.cue_checks
-    # 开场按 #1 的 IN
-    base = TEMPLATE.read_text(encoding="utf-8").replace("- 开场：从第 1 小节起播\n", "")
-    plan = mdplan.parse_text(with_cues({1: "| 1 | IN | | 17.1 | |"}, base))
-    assert plan.start_bar == 17
-    # 结尾只写淡出几小节：从 FADE 开始
-    t3 = t.replace("- 结尾：从第 177 小节淡出，淡出 16 小节", "- 结尾：淡出 16 小节").replace(
-        "| 8 | DROP 2 | 橙 | 113.1 | 第二个 drop |", "| 8 | FADE | | 161.1 | |")
-    assert mdplan.parse_text(t3).ending == (161.0, 16.0)
+@pytest.mark.parametrize("entry", ["B 的 1 号垫（DROP）", "B 的 1 号垫", "B 的垫 1", "B 的 hot cue 1", "B 的 DROP", "B 的「drop」", "B 的第 33 小节"])
+def test_entry_can_point_at_any_pad(entry):
+    t = TEMPLATE.read_text(encoding="utf-8").replace(ENTRY2, f"- 进场：{entry}落在 A 的第 97 小节")
+    tr = mdplan.parse_text(t).transitions[1]
+    assert tr.b_in == 33 and tr.b1_at_a == 97 and tr.b_in_cue is None
 
 
-@pytest.mark.parametrize("cues,words", [
-    ({2: "| 1 | IN | | 5.1 | |"}, "以 hot cue 为准"),  # 进场写 B 第 1 小节，IN 在 5
-    ({1: "| 2 | OUT | | 117.1 | |"}, "表的第一行就是 OUT"),
-    ({2: "| 8 | STOP | | 96.1 | |"}, "改成一样的"),
-    ({1: "| 8 | STOP | | 160.1 | |"}, "要写「停」"),  # 过渡 1 的最后一行是「结束」
-    ({2: "| 1 | IN | | 1.3 | |"}, "第 1 拍"),
-    ({2: "| 1 | IN | | 1.1 | |\n| 2 | MIX IN | | 1.1 | |"}, "两个 IN"),
-    ({1: "| 1 | IN | | 9.1 | |"}, "开场写的是第 1 小节"),
-])
-def test_cues_that_disagree_with_the_score_are_errors(cues, words):
+def test_pads_are_not_cross_checked_against_the_table():
+    """垫子叫什么、放在哪都行：不拿它们去和过渡表对、不报错（表里写的照样执行）。"""
+    t = with_cues({1: "| 2 | OUT | | 117.1 | |\n| 8 | STOP | | 150.1 | |", 2: "| 8 | STOP | | 96.1 | |\n| 6 | IN | | 5.3 | |"})
+    plan = mdplan.parse_text(t.replace(ENTRY2, "- 进场：B 的第 33 小节落在 A 的第 97 小节"))
+    assert plan.transitions[0].b_in == 1 and plan.transitions[0].rows[0].a_bar == 121 and not plan.warnings
+    # 没写 B 从哪进：用 B 叫 IN 的垫子（可以不在第 1 拍：B 的那一拍对 A 的第 1 拍）
+    t2 = t.replace("- 进场：B 的第 1 小节落在 A 的第 129 小节", "- 进场：落在 A 的第 129 小节")
+    tr = mdplan.parse_text(t2).transitions[0]
+    assert tr.b_in == 5.5 and all(r.b_bar is None for r in tr.rows)  # 不在第 1 拍时 B 小节这一列不核对
+
+
+def test_opener_and_ending_from_pads():
+    base = TEMPLATE.read_text(encoding="utf-8")
+    no_start = base.replace("- 开场：从第 1 小节起播\n", "")
+    assert mdplan.parse_text(with_cues({1: "| 1 | IN | | 17.1 | |"}, no_start)).start_bar == 17
+    assert mdplan.parse_text(with_cues({1: "| 4 | GO | | 9.1 | |"}, base.replace("从第 1 小节起播", "从 4 号垫起播"))).start_bar == 9
+    assert mdplan.parse_text(with_cues({1: "| 1 | IN | | 17.1 | |"})).start_bar == 1  # 写了开场就按开场
+    fade = base.replace("| 8 | DROP 2 | 橙 | 113.1 | 第二个 drop |", "| 8 | FADE | | 161.1 | |")
+    assert mdplan.parse_text(fade).ending == (177, 16)  # 写了从第几小节就按写的
+    assert mdplan.parse_text(fade.replace("从第 177 小节淡出，淡出 16 小节", "淡出 16 小节")).ending == (161.0, 16.0)
+    plan = mdplan.parse_text(fade.replace("- 结尾：从第 177 小节淡出，淡出 16 小节\n", ""))
+    assert plan.ending == (161.0, None)
+    s = convert(plan, lib()).set
+    assert s.ending.mode == "fade" and s.ending.bar == 161 and s.ending.bars == 32  # 一直淡到曲末（第 193 小节）
+
+
+def test_bad_references_name_the_line():
+    t = TEMPLATE.read_text(encoding="utf-8")
     with pytest.raises(PlanError) as e:
-        mdplan.parse_text(with_cues(cues))
-    assert words in str(e.value) and "第 " in str(e.value), str(e.value)
+        mdplan.parse_text(t.replace(ENTRY2, "- 进场：B 的 5 号垫落在 A 的第 97 小节"))
+    assert "第 " in str(e.value) and "没有「5 号垫」" in str(e.value) and "1 号垫 DROP" in str(e.value)
+    with pytest.raises(PlanError, match="B 从哪进"):
+        mdplan.parse_text(t.replace(ENTRY2, "- 进场：落在 A 的第 97 小节"))
 
 
-def test_fade_cue_needs_ending_and_must_match():
-    t = TEMPLATE.read_text(encoding="utf-8").replace("| 8 | DROP 2 | 橙 | 113.1 | 第二个 drop |", "| 8 | FADE | | 161.1 | |")
-    with pytest.raises(PlanError, match="以 hot cue 为准"):
-        mdplan.parse_text(t)
-    with pytest.raises(PlanError, match="淡出 M 小节"):
-        mdplan.parse_text(t.replace("- 结尾：从第 177 小节淡出，淡出 16 小节\n", ""))
-
-
-def test_entry_without_b_bar_needs_an_in_cue():
-    t = TEMPLATE.read_text(encoding="utf-8").replace("| 1 | IN | 绿 | 33.1 | 从 drop 满推子切进来（过渡 2 的进场按它） |\n", "")
-    with pytest.raises(PlanError, match="写 IN"):
-        mdplan.parse_text(t)
-
-
-def test_time_written_in_cue_is_checked_against_the_beat_grid():
-    """IN 用时间写：曲子分析完后换成拍，必须和进场写的小节是同一拍；差几十毫秒提示。"""
+def test_entry_from_a_time_written_pad():
+    """进场引用用时间写的垫子：曲子分析完后换成拍；离拍几十毫秒提示一下，照拍放。"""
     bar = 4 * 60 / 132
-    t = TEMPLATE.read_text(encoding="utf-8").replace("| 1 | IN | 绿 | 33.1 |", f"| 1 | IN | 绿 | 0:{0.12 + 32 * bar:06.3f} |")
-    t = t.replace("- 进场：B 的 IN 落在 A 的第 97 小节", "- 进场：B 的第 33 小节落在 A 的第 97 小节")
+    t = TEMPLATE.read_text(encoding="utf-8").replace("| 1 | DROP | 橙 | 33.1 |", f"| 1 | DROP | 橙 | 0:{0.12 + 32 * bar:06.3f} |")
     plan = mdplan.parse_text(t)
-    assert len(plan.cue_checks) == 1 and plan.cue_checks[0].bar == 33
-    assert convert(plan, lib()).ok
-    plan = mdplan.parse_text(t.replace("B 的第 33 小节落在", "B 的第 34 小节落在").replace("| 97 停 | 33 |", "| 97 停 | 34 |"))
+    tr = plan.transitions[1]
+    assert tr.b_in_cue is not None and all(r.b_bar is None for r in tr.rows) and len(plan.cue_refs) == 1
     conv = convert(plan, lib())
-    assert not conv.ok and any("hot cue IN" in n.msg and "33.1" in n.msg for n in conv.notes if n.level == "error")
+    assert conv.ok and conv.set.transitions[1].b_in == 33
     late = t.replace(f"0:{0.12 + 32 * bar:06.3f}", f"0:{0.12 + 32 * bar + 0.04:06.3f}")  # 晚 40ms
     conv = convert(mdplan.parse_text(late), lib())
-    assert conv.ok and any("+40ms" in n.msg for n in conv.notes if n.level == "warn")
-    with pytest.raises(PlanError, match="用时间写"):
-        mdplan.parse_text(t.replace("- 进场：B 的第 33 小节落在 A 的第 97 小节", "- 进场：B 的 IN 落在 A 的第 97 小节"))
+    assert conv.ok and conv.set.transitions[1].b_in == 33 and any("+40ms" in n.msg for n in conv.notes if n.level == "warn")
+
+
+def test_auto_cues_do_not_double_up_on_marked_spots():
+    """模板 #3 的 1 号垫 DROP 就在进场的位置：不再另放一个 IN，主 Cue 在那里。"""
+    tracks = lib()
+    s = convert(mdplan.parse(TEMPLATE), tracks).set
+    s = fill_hot_cues(s, compile_with(s, tracks))
+    assert [(h.pad, h.name, h.bar) for h in s.tracks[2].hot_cues] == [(1, "DROP", 33), (2, "FADE", 177), (7, "VOCAL", 40.5), (8, "DROP 2", 113)]
+    assert s.tracks[2].main_cue == 33
 
 
 def test_switch_between_sets(tmp_path):

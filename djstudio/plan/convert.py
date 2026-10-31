@@ -293,7 +293,9 @@ def _neutral(lane: list[list[Any]], param: str) -> bool:
     return all(abs(float(p[1]) - neutral) < 1e-9 for p in lane)
 
 
-def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str, Any], list[Note]]:
+def transition(tr: PlanTransition, a: Alignment, b: Alignment, b_in: float | None = None) -> tuple[dict[str, Any], list[Note]]:
+    """b_in：B 从谱上第几小节进（默认谱上写的；从用时间写的 hot cue 进时由 convert 换算好传进来）。"""
+    b_in = float(tr.b_in) if b_in is None else b_in
     where = f"过渡 {tr.no}（{tr.a_name} → {tr.b_name}）"
     notes: list[Note] = []
     a0 = tr.rows[0].a_bar
@@ -322,7 +324,7 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
             t0, t1 = fx.bar0 - a0, fx.bar1 + 1 - a0
             keep = fx.bar1 + 1 >= tr.rows[-1].a_bar
         else:
-            t0, t1 = play_at + fx.bar0 - tr.b_in, play_at + fx.bar1 + 1 - tr.b_in
+            t0, t1 = play_at + fx.bar0 - b_in, play_at + fx.bar1 + 1 - b_in
             keep = False
         name = f"{fx.deck}.{fx.kind}"
         lane = lanes.setdefault(name, [[max(0.0, t0), 0.0]])
@@ -334,7 +336,7 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
     tempo: list[list[Any]] = [[0, tr.tempo_from]]
     if tr.ramp_b:
         m, n = tr.ramp_b
-        t0, t1 = play_at + m - tr.b_in, play_at + n + 1 - tr.b_in
+        t0, t1 = play_at + m - b_in, play_at + n + 1 - b_in
         tempo = [[0, tr.tempo_from], [t0, tr.tempo_from], [t1, tr.tempo_to]]
         bars = max(bars, float(t1))
     elif tr.tempo_to != tr.tempo_from:
@@ -346,13 +348,13 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment) -> tuple[dict[str
     elif not stop and a.last_bar is not None and abs(a.last_bar - (tr.rows[-1].a_bar + 1)) > 2:
         notes.append(Note("warn", where, f"谱上 A 在第 {tr.rows[-1].a_bar} 小节结束，A 实际播到第 {a.last_bar - 1:.1f} 小节才完"
                                          f"（「结束」= A 自己播完，时间线等它停）。要在这里停 A，写「{tr.rows[-1].a_bar} 停」"))
-    note = f"打碟谱过渡 {tr.no}：{'长交接' if tr.technique == 'longhand' else '瞬时切换'}，B 第 {tr.b_in} 小节 = A 第 {tr.b1_at_a} 小节"
+    note = f"打碟谱过渡 {tr.no}：{'长交接' if tr.technique == 'longhand' else '瞬时切换'}，B 从 {bar_beat(b_in)}（小节.拍）进 = A 第 {tr.b1_at_a} 小节"
     if a.k or b.k:
         note += f"（谱上的小节号换成本应用：A {a.k:+d}，B {b.k:+d}）"
     out = {
         "technique": "custom",
         "start": float(a0 + a.k),
-        "b_in": float(tr.b_in + b.k),
+        "b_in": float(b_in + b.k),
         "play_at": float(play_at),
         "bars": bars,
         "params": {"a_end": "stop" if stop else "playout"},
@@ -398,24 +400,30 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
                               f"谱的第 1 拍比网格 {a.residual_ms:+.0f}ms（其它曲子中位 {med:+.0f}ms）。"
                               "谱的作者测起音的位置和这里不完全一样；同步按网格走，两个 kick 照样对齐"))
 
-    # 谱上用时间写的 IN / OUT / STOP / FADE：换成这首的拍，必须和谱上写的小节是同一拍（hot cue 说了算，不将就）
-    for chk in plan.cue_checks:
-        k = next((n for n, pt in enumerate(plan.tracks) if pt.no == chk.track), None)
+    # 谱上「从哪个 hot cue 进 / 起播 / 淡出」而那个 hot cue 是用时间写的：换成这首的拍（谱上的小节）再用
+    start_bar = float(plan.start_bar)
+    entry: dict[int, float] = {tr.no: float(tr.b_in) for tr in plan.transitions}
+    fade_at = plan.ending[0] if plan.ending else None
+    for ref in plan.cue_refs:
+        k = next((n for n, pt in enumerate(plan.tracks) if pt.no == ref.track), None)
         lt, al = (matches[k], aligns[k]) if k is not None else (None, None)
-        if lt is None or al is None or lt.grid is None or chk.cue.time is None:
+        if lt is None or al is None or lt.grid is None or ref.cue.time is None:
             continue
         g2 = Grid(lt.grid.bpm, lt.grid.first_beat, al.downbeat, lt.grid.duration)
-        beat = g2.time_beat(chk.cue.time)
+        beat = g2.time_beat(ref.cue.time)
         j = round(beat)
-        res_ms = (beat - j) * g2.beat_len * 1000
         on = g2.beat_bar(j) - al.k  # 谱上的小节（带拍）
-        where = f"#{chk.track:02d} {plan.tracks[k].title}"
-        name = f"hot cue {chk.cue.name.upper()}（第 {chk.cue.line} 行，{fmt_time(chk.cue.time)}）"
-        if abs(on - chk.bar) > 1e-6:
-            notes.append(Note("error", where, f"{name} 在谱上第 {bar_beat(on)}，{chk.what}写的是第 {bar_beat(chk.bar)}："
-                                              f"以 hot cue 为准，改成第 {bar_beat(on)}（或者把 hot cue 改对）"))
-        elif abs(res_ms) > OUTLIER_MS:
-            notes.append(Note("warn", where, f"{name} 离这里的拍 {res_ms:+.0f}ms：Engine DJ 的网格和这里不完全一样，按拍放在第 {bar_beat(on)}"))
+        res_ms = (beat - j) * g2.beat_len * 1000
+        if abs(res_ms) > OUTLIER_MS:
+            notes.append(Note("warn", f"#{ref.track:02d} {plan.tracks[k].title}",
+                              f"hot cue {ref.cue.pad} 号垫 {ref.cue.name}（第 {ref.cue.line} 行，{fmt_time(ref.cue.time)}）离这里的拍 "
+                              f"{res_ms:+.0f}ms（Engine DJ 的网格和这里差一点），按拍放在第 {bar_beat(on)}"))
+        if ref.target == "start":
+            start_bar = on
+        elif ref.target == "entry":
+            entry[ref.transition] = on
+        elif ref.target == "fade":
+            fade_at = on
 
     keylocked = [pt for pt in plan.tracks if pt.keylock]
     if keylocked and keylock_note:
@@ -431,7 +439,7 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
                              "note": f"谱 #{pt.no:02d}；谱上第 1 小节 = {pt.bar1_s if pt.bar1_s is not None else '—'}s"
                                      + (f"，本应用第 {1 + al.k} 小节" if al.k else "")}
         if i == 0:
-            t["start"] = float(plan.start_bar + al.k)
+            t["start"] = float(start_bar + al.k)
         # 谱上的段落标记（breakdown / drop …）换成本应用的小节号；hot cue 按 docs/SET_SPEC.md 由它们定
         cues: dict[str, float] = {}
         for bar, label in pt.cues:
@@ -463,15 +471,20 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
     for tr in plan.transitions:
         a, b = aligns[tr.no - 1], aligns[tr.no]
         assert a and b
-        d, tn = transition(tr, a, b)
+        d, tn = transition(tr, a, b, entry[tr.no])
         trans.append(d)
         notes += tn
     ending: dict[str, Any] = {"mode": "playout"}
     if plan.ending:
-        at, n = plan.ending
+        n = plan.ending[1]
         last_al = aligns[-1]
         assert last_al
-        ending = {"mode": "fade", "bars": n, "bar": None if at is None else float(at + last_al.k)}
+        if n is None:  # 从 FADE 一直淡到曲末
+            n = (last_al.last_bar or 0) - (fade_at or 0)
+            if fade_at is None or n <= 0:
+                notes.append(Note("error", "结尾", "要写淡出几小节（「- 结尾：淡出 16 小节」）"))
+                n = 8.0
+        ending = {"mode": "fade", "bars": round(n, 4), "bar": None if fade_at is None else float(fade_at + last_al.k)}
     if any(n.level == "error" for n in notes):
         return Converted(None, matches, aligns, notes)
     sid = set_id or _slug(Path(source).stem if source else plan.title)

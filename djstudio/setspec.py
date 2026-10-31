@@ -312,8 +312,9 @@ def fill_hot_cues(s: SetFile, c: Compiled) -> SetFile:
         manual = [h for h in st.hot_cues if not h.auto and not (s.spec == "1" and (h.pad, h.name) in _V1_PADS)]
         taken = {h.pad for h in manual}
         free = [p for p in range(1, PAD_COUNT + 1) if p not in taken]
-        # 手写了同名、位置差不到 1 小节的点不再放；手写了叫 IN 的垫子，自动的 IN 让给它
-        pts = [p for p in points[i] if not any(h.name.upper() == p.name and (abs(h.bar - p.bar) <= 1 or p.kind == "in")
+        # 不浪费垫子：手写的垫子已经标了这个位置（不管叫什么），或者手写了同名的点（差不到 1 小节；IN 不论在哪），自动的就不放
+        pts = [p for p in points[i] if not any(abs(h.bar - p.bar) < 1 / 8 or (h.name.upper() == p.name and
+                                                                                (abs(h.bar - p.bar) <= 1 or p.kind == "in"))
                                                for h in manual)]
         if len(pts) > len(free):
             keep = sorted(range(len(pts)), key=lambda k: (_PRIO[pts[k].kind], pts[k].bar))[:len(free)]
