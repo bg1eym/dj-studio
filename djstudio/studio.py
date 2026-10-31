@@ -1216,7 +1216,13 @@ class Studio:
         tracks = [t.model_copy() for t in s.tracks[k:]]
         tracks[0] = tracks[0].model_copy(update={"start": bar})
         sid = f"{s.id}-at{k + 1}-{bar:g}" if start is not None else f"{s.id}-from{from_transition}"
-        return s.model_copy(update={"id": sid, "tracks": tracks, "transitions": s.transitions[k:]})
+        ending = s.ending
+        if k == len(s.tracks) - 1 and ending.mode == "fade" and ending.bar is not None and bar > ending.bar:
+            # 从最后一首的淡出中途开始：淡出从这里起，到原来淡完的地方结束
+            left = ending.bar + ending.bars - bar
+            ending = ending.model_copy(update={"bar": bar, "bars": max(1.0, left)}) if left > 0 else \
+                ending.model_copy(update={"mode": "playout"})
+        return s.model_copy(update={"id": sid, "tracks": tracks, "transitions": s.transitions[k:], "ending": ending})
 
     def _resume_point(self) -> dict[str, Any] | None:
         """现在停在哪：A 还在放就从 A 当前的拍继续（可以在过渡中途）；A 已经交给 B 了就从 B 继续。"""
@@ -1236,6 +1242,58 @@ class Studio:
                 return {"set": r["set"], "track": n, "bar": max(1.0, bar), "speed": r["speed"],
                         "label": f"#{n + 1} {st.title or st.id} 第 {math.floor(max(1.0, bar))} 小节"}
         return None
+
+    SEEK_FADE = 0.15  # 点波形跳过去：先把正在放的声音很快淡掉（不是硬切的爆音），再从点的地方开始
+
+    def seek_target(self, s: SetFile, c: Compiled, track: int, bar: float) -> tuple[int, float]:
+        """在第 track 首（0 起）的波形上点了第 bar 小节 → 这一场从哪开始 (第几首, 第几小节)，都按整套 set 算：
+        - 点在这首进来的那段过渡里（这首是 B，已经起播了）：换成上一首（A）在那一刻的小节，从过渡中途开始——
+          交接已经完成了也一样，回卷到交接里；
+        - 点在这首交完以后（A 已经停了）：换成下一首（B）在那一刻的位置；
+        - 别的地方：就从这首的这一小节开始（在这首的出曲过渡里 = 从过渡中途开始）。"""
+        n = len(s.tracks)
+        if not 0 <= track < n:
+            raise StudioError(f"没有第 {track + 1} 首")
+        b = math.floor((max(1.0, bar) - 1) * 4 + 1e-6) / 4 + 1  # 落在拍上
+        ex_in = c.expanded[track - 1] if 0 < track <= len(c.expanded) else None
+        if ex_in is not None:
+            tr = s.transitions[track - 1]
+            if tr.b_in - 1e-6 <= b < tr.b_in + (ex_in.bars - ex_in.play_at) - 1e-6:
+                return track - 1, tr.start + ex_in.play_at + (b - tr.b_in)
+        ex_out = c.expanded[track] if track < len(c.expanded) else None
+        if ex_out is not None and track + 1 < n:
+            tr = s.transitions[track]
+            stop = next((float(e[0]) for e in ex_out.events if str(e[1]) == "A.stop"), None)
+            end = tr.start + (stop if stop is not None else ex_out.bars)
+            if not ex_out.a_playout and b >= end:
+                return track + 1, tr.b_in + (end - tr.start - ex_out.play_at) + (b - end)
+        return track, b
+
+    def seek(self, track: int, bar: float) -> Progress:
+        """演出中在波形上点一下：从那里重新开始（同一套 set、同样的倍速；交接完成了也能回卷）。"""
+        r = self._rehearsal
+        last = self.last_play
+        set_id = (r or {}).get("set") or (last or {}).get("set")
+        if not set_id:
+            raise StudioError("还没有在演出")
+        speed = float((r or last or {}).get("speed") or 1.0)
+        builtin = bool(r.get("builtin")) if r else self.builtin
+        full = self.load(set_id)
+        k, b = self.seek_target(full, self.compile(full), track, bar)
+        if not self._start_lock.acquire(blocking=False):
+            raise StudioError("正在启动，稍等")
+        try:
+            cond = self.conductor
+            if cond and cond.running:
+                cond.stop_fade = self.SEEK_FADE
+                if r:
+                    r["closing"].set()
+                cond.request_stop()
+                cond.join(10)
+            self._close_rehearsal()
+            return self._rehearse(set_id, speed, 0, builtin, (k, b))
+        finally:
+            self._start_lock.release()
 
     def resume(self) -> Progress:
         """停下后「继续」：从停下的那首、那一拍接着放（在过渡中途停的，A、B 和旋钮都回到当时的位置）。"""

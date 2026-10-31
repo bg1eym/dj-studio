@@ -290,6 +290,28 @@ class Channel {
 
 // ------------------------------------------------------------------ deck：信息条 + 滚动波形
 
+// 点波形跳过去：canvas 上的 x → 曲子里的秒数 → 小节（落在拍上由服务器做）。seekable = 现在能不能点
+function seekHover(canvas, owner) {
+  canvas.addEventListener("mousemove", (e) => {
+    const r = canvas.getBoundingClientRect();
+    owner.hoverX = e.clientX - r.left;
+  });
+  canvas.addEventListener("mouseleave", () => { owner.hoverX = null; });
+}
+
+function drawSeekHover(g, x, H, label) {
+  if (x === null || x === undefined) return;
+  g.fillStyle = "rgba(255,255,255,.75)";
+  g.fillRect(Math.round(x), 0, 1, H);
+  g.font = "bold 11px sans-serif";
+  const tw = g.measureText(label).width;
+  const lx = Math.max(2, Math.min(g.canvas.clientWidth - tw - 6, x + 5));
+  g.fillStyle = "rgba(15,17,21,.85)";
+  g.fillRect(lx - 3, H / 2 - 9, tw + 6, 16);
+  g.fillStyle = "#fff";
+  g.fillText(label, lx, H / 2 + 3);
+}
+
 class DeckView {
   constructor(d) {
     this.d = d;
@@ -308,6 +330,13 @@ class DeckView {
     this.phrase = el("span", { class: "deck-phrase" });
     this.time = el("span", { class: "deck-time" });
     this.canvas = el("canvas", { class: "live-wave" });
+    this.onSeek = null; // (第几首（0 起）, 小节) → 从那里重新开始
+    this.hoverX = null;
+    seekHover(this.canvas, this);
+    this.canvas.addEventListener("click", (e) => {
+      const b = this._barAtX(e.clientX - this.canvas.getBoundingClientRect().left, performance.now());
+      if (b !== null && this.onSeek) this.onSeek(this.track.no - 1, b);
+    });
     this.root = el("div", { class: `deck-live d${d}` },
       el("div", { class: "deck-head" },
         this.badge, this.title, this.role, el("span", { class: "grow" }),
@@ -352,6 +381,15 @@ class DeckView {
   posAt(now) {
     const a = this.anchor;
     return a.playing ? a.pos + ((now - a.t) / 1000) * a.rate * (a.speed || 1) : a.pos;
+  }
+
+  // 滚动波形上的 x → 这首的小节（播放头在正中，两侧各 SPAN_S 秒）
+  _barAtX(x, now) {
+    const t = this.track, w = this.canvas.clientWidth;
+    if (!t || !this.st || !this.st[0] || !w || !this.onSeek) return null;
+    const half = SPAN_S * (this.anchor.rate || 1);
+    const tt = this.posAt(now) + ((x - w / 2) / (w / 2)) * half;
+    return (tt - t.bar1) / (240 / t.bpm) + 1;
   }
 
   draw(now) {
@@ -463,6 +501,11 @@ class DeckView {
     g.strokeStyle = "#fff"; g.lineWidth = 2;
     g.beginPath(); g.moveTo(cx, 0); g.lineTo(cx, H); g.stroke();
     g.lineWidth = 1;
+    // 鼠标在波形上：从这里放
+    if (this.hoverX !== null) {
+      const hb = this._barAtX(this.hoverX, now);
+      if (hb !== null) drawSeekHover(g, this.hoverX, H, `▶ 从第 ${Math.max(1, Math.floor(hb))} 小节放`);
+    }
 
     // 信息：小节 / 拍 / 乐句
     const bar = timeBar(pos) + 1e-3; // cue 在小节线上时别因为浮点误差显示成上一小节
@@ -750,13 +793,27 @@ class Handoff {
       this.rows.A.root, this.rows.B.root);
     this.cache = new Map();
     this.key = null;
+    this.onSeek = null; // (第几首（0 起）, 小节) → 从那里重新开始
   }
 
   _row() {
     const r = { badge: el("span", { class: "deck-no" }), name: el("span", { class: "ho-name" }), bar: el("div", { class: "ho-bar mono" }),
       canvas: el("canvas", { class: "ho-wave" }), t: null };
     r.root = el("div", { class: "ho-row" }, el("div", { class: "ho-label" }, el("div", { class: "ho-title" }, r.badge, r.name), r.bar), r.canvas);
+    r.hoverX = null;
+    seekHover(r.canvas, r);
+    r.canvas.addEventListener("click", (e) => {
+      const b = this._barAtX(r, e.clientX - r.canvas.getBoundingClientRect().left);
+      if (b !== null && this.onSeek) this.onSeek(r.t.no - 1, b);
+    });
     return r;
+  }
+
+  // 整首波形上的 x → 这首的小节
+  _barAtX(r, x) {
+    const t = r.t, w = r.canvas.clientWidth;
+    if (!t || !w || !this.onSeek) return null;
+    return ((x / w) * t.dur - t.bar1) / (240 / t.bpm) + 1;
   }
 
   // info：{ key, title, sub, len, A: track, B: track | null }；track = { id, no, title, deck, bpm, bar1, dur, bars, wave, sections, marks }
@@ -872,6 +929,10 @@ class Handoff {
       } else {
         r.bar.textContent = `共 ${Math.floor(t.bars)} 小节`;
       }
+      if (r.hoverX !== null) {
+        const hb = this._barAtX(r, r.hoverX);
+        if (hb !== null) drawSeekHover(g, r.hoverX, H, `▶ 从第 ${Math.max(1, Math.floor(hb))} 小节放`);
+      }
     }
   }
 }
@@ -880,6 +941,7 @@ class Handoff {
 
 export class LiveView {
   constructor(root, loadTrack) {
+    this.root = root;
     this.loadTrack = loadTrack; // id → Promise<{wave, sections}>
     this.cache = new Map();
     this.loaded = new Map(); // id → {wave, sections}（已经下载好的）
@@ -916,6 +978,15 @@ export class LiveView {
     };
     this._raf = requestAnimationFrame(loop);
   }
+
+  // 点波形跳过去：fn(第几首（0 起，整套 set 里的）, 小节)；null = 不能点
+  set onSeek(fn) {
+    this._onSeek = fn;
+    this.decks[1].onSeek = fn; this.decks[2].onSeek = fn; this.handoff.onSeek = fn;
+    this.root.classList.toggle("seekable", !!fn);
+  }
+
+  get onSeek() { return this._onSeek; }
 
   setSet(comp) {
     if (this.comp === comp) return;

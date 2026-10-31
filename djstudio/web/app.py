@@ -395,6 +395,15 @@ def create_app(studio: Studio) -> FastAPI:
         studio.stop()
         return {"ok": True, "resume": studio.resume_point}
 
+    @app.post("/api/seek")
+    def api_seek(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """演出中点波形：从第 track 首（0 起）的第 bar 小节重新开始（交接完成了也能回卷）。"""
+        try:
+            track, bar = int(body["track"]), float(body["bar"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, "要 track（第几首，0 起）和 bar（小节）") from e
+        return studio.seek(track, bar).to_dict()
+
     @app.post("/api/resume")
     def api_resume() -> dict[str, Any]:
         return studio.resume().to_dict()

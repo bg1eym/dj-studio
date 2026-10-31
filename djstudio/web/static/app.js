@@ -81,6 +81,24 @@ async function stopShow() {
   toast("停止中…");
 }
 
+// 演出中点波形：从那里重新开始（交接完成了也能回卷）。track = 整套 set 里的第几首（0 起）
+let seeking = false;
+async function seekShow(track, bar) {
+  if (seeking) return;
+  seeking = true;
+  toast(`从 #${track + 1} 第 ${Math.max(1, Math.floor(bar))} 小节重新开始…`);
+  try {
+    await api("POST", "/api/seek", { track, bar });
+    S.homeDone = null;
+    await loadState();
+    renderHome(true);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    seeking = false;
+  }
+}
+
 // 停下后「继续」：从停下的那首、那一拍接着放
 async function resumeShow() {
   await api("POST", "/api/resume");
@@ -411,6 +429,7 @@ async function renderHome(force = false) {
       h("details", { class: "panel job-log" }, h("summary", {}, "运行日志"), h("div", { class: "log", id: "show-log" })),
     );
     live.setSet(S.showCompiled);
+    live.onSeek = isBuiltin() ? seekShow : null; // 内置引擎：点波形从那里放
     renderShowStatus();
     return;
   }
@@ -1133,6 +1152,7 @@ async function renderShow() {
     h("div", { class: "panel", style: "margin-top:14px" }, h("h3", {}, "运行日志"), h("div", { class: "log", id: "show-log" })),
   );
   live.setSet(S.showCompiled);
+  live.onSeek = isBuiltin() ? seekShow : null;
   renderJobPanels();
   renderShowStatus();
   updateDecks();

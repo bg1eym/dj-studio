@@ -44,6 +44,7 @@ Mixxx + DJStudio.js（控制器映射）
 网页上传走 `PUT /api/upload?name=…`（请求体就是文件），音频复制进托管曲库，打碟谱（PDF 或 .md）存到 `~/DJStudio/plans/`（最新的就是当前打碟谱）。
 读谱按扩展名分：`.md` → `plan/mdplan.py`（《打碟谱规范》docs/SCORE_SPEC.md，按表头认列，报错带行号），`.pdf` → `plan/cdw.py`；两者都产出 `cdw.Plan`。
 `GET /api/score/spec.md`、`/api/score/template.md` 给出规范和模板（打包的 App 里在 `djstudio/docs/`）。
+演出中点波形：`POST /api/seek {track, bar}` → `Studio.seek`：`seek_target` 按整套 set 把「第几首第几小节」换成从哪开始（点在进来的过渡里 = 上一首在那一刻、从过渡中途开始；点在交完以后 = 下一首在那一刻），0.15 秒淡出后用「继续」同一条路（`rehearsal_set` + `compile(resume=True)` + conductor 的 resume）重新开始。
 一份谱 = 一套 set：`GET /api/plans` 列出放进来过的谱（`Studio.plans`），`POST /api/plans/select` 换成某一份（改它的修改时间，最近的 = 当前的，再找曲子 / 自动分析）。一键分析的 `Job.plan` 记着是哪份谱的，首页只把当前谱的分析结果当「可以演出了」。
 过渡 / 开场 / 结尾可以引用谱上的 hot cue（SCORE_SPEC.md 5.3，`mdplan.ref_cue`）：小节.拍写的读谱时就换好，时间写的记成 `Plan.cue_refs`，曲子分析完后在 `convert` 里换成拍。不拿垫子去和过渡表核对。
 

@@ -439,3 +439,44 @@ def test_switch_between_sets(tmp_path):
     assert st["title"] == "旧的 14 首" and client.get("/api/plan").json()["file"] == "old.md"
     assert [p["current"] for p in client.get("/api/plans").json()] == [True, False]  # 换回去的在最前
     assert client.post("/api/plans/select", json={"file": "../etc/passwd"}).status_code >= 400
+
+
+# ---------------------------------------------------------------- 演出中点波形：从哪重新开始
+
+def _studio(tmp_path):
+    from djstudio.config import Config
+    from djstudio.mixxx import fakedb
+    from djstudio.studio import Studio
+
+    (tmp_path / "mixxx").mkdir()
+    fakedb.create(tmp_path / "mixxx" / "mixxxdb.sqlite")
+    return Studio(Config(home=tmp_path / "home", library=tmp_path / "lib", mixxx_dir=tmp_path / "mixxx",
+                         browse_roots=[tmp_path], engine="builtin"))
+
+
+def test_seek_target_maps_clicks_onto_the_set(tmp_path):
+    """模板：过渡 1 长交接（A 121 开始，B 在时间线第 8 小节起播，A 自己播完）；过渡 2 瞬时切换（A 93 开始，97 停，B 从 33 进）。"""
+    studio = _studio(tmp_path)
+    tracks = lib()
+    s = convert(mdplan.parse(TEMPLATE), tracks).set
+    c = compile_with(s, tracks)
+    t = studio.seek_target
+    assert t(s, c, 0, 50) == (0, 50)  # 第 1 首独奏：就从那里
+    assert t(s, c, 0, 140.6) == (0, 140.5)  # 落在拍上（第 140 小节第 3 拍）；在过渡 1 里 = 从过渡中途开始
+    # 第 2 首在过渡 1 里（B 已经起播，交接完成了也一样）：回卷到第 1 首那一刻
+    assert t(s, c, 1, 1) == (0, 129) and t(s, c, 1, 10) == (0, 138)
+    assert t(s, c, 1, 60) == (1, 60)  # 第 2 首独奏
+    # 第 2 首在 97 停（交给第 3 首）：点 97 以后 = 第 3 首在那一刻的位置
+    assert t(s, c, 1, 100) == (2, 36)
+    assert t(s, c, 2, 20) == (2, 20)  # 第 3 首在进点（33）之前：就从那里放（跳过过渡 2）
+    with pytest.raises(Exception):
+        t(s, c, 5, 1)
+
+
+def test_rehearsal_set_starting_inside_the_final_fade(tmp_path):
+    studio = _studio(tmp_path)
+    s = convert(mdplan.parse(TEMPLATE), lib()).set  # 结尾：从第 177 小节淡出 16 小节
+    cut = studio.rehearsal_set(s, start=(2, 185))
+    assert cut.ending.mode == "fade" and cut.ending.bar == 185 and cut.ending.bars == 8
+    assert studio.rehearsal_set(s, start=(2, 195)).ending.mode == "playout"
+    assert studio.rehearsal_set(s, start=(2, 100)).ending == s.ending

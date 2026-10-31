@@ -618,6 +618,21 @@ def test_markdown_score_drives_the_builtin_flow(tmp_path, monkeypatch):
     p = studio.conductor.progress
     assert p.stage == "done", "\n".join(p.log) + f"\n{p.error}"
 
+    # 演出中点波形：交接完成以后，在第 2 首进来的那段（第 3 小节）点一下 → 回卷到第 1 首在那一刻，过渡重新做一遍
+    studio.play(s.id, speed=8)
+    t0 = time.time()
+    while (studio.conductor.progress.index or 0) < 1 and time.time() - t0 < 60:
+        time.sleep(0.05)
+    assert studio.conductor.progress.index == 1, "\n".join(studio.conductor.progress.log)  # 交接完成了
+    old_cond = studio.conductor
+    studio.seek(1, 3.3)
+    assert not old_cond.running and studio.conductor is not old_cond
+    assert studio.last_play["track"] == 0 and studio.last_play["bar"] == tr.start + tr.play_at + 2.25  # 落在拍上：第 3 小节第 2 拍
+    studio.conductor.join(60)
+    p = studio.conductor.progress
+    log = "\n".join(p.log)
+    assert p.stage == "done" and "B 起播" in log and "过渡 1 完成" in log, log + f"\n{p.error}"
+
 
 def test_waveform_is_denon_tri_band():
     """波形数据是 Denon 三频段：三段按 Denon 的分界各自取音量、按满幅标定。
