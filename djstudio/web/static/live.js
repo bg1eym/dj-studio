@@ -535,8 +535,8 @@ class Timeline {
     this.head = el("div", { class: "tl-head" });
     this.rows = el("div", { class: "tl-rows" });
     this.cursor = el("div", { class: "tl-cursor" });
-    this.next = el("div", { class: "tl-next" });
-    this.root = el("div", { class: "timeline-live" }, this.head, el("div", { class: "tl-wrap" }, this.rows, this.cursor), this.next);
+    this.next = el("div", { class: "tl-next" }); // 现在 / 接下来的 EQ 操作：放在混音台下面（LiveView 摆），大字
+    this.root = el("div", { class: "timeline-live" }, this.head, el("div", { class: "tl-wrap" }, this.rows, this.cursor));
     this.tl = { v: null, t: 0, bps: 2, running: false };
   }
 
@@ -954,7 +954,7 @@ export class LiveView {
     this.mixer.title = "旋钮 / 推子 / 电平都是从引擎读回的实际值";
     root.append(this.banner, this.handoff.root,
       el("div", { class: "live-decks" }, this.decks[1].root, this.decks[2].root),
-      el("div", { class: "live-bottom" }, this.mixer, this.timeline.root));
+      el("div", { class: "live-bottom" }, el("div", { class: "live-left" }, this.mixer, this.timeline.next), this.timeline.root));
     this._raf = 0;
     this._lastNext = 0;
     const loop = (now) => {

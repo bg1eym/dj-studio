@@ -23,7 +23,7 @@
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.4.2";
+DJStudio.VERSION = "0.4.3";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -369,8 +369,23 @@ DJStudio.arm = function (p) {
         DJStudio.set(DJStudio.ch(b), "volume", vb);
         var bpm0 = p.bpm && p.bpm.length ? DJStudio.interp(p.bpm, p.play) : DJStudio.get(DJStudio.ch(a), "bpm");
         if (bpm0 > 0) { DJStudio.set(DJStudio.ch(b), "bpm", bpm0); }
+        DJStudio.presetB(DJStudio.prog);
     }
     return "";
+};
+
+// 换上 B 以后马上把它的 EQ / Filter 摆到过渡开头的位置（真机上也是先把 B 的低频切掉、推子拉下，再等着推进来），
+// 不等过渡开始才一下子拧过去。效果（echo / reverb）不在这时动：关效果会把上一首还在响的混响尾巴切掉，过渡里再开。
+DJStudio.presetB = function (pr) {
+    var p = pr ? pr.p : null;
+    if (!p || !p.b || pr.bStarted) { return; }
+    var name, param;
+    for (name in p.lanes) {
+        if (!p.lanes.hasOwnProperty(name) || name.indexOf("B.") !== 0) { continue; }
+        param = name.substr(2);
+        if (param === "vol" || param === "echo" || param === "reverb") { continue; }
+        DJStudio.applyParam(p.b.deck, param, DJStudio.interp(p.lanes[name], pr.tl));
+    }
 };
 
 DJStudio.progTl = function (pr) {
@@ -482,8 +497,13 @@ DJStudio.runProg = function () {
         pr.doneAt = DJStudio.now();
         DJStudio.send({ t: "ev", e: "done", id: p.id, tl: Math.round(pr.tl * 1000) / 1000 });
         var aDeck = p.a.deck;
-        // 留 3 秒给 reverb/echo 尾巴，再把出场 deck 归位
-        engine.beginTimer(3000, function () { DJStudio.neutral(aDeck); }, true);
+        // 留 3 秒给 reverb/echo 尾巴，再把出场 deck 归位。这 3 秒里下一首可能已经装进这个 deck、下一段已经就位：
+        // 归位之后把它（下一段的 B）的旋钮再摆回过渡开头的位置
+        engine.beginTimer(3000, function () {
+            DJStudio.neutral(aDeck);
+            var q = DJStudio.prog;
+            if (q && q.st === "armed" && q.p.b && q.p.b.deck === aDeck) { DJStudio.presetB(q); }
+        }, true);
     }
 };
 

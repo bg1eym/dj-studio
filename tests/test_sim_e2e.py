@@ -177,3 +177,22 @@ def test_manual_stop_fades_out(rig):
     assert cond.progress.stage == "stopped"
     st = link.sim({"cmd": "state"})
     assert not any(d["playing"] for d in st["decks"])
+
+
+def test_incoming_knobs_preset_when_loaded(rig):
+    """引擎 0.4.3：B 一装好、过渡就位（还没开始）时，B 的 EQ 就已经在过渡开头的位置——不等过渡开始才一下子拧过去。"""
+    link, client = rig
+    compiled = make_compiled()
+    p1 = compiled.programs[0]
+    b_lo0 = p1["lanes"]["B.lo"][0][1]
+    assert b_lo0 < 0.5  # 长交接：B 的低频先切掉（-15 dB）
+    sts = []
+    client.add_listener(lambda m: sts.append(m) if m.get("t") == "st" else None)
+    cond = Conductor(client, compiled)
+    run(cond, 90)
+    assert cond.progress.stage == "done", "\n".join(cond.progress.log)
+    armed = [st for st in sts if (st.get("pg") or {}).get("id") == p1["id"] and st["pg"]["st"] == "armed" and st["d"][1][0]]
+    assert len(armed) > 5, len(armed)
+    settled = armed[2:]  # 下发后第一两帧可能还是下发前的
+    assert all(abs(st["m"][1][2] - b_lo0) < 0.01 for st in settled), [st["m"][1][2] for st in settled[:10]]
+    assert all(st["d"][0][1] and not st["d"][1][1] for st in settled)  # 这时 A 还在独奏，B 没在放

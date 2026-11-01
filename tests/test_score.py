@@ -480,3 +480,21 @@ def test_rehearsal_set_starting_inside_the_final_fade(tmp_path):
     assert cut.ending.mode == "fade" and cut.ending.bar == 185 and cut.ending.bars == 8
     assert studio.rehearsal_set(s, start=(2, 195)).ending.mode == "playout"
     assert studio.rehearsal_set(s, start=(2, 100)).ending == s.ending
+
+
+def test_analysis_is_announced_when_it_starts(tmp_path):
+    """首页的进度条：任务一开始就广播（以前只在结束时说，网页还停在「开始分析」按钮）。"""
+    import threading
+
+    studio = _studio(tmp_path)
+    events = []
+    studio.listeners.append(lambda kind, payload: events.append((kind, dict(payload))) if kind == "job" else None)
+    gate = threading.Event()
+    job = studio.start_job("分析", lambda j: gate.wait(5), ["音频分析"], [1.0])
+    assert events and events[0][1]["state"] == "running" and events[0][1]["name"] == "分析"
+    gate.set()
+    for _ in range(100):
+        if job.state != "running":
+            break
+        threading.Event().wait(0.02)
+    assert events[-1][1]["state"] == "ok"

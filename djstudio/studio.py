@@ -447,6 +447,7 @@ class Studio:
             if self.conductor and self.conductor.running:
                 raise StudioError("set 正在播放，不能做这个操作")
             job = self.job = Job(name, stages=list(stages or []), weights=list(weights or []))
+        self.emit("job", job.to_dict())  # 一开始就告诉网页：首页马上换成进度条（以前只在结束时说，网页还停在「开始分析」）
 
         def run() -> None:
             try:
@@ -1017,7 +1018,8 @@ class Studio:
         return self.maybe_auto()
 
     def maybe_auto(self) -> Job | None:
-        """打碟谱和谱上的歌都齐了 → 自动开始一键分析（同一份谱 + 同一组歌只自动开始一次）。"""
+        """打碟谱和谱上的歌都齐了 → 自动开始一键分析（同一份谱（同一个修改时间）+ 同一组歌只自动开始一次；
+        改了谱用同一个文件名再拖进来，修改时间变了，照样自动开始）。"""
         with self._auto_lock:
             if (self.job and self.job.state == "running") or (self.conductor and self.conductor.running):
                 return None
@@ -1026,7 +1028,8 @@ class Studio:
             st = self.plan_status()
             if not st or st.get("error") or not all(r["track"] for r in st["tracks"]):
                 return None
-            key = (st["file"], tuple(r["track"] for r in st["tracks"]))
+            path = self.current_plan()
+            key = (st["file"], path.stat().st_mtime if path else 0, tuple(r["track"] for r in st["tracks"]))
             if key == self._auto_key:
                 return None
             try:

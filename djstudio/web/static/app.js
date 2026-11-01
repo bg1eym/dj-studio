@@ -342,6 +342,7 @@ function schedulePlanReload() {
   clearTimeout(planReloadTimer);
   planReloadTimer = setTimeout(async () => {
     S.plan = await api("GET", "/api/plan").catch(() => S.plan);
+    await loadState().catch(() => {}); // 谱和曲子齐了服务器会自动开始分析：拿到任务，首页换成进度条
     renderHome();
   }, 400);
 }
