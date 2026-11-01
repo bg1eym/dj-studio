@@ -92,6 +92,8 @@ git clone https://github.com/bg1eym/dj-studio ~/dj-studio && cd ~/dj-studio && p
 
 ### 更新
 
+每一版改了什么：[docs/CHANGELOG.md](docs/CHANGELOG.md)（更新记录）；GitHub Release 页上每一版有自己的 `v版本号` 发布（从 0.3.19 起带应用下载）。
+
 应用：再运行一次上面「安装」那一行（会换成最新的 DJ Studio.app；曲库、分析结果、set 都在 `~/DJStudio` 和 `~/Music/DJStudio`，不受影响）。
 右上角显示版本和提交号。从源码运行时每次启动自动 `git pull`（`DJSTUDIO_NO_UPDATE=1` 关掉）。
 

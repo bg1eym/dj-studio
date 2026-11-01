@@ -24,6 +24,22 @@ env:
   RELEASE_TAG: mac-app-latest
 
 jobs:
+  # 每一版的标签：提交说明以「DJ Studio 0.3.x:」开头的就是那一版，没有 v0.3.x 标签的补上（在 GitHub 上能直接看每一版的代码）
+  tags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 补每一版的标签
+        run: |
+          git fetch --tags --force
+          git log --format='%H %s' | sed -nE 's/^([0-9a-f]+) DJ Studio ([0-9]+\.[0-9]+\.[0-9]+):.*/\2 \1/p' | while read -r v h; do
+            if ! git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+              git tag "v$v" "$h" && git push origin "v$v" && echo "v$v → ${h::7}"
+            fi
+          done
+
   engine:
     name: engine-${{ matrix.arch }}
     # Mixxx 的 macOS 构建环境只支持 Intel 构建机；Apple 芯片版是交叉编译（和 Mixxx 官方 CI 一样）
@@ -221,7 +237,38 @@ jobs:
             echo 'curl -s -m 3 -X POST http://127.0.0.1:8430/api/quit >/dev/null; pkill -f "DJ Studio.app/Contents"; sleep 1; curl -fL -o /tmp/djstudio.zip "https://github.com/bg1eym/dj-studio/releases/download/mac-app-latest/DJ-Studio-mac-arm64.zip" && rm -rf "/Applications/DJ Studio.app" && ditto -x -k /tmp/djstudio.zip /Applications && open "/Applications/DJ Studio.app"'
             echo '```'
           } > release-notes.md
+          # 这一版改了什么：docs/CHANGELOG.md 里「## 版本号」那一段
+          python - "$VER" > version-notes.md <<'PY'
+          import re, sys
+          ver = sys.argv[1]
+          text = open("docs/CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(r"^## " + re.escape(ver) + r"\b[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+          print(m.group(1).strip() if m else "（这一版没写更新记录）")
+          PY
+          {
+            echo
+            echo "## 这一版改了什么"
+            echo
+            cat version-notes.md
+            echo
+            echo "以前每一版：[更新记录](https://github.com/bg1eym/dj-studio/blob/main/docs/CHANGELOG.md)，以及 Release 页上的 v 开头的各版本。"
+          } >> release-notes.md
           gh release edit "$RELEASE_TAG" --title "DJ Studio ${VER}（Mac，Apple 芯片）" --notes-file release-notes.md --prerelease=false --latest || true
+          # 每一版单独留一个发布（v版本号）：说明 + 这一版的应用，以后能看历史、能装回旧版。同一版重新构建就更新它
+          {
+            echo "DJ Studio ${VER}（${GITHUB_SHA::7}），Apple 芯片的 Mac。"
+            echo
+            cat version-notes.md
+            echo
+            echo "装这一版：下载下面的 DJ-Studio-mac-arm64.zip，解压后拖进「应用程序」（先退出正在运行的 DJ Studio）。装最新版用 README 里的那一行命令。"
+          } > tag-notes.md
+          if gh release view "v${VER}" >/dev/null 2>&1; then
+            for i in 1 2 3; do gh release upload "v${VER}" DJ-Studio-mac-${{ matrix.arch }}.zip --clobber && break; sleep 10; done
+            gh release edit "v${VER}" --title "DJ Studio ${VER}" --notes-file tag-notes.md --latest=false || true
+          else
+            gh release create "v${VER}" DJ-Studio-mac-${{ matrix.arch }}.zip --target "$GITHUB_SHA" --title "DJ Studio ${VER}" \
+              --notes-file tag-notes.md --latest=false || true
+          fi
       - name: 上传日志（成功失败都传，Release「ci-logs」）
         if: always()
         env:

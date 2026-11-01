@@ -12,6 +12,7 @@
 - 改 `DJStudio.js` 时同步改 `protocol.py` / `sim/fake_mixxx.mjs`，并把 `DJStudio.VERSION` 加一。脚本只用 ES5。
 - 涉及 Mixxx 行为的判断**先查 Mixxx 源码**（docs/MIXXX_NOTES.md 记录了已核对的结论和行号），不能凭印象；平台行为（进程名、MIDI 口名、CoreMIDI）还**必须真机验证**：模拟器是按我们的理解写的，测过不代表 Mixxx 真这样。不确定的地方写进 docs/DEVICE_TEST.md 的假设表。
 - 演示模式 `djstudio demo` 可以在没有 Mixxx 的环境里跑完整流程（含网页）。
+- **每次发布（版本号加一）都在 [docs/CHANGELOG.md](docs/CHANGELOG.md) 最上面写一段**（中文，写用户能感觉到的变化，带日期）：`tests/test_changelog.py` 查当前版本有没有写；CI 把这一段写进 Release 说明，并单独发一个 `v版本号` 的 Release（带应用）。
 
 ## 把编排方案转成 set 文件
 
