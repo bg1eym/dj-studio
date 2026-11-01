@@ -36,7 +36,9 @@ jobs:
           git fetch --tags --force
           git log --format='%H %s' | sed -nE 's/^([0-9a-f]+) DJ Studio ([0-9]+\.[0-9]+\.[0-9]+):.*/\2 \1/p' | while read -r v h; do
             if ! git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
-              git tag "v$v" "$h" && git push origin "v$v" && echo "v$v → ${h::7}"
+              git tag "v$v" "$h"
+              # 老提交里的构建配置（.github/workflows）和现在不同时，GitHub 不让构建自带的令牌补这个标签：跳过（更新记录里有那一版的提交链接）
+              if git push -q origin "v$v" 2>/dev/null; then echo "v$v → ${h::7}"; else echo "v$v 补不上（GitHub 不许自动补这一个），跳过"; git tag -d "v$v" >/dev/null; fi
             fi
           done
 
