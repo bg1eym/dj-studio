@@ -439,13 +439,16 @@ async function renderHome(force = false) {
   root.append(card);
   card.append(setBar());
   if (mode === "drop" || mode === "plan") {
+    const missingNow = !!(S.plan && !S.plan.error && S.plan.tracks && S.plan.tracks.some((t) => !t.track));
     const input = h("input", { type: "file", multiple: true, accept: "audio/*,.pdf,application/pdf,.md,.markdown,text/markdown", class: "hidden",
       onchange: (e) => { addFiles([...e.target.files]); e.target.value = ""; } });
     const drop = h("div", { class: "drop" + (mode === "plan" ? " small" : ""), onclick: () => input.click() },
-      h("div", { class: "drop-big" }, mode === "drop" ? (S.homeNew ? "新 set：把这一套的打碟谱拖到这里（.md 或 PDF）" : "把打碟谱拖到这里（.md 或 PDF）") : "缺的曲子拖到这里"),
+      h("div", { class: "drop-big" }, mode === "drop" ? (S.homeNew ? "新 set：把这一套的打碟谱拖到这里（.md 或 PDF）" : "把打碟谱拖到这里（.md 或 PDF）")
+        : missingNow ? "缺的曲子拖到这里" : "新的打碟谱（.md）拖到这里"),
       h("div", { class: "dim" }, mode === "drop"
         ? "这一套的曲子可以一起拖进来（文件或整个文件夹）。没拖进来的，会按谱上的文件名去「下载 / 桌面 / 文稿 / 音乐」里找。以前的 set 都还在，上面可以换回去。"
-        : "文件或整个文件夹都行；也可以点这里选文件。"));
+        : missingNow ? "文件或整个文件夹都行；也可以点这里选文件。"
+          : "放进来就换成那一套、自动开始分析（以前的 set 在上面的下拉里）。要用现在这一套，点「开始分析」。"));
     // 写谱用的：规范 + 模板（复制模板改成自己的 set）
     const docs = h("div", { class: "dim score-docs" }, "自己写谱：",
       h("a", { href: "/api/score/spec.md", target: "_blank" }, "打碟谱规范"), " · ",

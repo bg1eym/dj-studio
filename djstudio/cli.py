@@ -20,8 +20,8 @@ def _serve(studio, host: str, port: int, open_browser: bool) -> None:  # type: i
     if not free_port(host, port):
         raise SystemExit(1)
     app = create_app(studio)
-    # 打开就自动分析当前的谱（升级后旧分析重做；没过时的也走一遍，几秒后首页就是「可以演出了」，不用按按钮）
-    threading.Timer(0.5, lambda: studio.refresh_stale() or studio.maybe_auto()).start()
+    # 打开应用时不自动分析：用户可能马上要放新的谱进来。放进谱（曲子齐了）才自动开始；
+    # 过时的分析（升级后）在那时一起重做（_auto 里查 _stale）
     url = f"http://{host}:{port}/"
     print(f"DJ Studio {version_text()} → {url}")
     if open_browser:
