@@ -29,11 +29,12 @@ CREATE TABLE IF NOT EXISTS tracks (
   analysis_error TEXT,
   note TEXT,
   grid_bpm REAL,
-  grid_first REAL
+  grid_first REAL,
+  grid_from TEXT
 );
 """
 # 以前的库没有的列：打开时补上（ALTER TABLE ADD COLUMN）
-_ADDED_COLS = {"grid_bpm": "REAL", "grid_first": "REAL"}
+_ADDED_COLS = {"grid_bpm": "REAL", "grid_first": "REAL", "grid_from": "TEXT"}
 
 
 @dataclass
@@ -57,15 +58,17 @@ class Track:
     analysis_version: int | None = None
     analysis_error: str | None = None
     note: str = ""
-    # 手动定的网格（BPM, 第一拍秒数）：自动估的不对时在曲库页改（比如谱上写 138、自估成 137）。有就以它为准
+    # 定下来的网格（BPM, 第一拍秒数）：有就以它为准。grid_from = manual 曲库页手动改的（比如谱上写 138、自估成 137）
+    # / score 按谱上写的原 BPM 定的（kick 对得上才定，见 analysis.bpm_check）
     grid_bpm: float | None = None
     grid_first: float | None = None
+    grid_from: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def chosen_grid(self) -> tuple[float, float, str] | None:
-        """内置引擎用的网格：(BPM, 第一拍秒数, 来源)。手动定的 > 自己分析的。"""
+        """内置引擎用的网格：(BPM, 第一拍秒数, 来源)。手动定的 / 按谱定的 > 自己分析的。"""
         if self.grid_bpm:
-            return float(self.grid_bpm), float(self.grid_first or 0.0), "manual"
+            return float(self.grid_bpm), float(self.grid_first or 0.0), self.grid_from or "manual"
         own = (self.analysis or {}).get("own_grid")
         if own:
             return float(own["bpm"]), float(own["first_beat"]), "own"
@@ -80,7 +83,7 @@ class Track:
 
 _COLS = ["id", "path", "source", "title", "artist", "album", "duration", "samplerate", "channels", "codec",
          "bitrate", "size", "added_at", "bar1", "bar1_confirmed", "analysis_json", "analysis_version",
-         "analysis_error", "note", "grid_bpm", "grid_first"]
+         "analysis_error", "note", "grid_bpm", "grid_first", "grid_from"]
 
 
 class Store:

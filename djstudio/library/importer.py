@@ -100,6 +100,7 @@ class Library:
         self.browse_roots = browse_roots or [Path.home()]
         self.mixxx_grid = mixxx_grid  # track → (bpm, first_beat)，有 Mixxx 网格时用它切小节
         self._q: deque[str] = deque()
+        self._hints: dict[str, float] = {}  # 排队时带的谱上原 BPM（analyze_one 按它对 kick）
         self._cv = threading.Condition()
         self._busy: str | None = None
         self._worker: threading.Thread | None = None
@@ -152,8 +153,11 @@ class Library:
 
     # ------------------------------------------------------------ 分析
 
-    def enqueue(self, track_id: str) -> None:
+    def enqueue(self, track_id: str, bpm_hint: float | None = None) -> None:
+        """排进分析队列。bpm_hint = 谱上写的原 BPM：分析时按它对一遍 kick，对得上就按它定网格。"""
         with self._cv:
+            if bpm_hint:
+                self._hints[track_id] = float(bpm_hint)
             if track_id not in self._q and track_id != self._busy:
                 self._q.append(track_id)
             self._cv.notify_all()
@@ -178,15 +182,16 @@ class Library:
                     return
                 tid = self._q.popleft()
                 self._busy = tid
+                hint = self._hints.pop(tid, None)
             try:
-                self.analyze_one(tid)
+                self.analyze_one(tid, hint)
             except Exception as e:  # noqa: BLE001
                 self.store.update(tid, analysis_error=str(e)[:500])
             finally:
                 if self.on_change:
                     self.on_change(tid)
 
-    def analyze_one(self, tid: str) -> None:
+    def analyze_one(self, tid: str, bpm_hint: float | None = None) -> None:
         t = self.store.get(tid)
         if not t:
             return
@@ -194,9 +199,13 @@ class Library:
         x, stats = decode_mono_stats(Path(t.path), ANALYSIS_SR)
         grid = self.mixxx_grid(t) if self.mixxx_grid else None
         src = "mixxx"
-        if t.grid_bpm:  # 手动定的网格优先：按它切小节和段落
-            grid, src = (float(t.grid_bpm), float(t.grid_first or 0.0)), "manual"
-        result, wf = analyze(x, ANALYSIS_SR, grid, t.bar1 if t.bar1_confirmed else None, grid_source=src)
+        if t.grid_bpm:  # 定下来的网格优先（手动改的 / 按谱定的）：按它切小节和段落
+            grid, src = (float(t.grid_bpm), float(t.grid_first or 0.0)), t.grid_from or "manual"
+        result, wf = analyze(x, ANALYSIS_SR, grid, t.bar1 if t.bar1_confirmed else None, grid_source=src,
+                             bpm_hint=bpm_hint)
+        prev_check = (t.analysis or {}).get("score_check")
+        if "score_check" not in result and prev_check:
+            result["score_check"] = prev_check  # 按谱上的 BPM 对过 kick 的结果留着（重新分析不一定带谱）
         result["decoder"] = decoder
         # 响度（LUFS）和采样峰值：演出时按它给每首统一音量（像 Mixxx 的 ReplayGain / Prime 的 Auto Gain）
         result["loudness"] = round(stats.get("loudness", -70.0), 2)
@@ -204,6 +213,8 @@ class Library:
         result["waveform_version"] = wf.get("v", 1)
         self.store.save_waveform(tid, wf)
         fields: dict[str, Any] = {"analysis": result, "analysis_version": ANALYSIS_VERSION, "analysis_error": None}
+        if result["grid_source"] == "score" and bpm_hint:  # 刚按谱定的网格记下来：以后重新分析（换小节线等）也按它
+            fields.update(grid_bpm=result["bpm"], grid_first=result["first_beat"], grid_from="score")
         # 用户确认的是「哪一拍是第 1 小节」；具体时间跟着网格走（换了解码器重新分析时，网格可能挪了几十毫秒）
         if not t.bar1_confirmed or (t.bar1 is not None and abs(result["bar1"] - t.bar1) < 0.1):
             fields["bar1"] = result["bar1"]

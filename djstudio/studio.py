@@ -885,7 +885,8 @@ class Studio:
                 g = None
             if g is not None and t.bar1 is not None:
                 g = Grid(g.bpm, g.first_beat, downbeat_from_bar1(g, t.bar1), g.duration)
-            out.append(LibTrack(t.id, t.path, t.title, t.artist, t.duration, g, a.get("sections", [])))
+            out.append(LibTrack(t.id, t.path, t.title, t.artist, t.duration, g, a.get("sections", []),
+                                a.get("score_check")))
         return out
 
     def plan_status(self) -> dict[str, Any] | None:
@@ -990,6 +991,42 @@ class Studio:
             or (t.analysis or {}).get("grid_version", 1) < GRID_VERSION  # 0.3.20 起节拍搜索不再被第一步的估计困住
             or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
 
+    def _grid_from_score(self, job: Job, plan: Any, matches: list[Any]) -> None:
+        """网格按谱定：谱上写的原 BPM 和这首的网格不一样 → 按谱上的 BPM 把整首的 kick 对一遍（30 秒一段）。
+        对得上就按谱（存成这首的网格，重新切小节）；对不上就还按音频的，生成 set 时提示（不报错）。
+        曲库页手动定的网格不动；同一个 BPM 对过的不再对。"""
+        todo: dict[str, tuple[Any, float]] = {}
+        for pt, lt in zip(plan.tracks, matches):
+            if not (lt and pt.bpm_orig):
+                continue
+            t = self.store.get(lt.id)
+            if not t or t.grid_from == "manual":
+                continue
+            g = t.chosen_grid()
+            if g and abs(g[0] - pt.bpm_orig) <= 0.05:
+                continue
+            sc = (t.analysis or {}).get("score_check") or {}
+            if sc.get("bpm") == float(pt.bpm_orig) and sc.get("grid_version") == GRID_VERSION:
+                continue
+            todo[lt.id] = (pt, float(pt.bpm_orig))
+        if not todo:
+            return
+        job.say(f"{len(todo)} 首谱上写的原 BPM 和自动估的不一样，按谱上的 BPM 把 kick 对一遍 …")
+        for tid, (_, bpm) in todo.items():
+            self.library.enqueue(tid, bpm_hint=bpm)
+        self._wait_analysis(job, 0.5, 1.0, "按谱上的 BPM 对 kick")
+        for tid, (pt, bpm) in todo.items():
+            t = self.store.get(tid)
+            if not t:
+                continue
+            sc = (t.analysis or {}).get("score_check") or {}
+            where = f"#{pt.no:02d} {t.display}"
+            if t.grid_from == "score" and abs((t.grid_bpm or 0.0) - bpm) <= 0.11:
+                job.say(f"  {where}：网格按谱上的 {bpm:g} BPM（有 kick 的 {sc.get('windows')} 段 30 秒里 {sc.get('on_beat')} 段对得上；"
+                        f"自动估的 {sc.get('own_bpm')} 只有 {sc.get('own_on_beat')} 段）")
+            elif sc:
+                job.say(f"  {where}：谱上的 {bpm:g} BPM 对不上 kick（{sc.get('on_beat')}/{sc.get('windows')} 段），按音频的 {sc.get('own_bpm')}")
+
     def _plan_set_outdated(self) -> bool:
         """打碟谱生成过的 set 不是按现在这版播放规范（docs/SET_SPEC.md）生成的（比如没有 hot cue）→ 要重新生成。"""
         from .plan.convert import _slug
@@ -1083,6 +1120,8 @@ class Studio:
             for i in stale:
                 self.library.enqueue(i)
             self._wait_analysis(job, 0.3, 1.0, "重新分析")
+        if self.builtin:
+            self._grid_from_score(job, plan, matches)
 
         if not self.builtin:
             # 3 Mixxx 扫描 + 分析（Mixxx 的网格是同步的依据）

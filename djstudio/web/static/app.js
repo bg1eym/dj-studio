@@ -683,7 +683,7 @@ function renderTrackTable() {
   tb.append(h("tbody", {}, rows.map((t) => h("tr", { class: S.selTrack && S.selTrack.id === t.id ? "sel" : "", onclick: () => openTrack(t.id) },
     h("td", {}, h("div", {}, t.title || "?"), h("div", { class: "dim" }, t.artist)),
     h("td", { class: "mono" }, fmt(t.duration)),
-    h("td", { class: "mono" }, t.grid ? t.grid.bpm.toFixed(2) : "–", t.grid ? h("div", { class: "dim" }, t.grid.source === "mixxx" ? "Mixxx" : t.grid.source === "manual" ? "手动" : "自估") : null),
+    h("td", { class: "mono" }, t.grid ? t.grid.bpm.toFixed(2) : "–", t.grid ? h("div", { class: "dim" }, gridSrcName(t.grid.source)) : null),
     h("td", {}, t.key || "–"),
     h("td", { class: "mono" }, t.grid ? t.grid.bars : "–"),
     h("td", {}, trackBadges(t)),
@@ -703,10 +703,23 @@ async function openTrack(id, keepView = false) {
   renderTrackDetail(keepView && !changed);
 }
 
+function gridSrcName(src) {
+  return { mixxx: "Mixxx", manual: "手动", score: "按谱" }[src] || "自估";
+}
+
+// 按谱上原 BPM 对 kick 的结果（30 秒一段）
+function scoreCheckText(sc) {
+  if (!sc) return "";
+  const ok = `${sc.on_beat}/${sc.windows}`;
+  return sc.fits
+    ? `谱上写 ${sc.bpm} BPM：有 kick 的 30 秒段 ${ok} 对得上（自动估的 ${sc.own_bpm} 只有 ${sc.own_on_beat} 段）`
+    : `谱上写 ${sc.bpm} BPM：有 kick 的 30 秒段只有 ${ok} 对得上（自动估的 ${sc.own_bpm} 对得上 ${sc.own_on_beat} 段），按音频的`;
+}
+
 // 自动估的 BPM 不对时手动定网格（比如谱上写 138、自估成 137）：BPM + 第一拍（秒）。之后分析、生成 set、演出都按它
 function gridEditor(t) {
   const g = t.grid;
-  const manual = g && g.source === "manual";
+  const manual = g && (g.source === "manual" || g.source === "score");
   const bpm = h("input", { type: "number", step: "0.001", min: 60, max: 200, value: g ? +g.bpm.toFixed(3) : "", style: "width:90px" });
   const first = h("input", { type: "number", step: "0.001", min: 0, value: g ? +g.first_beat.toFixed(3) : "", style: "width:80px" });
   return h("div", { class: "row grid-edit", style: "margin-top:8px" },
@@ -721,7 +734,8 @@ function gridEditor(t) {
       toast("用回自动估的网格，重新分析中…");
       await openTrack(t.id, true);
     }) }, "用回自动估的") : null,
-    h("span", { class: "dim" }, manual ? `（自动估的是 ${t.own_bpm ?? "?"} BPM）` : "自动估的不对时在这里改"));
+    h("span", { class: "dim" }, manual ? `（自动估的是 ${t.own_bpm ?? "?"} BPM）` : "自动估的不对时在这里改"),
+    t.score_check ? h("div", { class: "dim", style: "width:100%" }, scoreCheckText(t.score_check)) : null);
 }
 
 async function renderTrackDetail(keepView = false) {
@@ -762,7 +776,7 @@ async function renderTrackDetail(keepView = false) {
       t.grid_check && !t.grid_check.ok ? h("button", { class: "small danger", onclick: () => fixGrids([t.id]) }, "校正网格") : null,
     ),
     h("div", { class: "dim", style: "margin-top:6px" },
-      g ? `网格：${g.bpm.toFixed(3)} BPM（${g.source === "mixxx" ? "Mixxx" : g.source === "manual" ? "手动定的" : "自估"}），共 ${g.bars} 小节。` : "还没有网格。",
+      g ? `网格：${g.bpm.toFixed(3)} BPM（${{ mixxx: "Mixxx", manual: "手动定的", score: "按谱上的原 BPM，kick 对得上" }[g.source] || "自估"}），共 ${g.bars} 小节。` : "还没有网格。",
       t.grid_check && !t.grid_check.ok ? ` ⚠ 与自估网格不一致：${t.grid_check.note}` : "",
       " 滚轮缩放，拖动平移，单击定位。"),
     gridEditor(t),

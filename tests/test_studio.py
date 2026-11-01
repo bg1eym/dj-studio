@@ -680,3 +680,129 @@ def test_tempo_found_even_when_the_first_guess_is_off():
         bpm = ns["estimate_grid"](fr, diag=diag)[0]
         assert abs(bpm - 138.0) < 0.01, (guess, bpm, diag)
         assert diag["tempo_guess"] == round(guess, 3)
+
+
+def test_score_bpm_check_follows_the_kicks():
+    """按谱上的原 BPM 对 kick（30 秒一段）：BPM 对，每段都在线上；差 1 BPM（每分钟漂约一拍）、差 0.3 BPM 都对不上。
+    只有 hi-hat 的前奏 / 尾奏、没有 kick 的 breakdown 不算段数。"""
+    from djstudio.library import analysis as A
+
+    x = techno(138.0, 0.189, 0, (("intro", 16), ("groove", 64), ("breakdown", 16), ("drop", 64), ("outro", 32)), seed=1)
+    fr = A.stft_bands(x, 22050)
+    ok = A.bpm_check(fr, 138.0, own_bpm=137.0)  # 自估错成 137 的情形（How You Move）
+    assert ok["fits"] and ok["on_beat"] == ok["windows"] >= 6 and ok["own_on_beat"] == 0, ok
+    assert abs(ok["fit_bpm"] - 138.0) < 0.01 and ok["worst_ms"] < A.ON_BEAT_MS
+    for wrong in (137.0, 136.0, 140.0, 138.3):
+        r = A.bpm_check(fr, wrong, own_bpm=138.0)
+        assert not r["fits"] and r["own_on_beat"] == r["windows"], (wrong, r)
+    # analyze 带上谱的 BPM：自估错了也按谱定网格（线放在 kick 起音点上）
+    real = A.estimate_grid
+    try:
+        A.estimate_grid = lambda fr_, **kw: (137.0, real(fr_)[1], 1.0)
+        res, _ = A.analyze(x, 22050, bpm_hint=138.0)
+    finally:
+        A.estimate_grid = real
+    assert res["grid_source"] == "score" and abs(res["bpm"] - 138.0) < 0.01 and res["score_check"]["fits"]
+    assert res["own_grid"]["bpm"] == 137.0
+    beat = 60 / res["bpm"]
+    assert min(abs(res["first_beat"] - 0.189) % beat, beat - abs(res["first_beat"] - 0.189) % beat) < 0.02
+
+
+def test_grid_follows_the_score_bpm_when_the_kicks_fit(tmp_path, monkeypatch):
+    """谱上写的原 BPM 和自动估的不一样：按谱上的 BPM 对 kick。
+    c：自估错成 131（谱上 132 是对的）→ 网格按谱，生成 set 没有报错，以后重新分析也按它；
+    a / b：谱上把两首的 BPM 写反了 → kick 对不上，还按音频的打，只提示（还提示可能写反了），set 照样生成。"""
+    from djstudio.library import analysis as A
+
+    def boom(*a, **k):
+        raise AssertionError("内置引擎不该碰 Mixxx")
+
+    for name in ("mixxx_running", "launch_mixxx", "quit_mixxx"):
+        monkeypatch.setattr(process, name, boom)
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")
+    real = A.estimate_grid
+
+    def off_for_c(fr, **kw):  # 模拟 How You Move：自估偏了 1 BPM
+        bpm, first, conf = real(fr, **kw)
+        return (bpm - 1.0 if abs(bpm - 132.0) < 0.3 else bpm), first, conf
+
+    monkeypatch.setattr(A, "estimate_grid", off_for_c)
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in SPECS:
+        bpm, fb, db = SPECS[name]
+        write_wav(src / name, techno(bpm, fb, db, LAYOUT, seed=hash(name) % 100))
+    cfg = Config(home=tmp_path / "home", library=tmp_path / "Music" / "DJStudio", mixxx_dir=tmp_path / "no-mixxx",
+                 browse_roots=[tmp_path], find_dirs=[src])
+    studio = Studio(cfg, link_factory=boom)
+
+    def bar1(name):
+        bpm, fb, db = SPECS[name]
+        return fb + db * 60 / bpm
+
+    score = f"""# BPM 按谱
+
+- 规范：v1
+
+## 曲目
+
+| # | 曲名 | 文件名 | 原 BPM | 播放 BPM | 第 1 小节（秒） |
+|---|---|---|---|---|---|
+| 1 | A | a.wav | 130 | 130 | {bar1("a.wav"):.4f} |
+| 2 | B | b.wav | 128 | 130 | {bar1("b.wav"):.4f} |
+| 3 | C | c.wav | 132 | 130 | {bar1("c.wav"):.4f} |
+
+## 过渡 1：A → B
+
+- 手法：长交接
+- 进场：B 的第 1 小节落在 A 的第 25 小节
+
+| A 小节 | B 小节 | A LOW | B LOW | B 推子 |
+|---|---|---|---|---|
+| 25 | 1 | | 7点 | 5 |
+| 41 停 | 17 | 7点 | 12点 | 10 |
+
+## 过渡 2：B → C
+
+- 手法：长交接
+- 进场：B 的第 1 小节落在 A 的第 25 小节
+
+| A 小节 | B 小节 | A LOW | B LOW | B 推子 |
+|---|---|---|---|---|
+| 25 | 1 | | 7点 | 5 |
+| 41 停 | 17 | 7点 | 12点 | 10 |
+"""
+    studio.plans_dir.mkdir(parents=True, exist_ok=True)
+    (studio.plans_dir / "bpm.md").write_text(score, encoding="utf-8")
+    st = studio.plan_status()
+    assert st and not st.get("error") and st["n_transitions"] == 2, st
+    studio.find_plan_tracks()
+    t0 = time.time()
+    while (studio.finder.get("state") == "running" or not studio.job) and time.time() - t0 < 30:
+        time.sleep(0.1)
+    assert studio.job, (studio.finder, studio.plan_status())
+    job = wait_job(studio.job, 120)
+    log = "\n".join(job.log)
+    assert job.state == "ok", log
+    by = {Path(t.path).name: t for t in studio.store.all()}
+    c = by["c.wav"]
+    assert c.grid_from == "score" and abs(c.grid_bpm - 132.0) < 0.01, log
+    assert c.analysis["grid_source"] == "score" and c.analysis["own_grid"]["bpm"] < 131.5
+    assert "网格按谱上的 132 BPM" in log
+    for name, wrote in (("a.wav", 130.0), ("b.wav", 128.0)):
+        t = by[name]
+        assert t.grid_from is None and t.analysis["score_check"]["bpm"] == wrote and not t.analysis["score_check"]["fits"]
+    notes = job.result["notes"]
+    assert any(n["level"] == "warn" and "像是写反了" in n["msg"] for n in notes), notes
+    assert sum(1 for n in notes if n["level"] == "warn" and "按音频的" in n["msg"]) >= 2, notes
+    s = studio.load(job.result["set"])
+    assert [round(tr.play_bpm or 0) for tr in s.tracks] == [130, 130, 130]
+    # 以后重新分析（不带谱）也按谱定的网格；对过的结果留着
+    studio.library.enqueue(c.id)
+    assert studio.library.wait_idle(60)
+    c = studio.store.get(c.id)
+    assert c.analysis["grid_source"] == "score" and abs(c.analysis["bpm"] - 132.0) < 0.01 and c.analysis["score_check"]["fits"]
+    # 再跑一遍：对过的不再对
+    job2 = studio.auto_prepare()
+    job2 = wait_job(job2, 120)
+    assert job2.state == "ok" and "把 kick 对一遍" not in "\n".join(job2.log)

@@ -149,6 +149,7 @@ def create_app(studio: Studio) -> FastAPI:
             "key": m.key if m else None,
             "grid": grid,
             "grid_check": a.get("grid_check"),
+            "score_check": a.get("score_check"),  # 按谱上的原 BPM 对 kick 的结果
             "downbeat_conf": a.get("downbeat_conf"),
             "cues": a.get("cues"),
         }
@@ -258,6 +259,7 @@ def create_app(studio: Studio) -> FastAPI:
             if first is not None and not 0 <= first < 60.0 / bpm:  # type: ignore[operator]
                 first = first % (60.0 / bpm)  # type: ignore[operator]  # 第一拍：一拍以内的位置
             fields["grid_bpm"], fields["grid_first"] = bpm, first
+            fields["grid_from"] = "manual" if bpm is not None else None
         studio.store.update(tid, **fields)
         if "bar1" in fields or "grid_bpm" in fields:
             studio.library.enqueue(tid)  # 按新的小节线 / 网格重新切段落

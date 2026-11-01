@@ -188,7 +188,7 @@ def estimate_grid(fr: Frames, bpm_range: tuple[float, float] = (100.0, 160.0),
     conf = float(score[i])
 
     guess = bpm
-    kick = _norm(fr.low_flux) + 0.3 * _norm(fr.flux)
+    kick = _kick_env(fr)
     # 1) 粗搜：第一步估计 ±4%，每 0.05 BPM 一个候选。分段打分（kick 最多的几段 30 秒，每段自己找相位）：
     #    整首一起打分的峰只有 ±0.01 BPM 宽，粗步长会跨过去；分段的峰约 ±0.3 BPM 宽。搜到边上就往外再搜一段
     wins = _windows(kick, fps)
@@ -218,10 +218,16 @@ def estimate_grid(fr: Frames, bpm_range: tuple[float, float] = (100.0, 160.0),
     if diag is not None:
         diag.update(tempo_guess=round(float(guess), 3), coarse=round(float(c0), 3))
     # 3) 逐拍局部峰做稳健线性拟合，精修到亚帧
-    period = best_period
+    period, first = _fit_line(kick, fps, best_period, best_ph)
     bpm = 60.0 * fps / period
-    k_idx = np.arange(int(n / period))
-    pos = best_ph + k_idx * period
+    t0 = float(frame_time(first, fr.sr)) % (60.0 / bpm)
+    return float(bpm), float(t0), conf
+
+
+def _fit_line(kick: np.ndarray, fps: float, period: float, phase: float) -> tuple[float, float]:
+    """按 (period, phase) 帧的网格，在每拍附近找 kick 的局部峰，稳健线性拟合 → (period, 第 0 拍的帧位置)。点太少就原样返回。"""
+    n = len(kick)
+    pos = phase + np.arange(int(n / period)) * period
     pos = pos[pos < n - 2]
     w = max(1, int(0.06 * fps))
     xs, ys = [], []
@@ -240,21 +246,99 @@ def estimate_grid(fr: Frames, bpm_range: tuple[float, float] = (100.0, 160.0),
         off = 0.5 * (a - c) / den if den else 0.0
         xs.append(k)
         ys.append(jj + off)
-    if len(xs) >= 16:
-        xs_a, ys_a = np.array(xs, float), np.array(ys, float)
-        slope, icpt = np.polyfit(xs_a, ys_a, 1)
-        resid = ys_a - (slope * xs_a + icpt)
-        keep = np.abs(resid) < 2.5 * (np.median(np.abs(resid)) + 1e-9)
-        slope, icpt = np.polyfit(xs_a[keep], ys_a[keep], 1)
-        bpm = 60.0 * fps / slope
-        period = slope
-        first = icpt
-    else:
-        first = best_ph
-    t0 = float(frame_time(first, fr.sr))
-    beat = 60.0 / bpm
-    t0 = t0 % beat
-    return float(bpm), float(t0), conf
+    if len(xs) < 16:
+        return period, phase
+    xs_a, ys_a = np.array(xs, float), np.array(ys, float)
+    slope, icpt = np.polyfit(xs_a, ys_a, 1)
+    resid = ys_a - (slope * xs_a + icpt)
+    keep = np.abs(resid) < 2.5 * (np.median(np.abs(resid)) + 1e-9)
+    slope, icpt = np.polyfit(xs_a[keep], ys_a[keep], 1)
+    return float(slope), float(icpt)
+
+
+
+# ---------------------------------------------------------------- 按谱上的 BPM 对 kick
+# 谱上写了原 BPM、和自估的不一样时：按谱上的 BPM 整首对一遍 kick。分 30 秒一段，每段看 kick 离网格线多远——
+# BPM 对，每段都在线上；差 1 BPM，每分钟漂约一拍，越往后越偏。对得上就按谱，对不上就按音频并说明。
+
+SCORE_BPM_SPAN = 0.1   # 按谱上的 BPM 细找 ±0.1（谱上一般写整数，曲子可能是 137.95）
+CHECK_WINDOW_S = 30.0  # 分段长度
+ON_BEAT_MS = 35.0      # 一段里 kick 离网格线不超过这么多算「对得上」
+KICK_LEVEL = 0.3       # 一段里拍点上的低频起音 ≥ 主体段落（各段的 80 分位）的这么多倍才算这段有 kick（breakdown、只有 hi-hat 的前奏不算）
+FIT_SHARE = 0.8        # 有 kick 的段里至少这么多对得上，才算这个 BPM 对
+
+
+def _kick_env(fr: Frames) -> np.ndarray:
+    return _norm(fr.low_flux) + 0.3 * _norm(fr.flux)
+
+
+def _grid_near(kick: np.ndarray, fps: float, bpm: float, span: float) -> tuple[float, float]:
+    """在 bpm ±span 里找整首 kick 最齐的网格 → (每拍帧数, 第 0 拍帧位置)。span = 0 就只找相位。"""
+    n = len(kick)
+    cands = np.arange(bpm - span, bpm + span + 1e-9, 0.005) if span > 0 else np.array([bpm])
+    best, period, phase = -1.0, 60.0 / bpm * fps, 0.0
+    for cand in cands:
+        per = 60.0 / float(cand) * fps
+        sc, ph = _comb_best(kick, per, 0, n, 0.5)
+        if sc > best:
+            best, period, phase = sc, per, ph
+    if span > 0:
+        p2, f2 = _fit_line(kick, fps, period, phase)
+        if abs(60.0 * fps / p2 - bpm) <= span:
+            period, phase = p2, f2
+    return period, phase
+
+
+def window_offsets(low: np.ndarray, fps: float, period: float, phase: float,
+                   seconds: float = CHECK_WINDOW_S) -> list[tuple[float, float, float]]:
+    """整首按 seconds 秒分段（最后不足半段的不要）；每段在一拍以内找低频起音最齐的偏移
+    → [(段起点秒, 离网格线的毫秒, 那个偏移上的平均起音强度)]。只看低频：只有 hi-hat 的段会对到反拍上。"""
+    n = len(low)
+    w = int(seconds * fps)
+    idx = np.arange(n)
+    deltas = np.arange(-period / 2, period / 2, 0.5)
+    out = []
+    for a in range(0, max(1, n - w // 2), w):
+        b = min(n - 1, a + w)
+        k0, k1 = int(np.ceil((a - phase) / period)), int(np.floor((b - 1 - phase) / period))
+        if k1 - k0 < 8:
+            out.append((a / fps, 0.0, 0.0))
+            continue
+        pos = phase + np.arange(k0, k1 + 1)[None, :] * period + deltas[:, None]
+        ok = (pos >= 0) & (pos < n - 1)
+        sums = (np.interp(pos, idx, low) * ok).sum(axis=1) / np.maximum(ok.sum(axis=1), 1)
+        j = int(np.argmax(sums))
+        out.append((a / fps, float(deltas[j] / fps * 1000.0), float(sums[j])))
+    return out
+
+
+def bpm_check(fr: Frames, bpm: float, own_bpm: float) -> dict[str, Any]:
+    """按 bpm（谱上写的）对整首的 kick，和自估的 own_bpm 比。
+    返回 {bpm, fit_bpm, first_beat（秒）, windows（有 kick 的段数）, on_beat, own_bpm, own_on_beat, worst_ms, fits}。"""
+    kick = _kick_env(fr)
+    low = _norm(fr.low_flux)
+    fps = fr.fps
+    per_s, ph_s = _grid_near(kick, fps, bpm, SCORE_BPM_SPAN)
+    per_o, ph_o = _grid_near(kick, fps, own_bpm, 0.0)
+    ws = window_offsets(low, fps, per_s, ph_s)
+    wo = window_offsets(low, fps, per_o, ph_o)
+    # 「这段有 kick」两个 BPM 里取强的看（BPM 错了，段里的 kick 会糊掉；不能因此把这段当成没 kick 不算）
+    level = [max(a[2], b[2]) for a, b in zip(ws, wo)]
+    ref = float(np.percentile(level, 80)) if level else 0.0
+    has = [lv > 0 and lv >= KICK_LEVEL * ref for lv in level]
+
+    def on(wl: list[tuple[float, float, float]]) -> int:
+        return sum(1 for h, lv, (_, off, v) in zip(has, level, wl) if h and v >= 0.5 * lv and abs(off) <= ON_BEAT_MS)
+
+    n_kick = sum(has)
+    on_s, on_o = on(ws), on(wo)
+    fit_bpm = 60.0 * fps / per_s
+    first = float(frame_time(ph_s, fr.sr)) % (60.0 / fit_bpm)
+    offs = [abs(off) for h, (_, off, _) in zip(has, ws) if h]
+    fits = n_kick >= 2 and on_s >= FIT_SHARE * n_kick and on_s >= on_o - 0.1 * n_kick
+    return {"bpm": float(bpm), "fit_bpm": round(fit_bpm, 3), "first_beat": round(first, 5),
+            "windows": n_kick, "on_beat": on_s, "own_bpm": round(float(own_bpm), 3), "own_on_beat": on_o,
+            "worst_ms": round(max(offs), 1) if offs else None, "fits": bool(fits), "grid_version": GRID_VERSION}
 
 
 # ---------------------------------------------------------------- kick 相位精修
@@ -417,9 +501,12 @@ def sections(bars: list[dict[str, float]]) -> tuple[list[dict[str, Any]], dict[s
 
 
 def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = None,
-            bar1: float | None = None, grid_source: str = "mixxx") -> tuple[dict[str, Any], dict[str, Any]]:
-    """返回 (分析结果, 波形)。mixxx_grid = (bpm, first_beat)；有就以它为准切小节。
-    bar1 = 用户确认过的第 1 小节起点（秒）；给了就不用自估的小节相位。"""
+            bar1: float | None = None, grid_source: str = "mixxx",
+            bpm_hint: float | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """返回 (分析结果, 波形)。mixxx_grid = (bpm, first_beat)；有就以它为准切小节（来源 grid_source：
+    mixxx / manual 手动定的 / score 以前按谱定的）。bar1 = 用户确认过的第 1 小节起点（秒）；给了就不用自估的小节相位。
+    bpm_hint = 谱上写的原 BPM：按它对一遍 kick（结果在 score_check）；对得上就按它定网格（来源 score），
+    除非网格是 Mixxx 的或手动定的。"""
     fr = stft_bands(x, sr)
     wf = waveform(x, fr)
     diag: dict[str, Any] = {}
@@ -427,10 +514,17 @@ def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = Non
     # 精修：把自估网格线放到 kick 起音点上（与其他曲子同一标准）
     own_kick, own_kick_sharp = kick_phase(x, sr, own_bpm, own_first_raw)
     own_first = (own_first_raw + own_kick * 60.0 / own_bpm) % (60.0 / own_bpm)
-    if mixxx_grid and mixxx_grid[0] > 0:  # 给定的网格：Mixxx 的，或者手动定的（grid_source = "manual"）
+    if mixxx_grid and mixxx_grid[0] > 0:  # 给定的网格：Mixxx 的，或者手动定的（grid_source = "manual"），或者以前按谱定的
         bpm, first, src = mixxx_grid[0], mixxx_grid[1], grid_source
     else:
         bpm, first, src = own_bpm, own_first, "own"
+    score_check = None
+    if bpm_hint and bpm_hint > 0:
+        score_check = bpm_check(fr, float(bpm_hint), own_bpm)
+        if score_check["fits"] and src not in ("mixxx", "manual"):
+            sb, sf_raw = score_check["fit_bpm"], score_check["first_beat"]
+            sk, _ = kick_phase(x, sr, sb, sf_raw)  # 和自估网格一样，线放在 kick 起音点上
+            bpm, first, src = sb, (sf_raw + sk * 60.0 / sb) % (60.0 / sb), "score"
     dur = len(x) / sr
     g = Grid(bpm, first, 0, dur)
     feat = beat_features(fr, g)
@@ -454,6 +548,8 @@ def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = Non
         "sections": secs,
         "cues": cues,
     }
+    if score_check is not None:
+        result["score_check"] = score_check
     if src == "mixxx":  # 手动定的网格是用户有意改的，不拿自估的去「存疑」它
         result["grid_check"] = grid_agreement(mixxx_grid, (own_bpm, own_first))  # type: ignore[arg-type]
     return result, wf

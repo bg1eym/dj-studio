@@ -68,6 +68,8 @@ class LibTrack:
     duration: float
     grid: Grid | None  # bpm / first_beat / downbeat（曲库里确认过的小节相位）
     sections: list[dict[str, Any]] = field(default_factory=list)
+    # 按谱上的原 BPM 对过 kick 的结果（analysis.bpm_check）：{bpm, windows, on_beat, own_bpm, own_on_beat, fits, ...}
+    bpm_check: dict[str, Any] | None = None
 
 
 @dataclass
@@ -200,6 +202,20 @@ def match_tracks(plan: Plan, lib: list[LibTrack]) -> tuple[list[LibTrack | None]
 
 # ---------------------------------------------------------------- 小节对齐
 
+def swapped_bpms(plan: Plan, matches: list[LibTrack | None]) -> list[Note]:
+    """两首的谱上原 BPM 正好和音频的对调了（比如谱上 #02 写 138、#04 写 136，音频是 #02 136、#04 138）→ 提示可能写反了。"""
+    bad = [(pt, lt.grid.bpm) for pt, lt in zip(plan.tracks, matches)
+           if lt and lt.grid and pt.bpm_orig and abs(lt.grid.bpm - pt.bpm_orig) > 0.6]
+    out = []
+    for i, (p1, g1) in enumerate(bad):
+        for p2, g2 in bad[i + 1:]:
+            if abs(g1 - p2.bpm_orig) <= 0.1 and abs(g2 - p1.bpm_orig) <= 0.1:  # type: ignore[operator]
+                out.append(Note("warn", f"#{p1.no:02d}、#{p2.no:02d}",
+                                f"这两首谱上的原 BPM 像是写反了：音频是 #{p1.no:02d} {g1:.2f}、#{p2.no:02d} {g2:.2f}，"
+                                f"谱上写的是 {p1.bpm_orig:g}、{p2.bpm_orig:g}。也看一下这两首的文件是不是放反了"))
+    return out
+
+
 def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
     where = f"#{pt.no:02d} {pt.title}"
     g = lt.grid
@@ -207,9 +223,19 @@ def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
         return None, [Note("error", where, "还没有网格（分析 / Mixxx 分析没完成）")]
     notes: list[Note] = []
     if pt.bpm_orig and abs(g.bpm - pt.bpm_orig) > 0.6:
-        notes.append(Note("error", where, f"BPM 对不上：谱上原 BPM {pt.bpm_orig:g}，网格 {g.bpm:.2f}。"
-                                          f"谱是对的话：曲库页点这首，在「网格」里填 {pt.bpm_orig:g} BPM（和第一拍）点「按这个网格」，"
-                                          "然后重新放谱 / 点「开始分析」"))
+        sc = lt.bpm_check or {}
+        if sc.get("bpm") == float(pt.bpm_orig) and not sc.get("fits"):
+            # 按谱上的 BPM 对过这首的 kick，对不上：按音频的网格打（谱上的小节、主速照旧），只提示
+            notes.append(Note("warn", where, f"谱上原 BPM 写的 {pt.bpm_orig:g}，音频是 {g.bpm:.2f}：按 {pt.bpm_orig:g} 对 kick，"
+                                             f"有 kick 的 {sc['windows']} 段（每段 30 秒）只有 {sc['on_beat']} 段对得上"
+                                             f"（按 {sc['own_bpm']:g} 对得上 {sc['own_on_beat']} 段）。按音频的 {g.bpm:.2f} 打，"
+                                             "谱上的小节和主速照旧；谱上的原 BPM 可以改成音频的"))
+        elif sc.get("bpm") == float(pt.bpm_orig):
+            notes.append(Note("warn", where, f"谱上原 BPM {pt.bpm_orig:g} 的 kick 对得上，但曲库页选了网格 {g.bpm:.2f}，按曲库页的打"))
+        else:
+            notes.append(Note("error", where, f"BPM 对不上：谱上原 BPM {pt.bpm_orig:g}，网格 {g.bpm:.2f}。"
+                                              f"谱是对的话：曲库页点这首，在「网格」里填 {pt.bpm_orig:g} BPM（和第一拍）点「按这个网格」，"
+                                              "然后重新放谱 / 点「开始分析」"))
     anchor = pt.bar1_s if pt.bar1_s is not None else g.bar_time(1)
     jf = g.time_beat(anchor)
     j = round(jf)
@@ -392,6 +418,7 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
         al, an = align(pt, lt)
         aligns.append(al)
         notes += an
+    notes += swapped_bpms(plan, matches)
     if any(a is None for a in aligns):
         return Converted(None, matches, aligns, notes)
     res = sorted(a.residual_ms for a in aligns if a)
