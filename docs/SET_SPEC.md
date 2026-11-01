@@ -27,7 +27,7 @@
 ## 2. EQ（LOW / MID / HIGH）
 
 - set 里写 **dB**（`lo` / `mid` / `hi`，-60 ～ +12）；谱上写 **Prime 4+ 的钟点位**，按下表换算（12 点以左 = -25·(钟头/5)^1.56，12 点以右每钟头 +1.2 dB）。
-- ≤ -40 dB 视为切到底（增益 0）。Mixxx 默认 EQ（Biquad Full Kill，分频 246 Hz / 2484 Hz）。
+- ≤ -40 dB 视为切到底（增益 0）。Mixxx 默认 EQ（Biquad Full Kill，分频 250 Hz / 2500 Hz，Mixxx 2.5.6 偏好设置的默认值；内置引擎启动时照样设）。
 - 颜色（旋钮、时间线曲线、波形）：**LOW 蓝、MID 绿、HIGH 白**（Denon 三频段波形的颜色）。
 
 | 钟点位 | dB |

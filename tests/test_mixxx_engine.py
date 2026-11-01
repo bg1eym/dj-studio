@@ -335,3 +335,150 @@ def test_engine_loudness_gain_and_meters(tmp_path):
         link.close()
     assert abs(lvl - (-23.0 - 6.0)) < 1.0 and abs(pk - (-20.0 - 6.0)) < 1.0, (lvl, pk)
     assert abs(main - lvl) < 1.0 and idle <= -89, (main, idle)  # 推子满、居中：主输出 = 这一路；停着的 deck 是静音
+
+
+def _pink(path: Path, seconds: float = 40.0, kick_bpm: float | None = None, seed: int = 5) -> None:
+    """粉噪（每个频段一样响，量 EQ 用），可以叠 kick（让分析 / 小节有东西可对）。"""
+    sr = 44100
+    n = int(seconds * sr)
+    rng = np.random.default_rng(seed)
+    f = np.fft.rfft(rng.standard_normal(n))
+    fr = np.fft.rfftfreq(n, 1 / sr)
+    f[1:] /= np.sqrt(fr[1:])
+    f[0] = 0
+    x = np.fft.irfft(f, n)
+    x = x / np.abs(x).max() * 0.25
+    if kick_bpm:
+        tt = np.arange(int(0.25 * sr)) / sr
+        kick = np.sin(2 * np.pi * (50 + 80 * np.exp(-tt / 0.03)) * tt) * np.exp(-tt / 0.15) * 0.6
+        k = 0
+        while 0.5 + k * 60 / kick_bpm < seconds - 0.3:
+            i = int((0.5 + k * 60 / kick_bpm) * sr)
+            x[i:i + len(kick)] += kick
+            k += 1
+    write_wav(path, (x / np.abs(x).max() * 0.6).astype(np.float32), sr=sr)
+
+
+def _wav_mono(path: Path) -> np.ndarray:
+    import wave
+
+    with wave.open(str(path)) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).reshape(-1, w.getnchannels()).mean(axis=1) / 32768.0
+
+
+EQ_BANDS = {"lo": (40, 120), "mid": (650, 950), "hi": (6000, 10000)}
+
+
+def test_eq_knobs_cut_their_own_bands(tmp_path):
+    """每个 EQ 旋钮只动自己的频段。分频点要和真 Mixxx 一样是 250 / 2500 Hz（Mixxx 启动时偏好设置设的）：
+    以前引擎里没设，停在 11020 Hz——LOW 拧下去整首都没了，MID / HIGH 拧下去几乎听不出来。"""
+    _pink(tmp_path / "pink.wav")
+    kill = 10 ** (-25 / 20)
+
+    def render(key: str | None) -> dict[str, float]:
+        link = EngineLink(Path(BIN), [{"id": "p", "path": str(tmp_path / "pink.wav"), "bpm": 120.0, "first_beat": 0.0}],
+                          speed=4.0, audio=False)
+        out = tmp_path / f"{key}.wav"
+        try:
+            for k, want in (("LoEQFrequency", 250), ("HiEQFrequency", 2500)):
+                assert link.sim({"cmd": "get", "group": "[Mixer Profile]", "key": k})["v"] == want
+            link.sim({"cmd": "load", "deck": 1, "id": "p"})
+            time.sleep(0.5)
+            if key:
+                link.sim({"cmd": "set", "group": "[EqualizerRack1_[Channel1]_Effect1]", "key": key, "value": kill})
+            link.sim({"cmd": "set", "group": "[Channel1]", "key": "playposition", "value": 0.2})
+            time.sleep(0.2)
+            link.sim({"cmd": "set", "group": "[Channel1]", "key": "play", "value": 1})
+            time.sleep(0.3)
+            link.sim({"cmd": "record", "path": str(out)})
+            time.sleep(1.5)  # 4 倍速 = 6 秒
+            link.sim({"cmd": "record_stop"})
+        finally:
+            link.sim({"cmd": "quit"})
+            time.sleep(0.3)
+            link.close()
+        y = _wav_mono(out)
+        spec = np.abs(np.fft.rfft(y)) ** 2
+        f = np.fft.rfftfreq(len(y), 1 / 44100)
+        return {b: 10 * np.log10(spec[(f >= lo) & (f <= hi)].mean()) for b, (lo, hi) in EQ_BANDS.items()}
+
+    dry = render(None)
+    for knob, key in (("lo", "parameter1"), ("mid", "parameter2"), ("hi", "parameter3")):
+        r = render(key)
+        cut = {b: round(r[b] - dry[b], 1) for b in EQ_BANDS}
+        assert cut[knob] < -20, (knob, cut)  # 自己的频段切掉了
+        assert all(abs(v) < 3 for b, v in cut.items() if b != knob), (knob, cut)  # 别的频段基本不动
+
+
+def test_eq_ramp_in_a_set_is_heard_while_the_knob_moves(tmp_path):
+    """打一段 set：A 的 MID 8 小节从 0 dB 渐变到 -25 dB（DJStudio.js 按播放位置拧旋钮）。录音里中频跟着旋钮一拍一拍往下走，
+    没有「旋钮下去了声音没变、过一会儿突然变」。旋钮值从引擎读回（网页上显示的就是它），和录音按引擎时间对上。"""
+    bpm = 128.0
+    for k, seed in (("a", 1), ("b", 2)):
+        _pink(tmp_path / f"{k}.wav", 90.0, kick_bpm=bpm, seed=seed)
+    speed = 2.0
+    link = EngineLink(Path(BIN), [], speed=speed)
+    client = EngineClient(link)
+    assert client.wait_until(client.online, 30)
+    lib = link.sim({"cmd": "library", "tracks": [{"id": k, "path": str(tmp_path / f"{k}.wav"), "bpm": bpm, "first_beat": 0.5}
+                                                 for k in "ab"]}, timeout=60)["tracks"]
+    infos = {t["id"]: TrackInfo(t["id"], t["id"], Grid(bpm, 0.5, 0, t["duration"])) for t in lib}
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": "eq-ramp",
+        "tracks": [{"id": "a", "title": "A"}, {"id": "b", "title": "B"}],
+        "transitions": [{"technique": "custom", "start": 9, "b_in": 1, "play_at": 12, "bars": 16,
+                         "lanes": {"A.mid": [[0, 0], [8, -25]], "B.vol": [[0, 0], [16, 0]]}}],
+        "ending": {"mode": "playout"},
+    })
+    compiled = compile_set(s, lambda t: infos.get(t.id))
+    assert compiled.ok, [str(i) for i in compiled.issues]
+    link.sim({"cmd": "queue", "ids": ["a", "b"]})
+    rec = tmp_path / "rec.wav"
+    link.sim({"cmd": "record", "path": str(rec)})
+    t_rec0 = link.sim({"cmd": "state"})["t"]
+    cond = Conductor(client, compiled, stall_timeout=8 * speed)
+    polls: list[tuple[float, float]] = []  # (引擎时间 ms, MID 旋钮 dB)
+    stop = threading.Event()
+
+    def poll():
+        while not stop.is_set():
+            st = link.sim({"cmd": "state"})
+            d = [x for x in st["decks"] if x.get("id") == "a"]
+            if d:
+                v = link.sim({"cmd": "get", "group": f"[EqualizerRack1_[Channel{d[0]['n']}]_Effect1]", "key": "parameter2"})["v"]
+                polls.append((st["t"], 20 * np.log10(max(v, 1e-6))))
+            time.sleep(0.03)
+
+    th = threading.Thread(target=poll, daemon=True)
+    th.start()
+    cond.start()
+    beat = 60 / bpm
+    time.sleep((9 + 10) * 4 * beat / speed + 2)  # 放过渐变（A 的第 9–17 小节）再多一点
+    stop.set()
+    th.join()
+    link.sim({"cmd": "record_stop"}, timeout=30)
+    link.sim({"cmd": "quit"})
+    time.sleep(0.5)
+    link.close()
+
+    y = _wav_mono(rec)
+    win, hop = 4096, 2205
+    f = np.fft.rfftfreq(win, 1 / 44100)
+    mid_b, hi_b = (f >= 650) & (f <= 950), (f >= 6000) & (f <= 10000)
+    t_ms, mid = [], []
+    for i in range(0, len(y) - win, hop):
+        spec = np.abs(np.fft.rfft(y[i:i + win] * np.hanning(win))) ** 2
+        t_ms.append(t_rec0 + (i + win / 2) / 44.1)
+        mid.append(10 * np.log10(spec[mid_b].sum() + 1e-20) - 10 * np.log10(spec[hi_b].sum() + 1e-20))
+    t_ms, mid = np.array(t_ms), np.array(mid)
+    pt, pdb = np.array([p[0] for p in polls]), np.array([p[1] for p in polls])
+    start = pt[np.argmax(pdb < -0.5)]  # 旋钮开始往下
+    base = np.median(mid[(t_ms > start - 6000) & (t_ms < start - 500)])
+    checked = 0
+    for t, knob in zip(pt, pdb):
+        if not -16 < knob < -1:  # 渐变中段（更深的地方 Mixxx 的 kill 曲线比旋钮切得更多）
+            continue
+        heard = np.median(mid[np.abs(t_ms - t) < 150]) - base
+        assert abs(heard - knob) < 3.5, f"旋钮 {knob:.1f} dB，录音里中频只变了 {heard:.1f} dB"
+        checked += 1
+    assert checked > 20

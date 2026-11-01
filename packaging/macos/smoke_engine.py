@@ -91,6 +91,11 @@ for u, name in ((1, "Echo"), (2, "Reverb")):
     g = f"[EffectRack1_EffectUnit{u}_Effect1]"
     ld, en = cmd(10 + u, {"cmd": "get", "group": g, "key": "loaded"}), cmd(20 + u, {"cmd": "get", "group": g, "key": "enabled"})
     check(ld and ld["v"] == 1 and en and en["v"] == 1, f"效果单元 {u} 装好了 {name}（loaded {ld and ld['v']}，enabled {en and en['v']}）")
+# EQ 分频点：真 Mixxx 由偏好设置在启动时设成 250 / 2500 Hz；没设的话停在 11020 Hz，LOW 切整首、MID / HIGH 听不出来
+lo, hi = (cmd(40 + i, {"cmd": "get", "group": "[Mixer Profile]", "key": k}) for i, k in enumerate(("LoEQFrequency", "HiEQFrequency")))
+check(lo and hi and lo["v"] == 250 and hi["v"] == 2500, f"EQ 分频点 {lo and lo['v']} Hz / {hi and hi['v']} Hz（应为 250 / 2500）")
+au = cmd(42, {"cmd": "audio"})
+check(au and 1.0 < au.get("eq_delay_ms", 0) < 1.6, f"EQ 群延迟 {au and au.get('eq_delay_ms')} ms（250 Hz 分频时约 1.3 ms，网页播放头按它补）")
 a = cmd(2, {"cmd": "audio"})
 print("  声音输出：", a)
 if a and a.get("on"):

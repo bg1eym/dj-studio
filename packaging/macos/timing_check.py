@@ -2,7 +2,7 @@
 
 用一段合成的 128 BPM kick（第一个 kick 在 0.300 秒），分别存成 WAV / MP3（tests/fixtures 里现成的）/ AAC（Mac 上
 用 afconvert，Linux 上用 ffmpeg），每种格式：
-  1. djstudio-engine --decode（分析用的解码）和 --render（deck 1 原速播放，真正的播放路径）逐点比，错位 ≤ 2 帧；
+  1. djstudio-engine --decode（分析用的解码）和 --render（deck 1 原速播放，真正的播放路径）逐点比，扣掉 EQ 群延迟后错位 ≤ 2 帧；
   2. 解码器相对原始信号的延迟（编码器延迟有没有去掉，只记录）；
   3. 原速单放时引擎输出和原曲一样（差 < -40 dB）——kick 的声音不该被引擎改动；
   4. 按 DJ Studio 的分析算出拍线，必须落在播放时 kick 的起音上（±5 ms）。
@@ -143,10 +143,12 @@ def seek_check(f: Path, tmp: Path) -> None:
         info = json.loads(next(ln for ln in out.splitlines() if ln.startswith("{")))
         ren = np.fromfile(ren_path, dtype="<f4").astype(np.float64)
         p0 = int(round(info["start"]))
+        eqd = int(info.get("eq_delay", 0))
         skip = SR // 4
         lag = lag_of(ren[skip:skip + 2 * SR], dec[p0 + skip:p0 + skip + 2 * SR], max_lag=SR)
-        check(abs(lag) <= 2 and abs(p0 / SR - start) < 0.05,
-              f"从 {start} 秒起播（定位到第 {p0} 帧）：播出来的和分析用的解码错位 {lag} 帧（{lag / SR * 1000:+.1f} ms）")
+        check(abs(lag + eqd) <= 2 and abs(p0 / SR - start) < 0.05,
+              f"从 {start} 秒起播（定位到第 {p0} 帧）：播出来的和分析用的解码错位 {lag} 帧（{lag / SR * 1000:+.1f} ms，"
+              f"其中 EQ 群延迟 {eqd} 帧）")
 
 
 def main() -> int:
@@ -180,12 +182,15 @@ def main() -> int:
         info = json.loads(next(ln for ln in out.splitlines() if ln.startswith("{")))
         ren = np.fromfile(ren_path, dtype="<f4").astype(np.float64)
         start = int(round(info["start"]))
-        # 1. 播放出来的第 i 点 = 曲目第 start + i 帧；解码结果里同一帧的位置应该一模一样
+        eqd = int(info.get("eq_delay", 0))
+        # 1. 播放出来的第 i 点 = 曲目第 start + i 帧，再晚 EQ 群延迟（Mixxx 默认 EQ 居中时干声也走 LV-mix 的延迟线，
+        #    250 Hz 分频时 59 帧 = 1.34 ms；真 Mixxx 一样，两个 deck 一样晚）；除此之外解码结果里同一帧的位置应该一模一样
         skip = SR // 2  # 跳过起播那一下的音量渐入
         seg = ren[skip:skip + 5 * SR]
         lag = lag_of(seg, dec[start + skip:start + skip + 5 * SR])
-        # 线性变速器（EngineBufferScaleLinear）插值会晚 1 帧，0.02 ms，听不出来
-        check(abs(lag) <= 2, f"{name}：分析用的解码 vs 实际播放 错位 {lag} 帧（{lag / SR * 1000:+.2f} ms），播放起点 {start}")
+        # （以前看到的「晚 1 帧」不是变速器插值，是 EQ 分频点错在 11020 Hz 时的群延迟）
+        check(abs(lag + eqd) <= 2, f"{name}：分析用的解码 vs 实际播放 错位 {lag} 帧（{lag / SR * 1000:+.2f} ms，"
+              f"其中 EQ 群延迟 {eqd} 帧，网页播放头按它补），播放起点 {start}")
         # 1b. 原速单放时引擎不该改动声音（EQ 居中、没有效果、keylock 关）：对齐后和解码结果的差 < -40 dB
         a = ren[skip:skip + 5 * SR]
         b = dec[start + skip + lag:start + skip + lag + 5 * SR]

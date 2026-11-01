@@ -72,7 +72,9 @@
 #include "effects/effectslot.h"
 #include "effects/effectsmanager.h"
 #include "engine/channels/enginedeck.h"
+#include "effects/backends/builtin/lvmixeqbase.h"
 #include "engine/enginebuffer.h"
+#include "engine/filters/enginefilterbessel4.h"
 #include "engine/enginemixer.h"
 #include "mixer/deck.h"
 #include "mixer/playerinfo.h"
@@ -439,6 +441,13 @@ class Engine {
         m_pNumPreviewDecks = std::make_unique<ControlObject>(
                 ConfigKey(QStringLiteral("[App]"), QStringLiteral("num_preview_decks")));
         m_pEffectsManager = new EffectsManager(m_pConfig, m_pChannelHandleFactory);
+        // EQ 分频点（低 / 高）：真 Mixxx 启动时建偏好设置（mixxxmainwindow.cpp:294），混音台页 slotUpdate
+        // （dlgprefmixer.cpp:162）在没配置时设成默认的 250 Hz / 2500 Hz（setDefaultShelves，dlgprefmixer.cpp:441-450），
+        // 经滑块写进这两个控件（dlgprefmixer.cpp:601、618）。这里没有偏好设置对话框：不设的话它们停在控件的默认值
+        // 11020 Hz（effectsmanager.cpp:29-30，0..22040 的中点）——LOW 旋钮把 11 kHz 以下全切掉，MID / HIGH 只动 11 kHz 附近
+        // （旋钮转了听不出来，LOW 一跳整首都变）。EQ 效果每块音频按这两个控件取分频点（biquadfullkilleqeffect.cpp:149-150）
+        ControlObject::set(ConfigKey(QStringLiteral("[Mixer Profile]"), QStringLiteral("LoEQFrequency")), 250.0);
+        ControlObject::set(ConfigKey(QStringLiteral("[Mixer Profile]"), QStringLiteral("HiEQFrequency")), 2500.0);
         m_pEngineMixer = new OutputEngineMixer(m_pConfig, kMainGroup, m_pEffectsManager, m_pChannelHandleFactory, false);
         m_pEngineMixer->enableOutputs();
         for (int n = 1; n <= 2; ++n) {
@@ -630,6 +639,20 @@ class Engine {
     }
 
   private:
+    // EQ 群延迟（帧）：Mixxx 默认 EQ（Biquad Full Kill）的 LV-mix 那一路，EQ 居中时干声也走一条延迟线，
+    // 长度 = 低分频点上 Bessel4 低通的整数群延迟（lvmixeqbase.h:57-68、101-104；那里的 × 2 是立体声交错的采样数）。
+    // 250 Hz、44.1 kHz 时 59 帧（1.34 ms）：听到的比 deck 报告的位置晚这么多（真 Mixxx 也一样；两个 deck 一样晚，对拍不受影响）。
+    // 以前分频点错在 11020 Hz 时是 1 帧（对时检查里一直看到的「晚 1 帧」就是它）。按 Mixxx 同一个函数算
+    int eqDelayFrames() const {
+        const double lo = ControlObject::get(ConfigKey(QStringLiteral("[Mixer Profile]"), QStringLiteral("LoEQFrequency")));
+        EngineFilterBessel4Low f(mixxx::audio::SampleRate(kSampleRate), lo);
+        return f.setFrequencyCornersForIntDelay(lo / kSampleRate, LVMixEQEffectGroupStateConstants::kMaxDelay);
+    }
+    QJsonObject audioInfo() const {
+        QJsonObject o = m_audio.info();
+        o["eq_delay_ms"] = eqDelayFrames() * 1000.0 / kSampleRate;
+        return o;
+    }
     double engineMs() const {
         return static_cast<double>(m_engineFrames) * 1000.0 / kSampleRate;
     }
@@ -949,7 +972,8 @@ class Engine {
             QThread::msleep(1); // 让读盘线程跟上（真放的时候它有 11.6 ms）
         }
         QJsonObject o;
-        o["start"] = start; // 输出第 i 点 = 曲目第 start + i 帧（原速、曲目 44100 Hz 时）
+        o["start"] = start; // 输出第 i 点 = 曲目第 start + i 帧（原速、曲目 44100 Hz 时），再晚 eq_delay 帧（EQ 群延迟）
+        o["eq_delay"] = eqDelayFrames();
         o["track_rate"] = sr;
         o["rate"] = kSampleRate;
         emitLine(QJsonDocument(o).toJson(QJsonDocument::Compact).toStdString());
@@ -975,7 +999,7 @@ class Engine {
         o["loads"] = loads;
         o["crossfader"] = m_crossfader->get();
         o["xFaderMode"] = ControlObject::get(ConfigKey("[Mixer Profile]", "xFaderMode"));
-        o["audio"] = m_audio.info();
+        o["audio"] = audioInfo();
         QJsonArray decks;
         for (int n = 1; n <= 2; ++n) {
             QJsonObject d;
@@ -1048,7 +1072,7 @@ class Engine {
             if (c["reopen"].toBool()) {
                 m_audio.followDefault(true); // 测试：不管系统换没换都重开一次
             }
-            r = m_audio.info();
+            r = audioInfo();
             r["_id"] = c["_id"];
         } else if (cmd == "get") {
             r["v"] = ControlObject::get(ConfigKey(c["group"].toString(), c["key"].toString()));
