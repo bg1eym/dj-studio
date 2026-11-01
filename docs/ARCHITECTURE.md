@@ -20,7 +20,7 @@ Mixxx + DJStudio.js（控制器映射）
 ## 两种引擎（`Config.engine`，`DJSTUDIO_ENGINE`）
 
 - **builtin（默认）**：不连本机的 Mixxx——`Studio._mixxx_tracks()` 返回空（不读 Mixxx 曲库），连 Mixxx 的操作（同步、校正 Mixxx 网格、
-  真机探测、IAC 连接）直接报错。网格用自己分析的 `own_grid`；一键分析只有 音频分析 → 读打碟谱 → 生成 set → 准备内置引擎 四步；
+  真机探测、IAC 连接）直接报错。网格用自己分析的 `own_grid`，曲库页手动填的（`tracks.grid_bpm` / `grid_first`）优先（`Track.chosen_grid()`）；一键分析只有 音频分析 → 读打碟谱 → 生成 set → 准备内置引擎 四步；
   「开始演出」= 在**声音引擎** `djstudio-engine`（`tools/mixxx-engine`：只编了 Mixxx 2.5.6 的引擎核心）里跑同一份 `DJStudio.js` 和同一个 conductor
   （和预演同一套，`Studio.rehearse(builtin=True)`）。原速时出声（PortAudio → 系统默认输出，引擎在声卡回调里处理，同 Mixxx 的 SoundManager）；
   可以倍速（没有声音）、从第 k 段过渡开始。找不到声音引擎时退回 Node 模拟器（`sim/fake_mixxx.mjs`，没有声音）。
@@ -113,6 +113,7 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
 - 替换 `controllers/DJStudio.js` 会热重载映射并清空引擎状态 → 只在「准备」（Mixxx 退出时）部署。
 - iCloud「仅云端」文件会让读取阻塞 → 代码和托管曲库都放在 iCloud 之外；导入时会标出云端文件。
 - Mixxx 网格可能误判（2/3、1.5 倍），或整条放在反拍上（真曲实测 5 首里 3 首）→ 分析时和自估网格比对，曲库页标「网格存疑」，set 校验报错；「校正网格」把自估网格写进 mixxxdb 并 `bpm_lock`。自估网格的线放在 kick 起音点上（`analysis.kick_phase`）。
+- 自估速度（`analysis.estimate_grid`）：自相关粗估 → 在 ±4% 里用整首 kick 最多的 8 个 30 秒窗口找（0.05 BPM 一步，落在边上再往外扩一次）→ 整首 ±0.15 细找 → 逐拍线性拟合。以前细找只在粗估 ±1% 里，粗估偏多了就卡在范围边上（How You Move 138 估成 137.00）。改算法时加 `GRID_VERSION`，旧分析会自动重做。
 - **不要用 kick 相似度自动决定接法**（研究里 25 次实测相关性只有 +0.19）。
 
 ## 测试

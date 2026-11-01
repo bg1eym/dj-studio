@@ -125,9 +125,9 @@ def create_app(studio: Studio) -> FastAPI:
         if m and m.grid and m.analyzed:
             g = Grid(m.grid.bpm, m.grid.first_beat, 0, m.duration or t.duration)
             src = "mixxx"
-        elif a:
-            g = Grid(a["own_grid"]["bpm"], a["own_grid"]["first_beat"], 0, t.duration)
-            src = "own"
+        elif t.chosen_grid():
+            bpm, first, src = t.chosen_grid()  # type: ignore[misc]
+            g = Grid(bpm, first, 0, t.duration)
         else:
             g = None
             src = None
@@ -245,11 +245,22 @@ def create_app(studio: Studio) -> FastAPI:
     @app.patch("/api/tracks/{tid}")
     def api_track_patch(tid: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         t = _track(tid)
-        allowed = {"title", "artist", "note", "bar1", "bar1_confirmed"}
+        allowed = {"title", "artist", "note", "bar1", "bar1_confirmed", "grid_bpm", "grid_first"}
         fields = {k: v for k, v in body.items() if k in allowed}
+        if "grid_bpm" in fields:  # 手动定网格：null = 用回自动估的
+            try:
+                bpm = None if fields["grid_bpm"] in (None, "") else float(fields["grid_bpm"])
+                first = None if bpm is None else float(fields.get("grid_first") or 0.0)
+            except (TypeError, ValueError) as e:
+                raise HTTPException(400, "BPM / 第一拍要是数字") from e
+            if bpm is not None and not 60 <= bpm <= 200:
+                raise HTTPException(400, f"BPM {bpm:g} 不对（要在 60–200 之间）")
+            if first is not None and not 0 <= first < 60.0 / bpm:  # type: ignore[operator]
+                first = first % (60.0 / bpm)  # type: ignore[operator]  # 第一拍：一拍以内的位置
+            fields["grid_bpm"], fields["grid_first"] = bpm, first
         studio.store.update(tid, **fields)
-        if "bar1" in fields:
-            studio.library.enqueue(tid)  # 按新的小节线重新切段落
+        if "bar1" in fields or "grid_bpm" in fields:
+            studio.library.enqueue(tid)  # 按新的小节线 / 网格重新切段落
         return api_track(t.id)
 
     @app.post("/api/tracks/{tid}/reanalyze")

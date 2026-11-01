@@ -683,7 +683,7 @@ function renderTrackTable() {
   tb.append(h("tbody", {}, rows.map((t) => h("tr", { class: S.selTrack && S.selTrack.id === t.id ? "sel" : "", onclick: () => openTrack(t.id) },
     h("td", {}, h("div", {}, t.title || "?"), h("div", { class: "dim" }, t.artist)),
     h("td", { class: "mono" }, fmt(t.duration)),
-    h("td", { class: "mono" }, t.grid ? t.grid.bpm.toFixed(2) : "–", t.grid ? h("div", { class: "dim" }, t.grid.source === "mixxx" ? "Mixxx" : "自估") : null),
+    h("td", { class: "mono" }, t.grid ? t.grid.bpm.toFixed(2) : "–", t.grid ? h("div", { class: "dim" }, t.grid.source === "mixxx" ? "Mixxx" : t.grid.source === "manual" ? "手动" : "自估") : null),
     h("td", {}, t.key || "–"),
     h("td", { class: "mono" }, t.grid ? t.grid.bars : "–"),
     h("td", {}, trackBadges(t)),
@@ -701,6 +701,27 @@ async function openTrack(id, keepView = false) {
   S.selTrack = t;
   renderTrackTable();
   renderTrackDetail(keepView && !changed);
+}
+
+// 自动估的 BPM 不对时手动定网格（比如谱上写 138、自估成 137）：BPM + 第一拍（秒）。之后分析、生成 set、演出都按它
+function gridEditor(t) {
+  const g = t.grid;
+  const manual = g && g.source === "manual";
+  const bpm = h("input", { type: "number", step: "0.001", min: 60, max: 200, value: g ? +g.bpm.toFixed(3) : "", style: "width:90px" });
+  const first = h("input", { type: "number", step: "0.001", min: 0, value: g ? +g.first_beat.toFixed(3) : "", style: "width:80px" });
+  return h("div", { class: "row grid-edit", style: "margin-top:8px" },
+    h("span", { class: "dim" }, "网格："), bpm, h("span", { class: "dim" }, "BPM，第一拍"), first, h("span", { class: "dim" }, "秒"),
+    h("button", { class: "small", onclick: () => guard(async () => {
+      await api("PATCH", "/api/tracks/" + t.id, { grid_bpm: +bpm.value, grid_first: +first.value });
+      toast(`网格改成 ${+bpm.value} BPM，重新切小节中…`);
+      await openTrack(t.id, true);
+    }) }, "按这个网格"),
+    manual ? h("button", { class: "small", onclick: () => guard(async () => {
+      await api("PATCH", "/api/tracks/" + t.id, { grid_bpm: null });
+      toast("用回自动估的网格，重新分析中…");
+      await openTrack(t.id, true);
+    }) }, "用回自动估的") : null,
+    h("span", { class: "dim" }, manual ? `（自动估的是 ${t.own_bpm ?? "?"} BPM）` : "自动估的不对时在这里改"));
 }
 
 async function renderTrackDetail(keepView = false) {
@@ -741,9 +762,10 @@ async function renderTrackDetail(keepView = false) {
       t.grid_check && !t.grid_check.ok ? h("button", { class: "small danger", onclick: () => fixGrids([t.id]) }, "校正网格") : null,
     ),
     h("div", { class: "dim", style: "margin-top:6px" },
-      g ? `网格：${g.bpm.toFixed(3)} BPM（${g.source === "mixxx" ? "Mixxx" : "自估，Mixxx 分析后以 Mixxx 为准"}），共 ${g.bars} 小节。` : "还没有网格。",
+      g ? `网格：${g.bpm.toFixed(3)} BPM（${g.source === "mixxx" ? "Mixxx" : g.source === "manual" ? "手动定的" : "自估"}），共 ${g.bars} 小节。` : "还没有网格。",
       t.grid_check && !t.grid_check.ok ? ` ⚠ 与自估网格不一致：${t.grid_check.note}` : "",
       " 滚轮缩放，拖动平移，单击定位。"),
+    gridEditor(t),
     t.sections && t.sections.length ? h("div", { style: "margin-top:8px" },
       h("h3", {}, "段落（自动分析，仅供参考）"),
       h("div", { class: "row" }, t.sections.map((s) => h("span", { class: "badge" }, `${s.label} ${s.start}–${s.end - 1}`)))) : null,

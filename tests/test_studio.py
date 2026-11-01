@@ -657,3 +657,26 @@ def test_waveform_is_denon_tri_band():
     assert mid["mid"] > 0.1 and mid["low"] < 0.05 and mid["high"] < 0.05, mid
     hi = levels(6000, 0.05)
     assert hi["high"] > 0.1 and hi["low"] < 0.05 and hi["mid"] < 0.05, hi
+
+
+def test_tempo_found_even_when_the_first_guess_is_off():
+    """节拍估计第二步以前只在第一步（自相关）估计的 ±1% 里找：第一步偏了 1% 以上，结果就停在搜索范围的边上
+    （How You Move：138 BPM 被估成 137.00）。现在先分段粗搜 ±4%，第一步偏 ±4% 也找得回来。"""
+    import inspect
+
+    from djstudio.library import analysis as A
+
+    x = techno(138.0, 0.189, 0, (("intro", 8), ("groove", 48), ("breakdown", 16), ("drop", 48), ("outro", 8)), seed=2)
+    fr = A.stft_bands(x, 22050)
+    assert abs(A.estimate_grid(fr)[0] - 138.0) < 0.01
+    src = inspect.getsource(A.estimate_grid)
+    marker = "    bpm = 60.0 * fps / L\n    conf = float(score[i])"
+    assert marker in src
+    ns = {**vars(A)}
+    exec(src.replace(marker, "    bpm = GUESS\n    conf = float(score[i])"), ns)
+    for guess in (136.5, 135.64, 134.0, 141.0, 143.5):  # 135.64 的 ±1% 上边正好是 137.0
+        ns["GUESS"] = guess
+        diag = {}
+        bpm = ns["estimate_grid"](fr, diag=diag)[0]
+        assert abs(bpm - 138.0) < 0.01, (guess, bpm, diag)
+        assert diag["tempo_guess"] == round(guess, 3)

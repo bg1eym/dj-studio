@@ -31,6 +31,10 @@ WAVE_BANDS = {"low": (20.0, 500.0), "mid": (500.0, 2000.0), "high": (2000.0, 110
 # cmicali/vibe-libs 的 WaveformLevelMath.h）；分析信号是 0.707·(L+R) 下混，两声道相同时比单声道高 3 dB
 WAVE_FULL_RMS = 0.5 * 2 ** 0.5
 WAVE_SHARES = {"low": 1.0, "mid": 0.48, "high": 0.48}
+# 网格估计的版本：2 = 节拍搜索不再被第一步（自相关）的估计困住。1 只在第一步估计的 ±1% 里找，第一步偏了 1% 以上
+# 就找不回来，结果停在搜索范围的边上（How You Move 138 BPM 被估成 137.00）。旧版本的分析会重做
+GRID_VERSION = 2
+TEMPO_SPAN = 0.04  # 第一步估计上下各 4% 都搜
 WAVEFORM_VERSION = 2  # 2 = 三频段（Denon 分界、按满幅标定）；1 = 旧的三段各自拉满
 
 
@@ -136,8 +140,33 @@ def _norm(v: np.ndarray) -> np.ndarray:
     return v / (np.percentile(v, 99) or 1.0)
 
 
-def estimate_grid(fr: Frames, bpm_range: tuple[float, float] = (100.0, 160.0)) -> tuple[float, float, float]:
-    """返回 (bpm, first_beat 秒, 置信度)。techno 恒速假设。"""
+def _comb_best(kick: np.ndarray, period: float, a: int, b: int, ph_step: float) -> tuple[float, float]:
+    """kick 包络在 [a, b) 帧里按 period 帧一拍取样：所有相位里拍点上的和最大的那个 → (和, 相位)。"""
+    frames_n = len(kick)
+    m = np.arange(int(max(0, b - a - 1) / period) + 1)
+    phases = np.arange(0, period, ph_step)
+    pos = a + phases[:, None] + m[None, :] * period
+    inside = pos < min(b, frames_n - 1)
+    s = (np.interp(pos, np.arange(frames_n), kick) * inside).sum(axis=1)
+    j = int(np.argmax(s))
+    return float(s[j]), float(phases[j])
+
+
+def _windows(kick: np.ndarray, fps: float, seconds: float = 30.0, count: int = 8) -> list[tuple[int, int]]:
+    """kick 最多的几段（每段 seconds 秒，不重叠）：粗搜节拍只看这些段，跳过 breakdown。"""
+    w = int(seconds * fps)
+    n = len(kick)
+    if n <= w:
+        return [(0, n)]
+    starts = list(range(0, n - w + 1, w))
+    energy = [float(kick[a:a + w].sum()) for a in starts]
+    best = sorted(range(len(starts)), key=lambda i: -energy[i])[:count]
+    return [(starts[i], starts[i] + w) for i in sorted(best)]
+
+
+def estimate_grid(fr: Frames, bpm_range: tuple[float, float] = (100.0, 160.0),
+                  diag: dict[str, Any] | None = None) -> tuple[float, float, float]:
+    """返回 (bpm, first_beat 秒, 置信度)。techno 恒速假设。diag 给了就填诊断信息（第一步的估计、粗搜结果）。"""
     env = _norm(fr.flux) + 1.5 * _norm(fr.low_flux)
     env = env - env.mean()
     fps = fr.fps
@@ -158,20 +187,37 @@ def estimate_grid(fr: Frames, bpm_range: tuple[float, float] = (100.0, 160.0)) -
     bpm = 60.0 * fps / L
     conf = float(score[i])
 
-    # 梳状搜索：在 ±1% BPM 内找 (bpm, 相位) 使拍点上的 kick 包络之和最大；
-    # 再用逐拍局部峰做稳健线性拟合精修到亚帧
+    guess = bpm
     kick = _norm(fr.low_flux) + 0.3 * _norm(fr.flux)
-    frames = np.arange(n)
-    best, best_ph, best_period = -1.0, 0.0, 60.0 / bpm * fps
-    for cand in np.arange(bpm * 0.99, bpm * 1.01, 0.01):
+    # 1) 粗搜：第一步估计 ±4%，每 0.05 BPM 一个候选。分段打分（kick 最多的几段 30 秒，每段自己找相位）：
+    #    整首一起打分的峰只有 ±0.01 BPM 宽，粗步长会跨过去；分段的峰约 ±0.3 BPM 宽。搜到边上就往外再搜一段
+    wins = _windows(kick, fps)
+
+    def coarse(lo: float, hi: float) -> tuple[float, float]:
+        best_c, best_s = lo, -1.0
+        for cand in np.arange(lo, hi + 1e-9, 0.05):
+            period = 60.0 / cand * fps
+            sc = sum(_comb_best(kick, period, a, b, 1.0)[0] for a, b in wins)
+            if sc > best_s:
+                best_c, best_s = float(cand), sc
+        return best_c, best_s
+
+    lo, hi = max(bpm_range[0], guess * (1 - TEMPO_SPAN)), min(bpm_range[1], guess * (1 + TEMPO_SPAN))
+    c0, _ = coarse(lo, hi)
+    if (c0 <= lo + 0.05 and lo > bpm_range[0]) or (c0 >= hi - 0.05 and hi < bpm_range[1]):
+        lo2, hi2 = (max(bpm_range[0], lo - guess * TEMPO_SPAN), lo) if c0 <= lo + 0.05 else (hi, min(bpm_range[1], hi + guess * TEMPO_SPAN))
+        c1, _ = coarse(lo2, hi2)
+        c0 = max((c0, c1), key=lambda c: sum(_comb_best(kick, 60.0 / c * fps, a, b, 1.0)[0] for a, b in wins))
+    # 2) 细搜：整首一起，粗搜结果 ±0.15 BPM，每 0.005 一个候选
+    best, best_ph, best_period = -1.0, 0.0, 60.0 / c0 * fps
+    for cand in np.arange(c0 - 0.15, c0 + 0.15 + 1e-9, 0.005):
         period = 60.0 / cand * fps
-        k_idx = np.arange(int((n - 1) / period))
-        phases = np.arange(0, period, 0.5)
-        pos = phases[:, None] + k_idx[None, :] * period
-        s = (np.interp(pos, frames, kick) * (pos < n - 1)).sum(axis=1)
-        j = int(np.argmax(s))
-        if s[j] > best:
-            best, best_ph, best_period = float(s[j]), float(phases[j]), period
+        sc, ph = _comb_best(kick, period, 0, n, 0.5)
+        if sc > best:
+            best, best_ph, best_period = sc, ph, period
+    if diag is not None:
+        diag.update(tempo_guess=round(float(guess), 3), coarse=round(float(c0), 3))
+    # 3) 逐拍局部峰做稳健线性拟合，精修到亚帧
     period = best_period
     bpm = 60.0 * fps / period
     k_idx = np.arange(int(n / period))
@@ -371,17 +417,18 @@ def sections(bars: list[dict[str, float]]) -> tuple[list[dict[str, Any]], dict[s
 
 
 def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = None,
-            bar1: float | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+            bar1: float | None = None, grid_source: str = "mixxx") -> tuple[dict[str, Any], dict[str, Any]]:
     """返回 (分析结果, 波形)。mixxx_grid = (bpm, first_beat)；有就以它为准切小节。
     bar1 = 用户确认过的第 1 小节起点（秒）；给了就不用自估的小节相位。"""
     fr = stft_bands(x, sr)
     wf = waveform(x, fr)
-    own_bpm, own_first_raw, own_conf = estimate_grid(fr)
+    diag: dict[str, Any] = {}
+    own_bpm, own_first_raw, own_conf = estimate_grid(fr, diag=diag)
     # 精修：把自估网格线放到 kick 起音点上（与其他曲子同一标准）
     own_kick, own_kick_sharp = kick_phase(x, sr, own_bpm, own_first_raw)
     own_first = (own_first_raw + own_kick * 60.0 / own_bpm) % (60.0 / own_bpm)
-    if mixxx_grid and mixxx_grid[0] > 0:
-        bpm, first, src = mixxx_grid[0], mixxx_grid[1], "mixxx"
+    if mixxx_grid and mixxx_grid[0] > 0:  # 给定的网格：Mixxx 的，或者手动定的（grid_source = "manual"）
+        bpm, first, src = mixxx_grid[0], mixxx_grid[1], grid_source
     else:
         bpm, first, src = own_bpm, own_first, "own"
     dur = len(x) / sr
@@ -401,12 +448,13 @@ def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = Non
         "downbeat_conf": round(db_conf, 3),
         "bar1": round(g.bar_time(1), 5),
         "own_grid": {"bpm": round(own_bpm, 3), "first_beat": round(own_first, 5), "conf": round(own_conf, 3),
-                     "kick_sharpness": round(own_kick_sharp, 2)},
+                     "kick_sharpness": round(own_kick_sharp, 2), **diag},
+        "grid_version": GRID_VERSION,
         "bars": bars,
         "sections": secs,
         "cues": cues,
     }
-    if src == "mixxx":
+    if src == "mixxx":  # 手动定的网格是用户有意改的，不拿自估的去「存疑」它
         result["grid_check"] = grid_agreement(mixxx_grid, (own_bpm, own_first))  # type: ignore[arg-type]
     return result, wf
 

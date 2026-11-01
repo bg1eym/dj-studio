@@ -498,3 +498,35 @@ def test_analysis_is_announced_when_it_starts(tmp_path):
             break
         threading.Event().wait(0.02)
     assert events[-1][1]["state"] == "ok"
+
+
+def test_manual_grid_override(tmp_path):
+    """自动估的 BPM 不对（谱上 138、自估成 137）：曲库里手动定网格，生成 set 就按它；清掉就用回自估的。
+    以前的曲库（没有这两列）打开时自动补上。"""
+    import sqlite3
+
+    from djstudio.library.store import Store, Track
+    from tests.test_web import make_client
+
+    old = tmp_path / "old.db"  # 0.3.19 以前的表
+    with sqlite3.connect(old) as c:
+        c.execute("CREATE TABLE tracks (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, source TEXT, title TEXT, artist TEXT,"
+                  " album TEXT, duration REAL, samplerate INTEGER, channels INTEGER, codec TEXT, bitrate INTEGER, size INTEGER,"
+                  " added_at TEXT, bar1 REAL, bar1_confirmed INTEGER NOT NULL DEFAULT 0, analysis_json TEXT,"
+                  " analysis_version INTEGER, analysis_error TEXT, note TEXT)")
+        c.execute("INSERT INTO tracks (id, path) VALUES ('x', '/m/x.mp3')")
+    assert Store(old, tmp_path / "c1").get("x").grid_bpm is None
+
+    client = make_client(tmp_path)
+    st = client.app.state.studio.store
+    st.add(Track(id="hym", path="/m/How You Move.mp3", title="How You Move", artist="Charlotte de Witte", duration=300.0))
+    st.update("hym", analysis={"own_grid": {"bpm": 137.0, "first_beat": 0.2}, "bpm": 137.0, "first_beat": 0.2})
+    r = client.get("/api/tracks/hym").json()
+    assert r["grid"]["source"] == "own" and r["grid"]["bpm"] == 137.0
+    r = client.patch("/api/tracks/hym", json={"grid_bpm": 138, "grid_first": 0.189}).json()
+    assert r["grid"]["source"] == "manual" and r["grid"]["bpm"] == 138 and abs(r["grid"]["first_beat"] - 0.189) < 1e-9
+    lt = client.app.state.studio.lib_tracks(["hym"])[0]
+    assert lt.grid.bpm == 138 and abs(lt.grid.first_beat - 0.189) < 1e-9  # 打碟谱转 set 用的就是它
+    assert client.patch("/api/tracks/hym", json={"grid_bpm": 500}).status_code == 400
+    r = client.patch("/api/tracks/hym", json={"grid_bpm": None}).json()
+    assert r["grid"]["source"] == "own" and r["grid"]["bpm"] == 137.0

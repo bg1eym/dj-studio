@@ -27,9 +27,13 @@ CREATE TABLE IF NOT EXISTS tracks (
   analysis_json TEXT,
   analysis_version INTEGER,
   analysis_error TEXT,
-  note TEXT
+  note TEXT,
+  grid_bpm REAL,
+  grid_first REAL
 );
 """
+# 以前的库没有的列：打开时补上（ALTER TABLE ADD COLUMN）
+_ADDED_COLS = {"grid_bpm": "REAL", "grid_first": "REAL"}
 
 
 @dataclass
@@ -53,7 +57,19 @@ class Track:
     analysis_version: int | None = None
     analysis_error: str | None = None
     note: str = ""
+    # 手动定的网格（BPM, 第一拍秒数）：自动估的不对时在曲库页改（比如谱上写 138、自估成 137）。有就以它为准
+    grid_bpm: float | None = None
+    grid_first: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def chosen_grid(self) -> tuple[float, float, str] | None:
+        """内置引擎用的网格：(BPM, 第一拍秒数, 来源)。手动定的 > 自己分析的。"""
+        if self.grid_bpm:
+            return float(self.grid_bpm), float(self.grid_first or 0.0), "manual"
+        own = (self.analysis or {}).get("own_grid")
+        if own:
+            return float(own["bpm"]), float(own["first_beat"]), "own"
+        return None
 
     @property
     def display(self) -> str:
@@ -64,7 +80,7 @@ class Track:
 
 _COLS = ["id", "path", "source", "title", "artist", "album", "duration", "samplerate", "channels", "codec",
          "bitrate", "size", "added_at", "bar1", "bar1_confirmed", "analysis_json", "analysis_version",
-         "analysis_error", "note"]
+         "analysis_error", "note", "grid_bpm", "grid_first"]
 
 
 class Store:
@@ -76,6 +92,10 @@ class Store:
         self.wave_dir.mkdir(parents=True, exist_ok=True)
         with closing(self._conn()) as c, c:
             c.executescript(SCHEMA)
+            have = {r[1] for r in c.execute("PRAGMA table_info(tracks)")}
+            for col, typ in _ADDED_COLS.items():
+                if col not in have:
+                    c.execute(f"ALTER TABLE tracks ADD COLUMN {col} {typ}")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.db_path, timeout=10)

@@ -207,7 +207,9 @@ def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
         return None, [Note("error", where, "还没有网格（分析 / Mixxx 分析没完成）")]
     notes: list[Note] = []
     if pt.bpm_orig and abs(g.bpm - pt.bpm_orig) > 0.6:
-        notes.append(Note("error", where, f"BPM 对不上：谱上原 BPM {pt.bpm_orig:g}，网格 {g.bpm:.2f}"))
+        notes.append(Note("error", where, f"BPM 对不上：谱上原 BPM {pt.bpm_orig:g}，网格 {g.bpm:.2f}。"
+                                          f"谱是对的话：曲库页点这首，在「网格」里填 {pt.bpm_orig:g} BPM（和第一拍）点「按这个网格」，"
+                                          "然后重新放谱 / 点「开始分析」"))
     anchor = pt.bar1_s if pt.bar1_s is not None else g.bar_time(1)
     jf = g.time_beat(anchor)
     j = round(jf)

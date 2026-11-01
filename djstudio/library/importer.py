@@ -193,7 +193,10 @@ class Library:
         decoder = decoder_name()
         x, stats = decode_mono_stats(Path(t.path), ANALYSIS_SR)
         grid = self.mixxx_grid(t) if self.mixxx_grid else None
-        result, wf = analyze(x, ANALYSIS_SR, grid, t.bar1 if t.bar1_confirmed else None)
+        src = "mixxx"
+        if t.grid_bpm:  # 手动定的网格优先：按它切小节和段落
+            grid, src = (float(t.grid_bpm), float(t.grid_first or 0.0)), "manual"
+        result, wf = analyze(x, ANALYSIS_SR, grid, t.bar1 if t.bar1_confirmed else None, grid_source=src)
         result["decoder"] = decoder
         # 响度（LUFS）和采样峰值：演出时按它给每首统一音量（像 Mixxx 的 ReplayGain / Prime 的 Auto Gain）
         result["loudness"] = round(stats.get("loudness", -70.0), 2)

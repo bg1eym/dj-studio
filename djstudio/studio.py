@@ -19,7 +19,7 @@ from .engine.conductor import Conductor, Progress
 from .engine.link import Link, LinkError, RtMidiLink, SimLink
 from .grid import Grid
 from .library.analysis import downbeat_from_bar1
-from .library.analysis import WAVEFORM_VERSION
+from .library.analysis import GRID_VERSION, WAVEFORM_VERSION
 from .library.audio import AUDIO_EXTS, AudioError, decoder_name, have_decoder, probe
 from .library.importer import Library
 from .library.store import Store, Track
@@ -299,9 +299,9 @@ class Studio:
             if t is None:
                 return None
             m = mx.get(t.id)
-            own = (t.analysis or {}).get("own_grid")
-            if self.builtin and own:  # 内置引擎：用自己分析的网格
-                g = Grid(own["bpm"], own["first_beat"], 0, t.duration)
+            own = t.chosen_grid()
+            if self.builtin and own:  # 内置引擎：手动定的网格，或者自己分析的
+                g = Grid(own[0], own[1], 0, t.duration)
             elif m is None or m.grid is None or not m.analyzed:
                 # 不在 Mixxx 库 / 没分析：返回空网格让编译器报「没分析」
                 return TrackInfo(t.id, t.display, Grid(0.0 if m is None else m.bpm or 0.0, 0.0, 0, 0.0))
@@ -878,8 +878,9 @@ class Studio:
             m = mx.get(t.id)
             if m and m.grid and m.analyzed:
                 g = Grid(m.grid.bpm, m.grid.first_beat, 0, m.duration or t.duration)
-            elif a.get("own_grid"):
-                g = Grid(a["own_grid"]["bpm"], a["own_grid"]["first_beat"], 0, t.duration)
+            elif t.chosen_grid():  # 手动定的网格，或者自己分析的
+                bpm, first, _ = t.chosen_grid()  # type: ignore[misc]
+                g = Grid(bpm, first, 0, t.duration)
             else:
                 g = None
             if g is not None and t.bar1 is not None:
@@ -986,6 +987,7 @@ class Studio:
             (t.analysis or {}).get("decoder", "ffmpeg") != dec
             or "loudness" not in (t.analysis or {})  # 0.3.5 起分析里有响度（演出时统一音量用）
             or (t.analysis or {}).get("waveform_version", 1) < WAVEFORM_VERSION  # 0.3.7 起波形是 Denon 三频段
+            or (t.analysis or {}).get("grid_version", 1) < GRID_VERSION  # 0.3.20 起节拍搜索不再被第一步的估计困住
             or (self.builtin and (t.analysis or {}).get("grid_source") == "mixxx"))]
 
     def _plan_set_outdated(self) -> bool:
