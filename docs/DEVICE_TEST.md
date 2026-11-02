@@ -69,6 +69,7 @@ Mixxx 的行为已经按 2.5.6 源码逐条核对过（见 [MIXXX_NOTES.md](MIXX
 | 谱上 Filter「左 / 右 N 点」= Mixxx QuickEffect 滤波旋钮同一位置 | 位置对位置；两边滤波器的截止频率曲线不同 | 听「左 9 点（切一半）」是否差不多 |
 | Main FX Reverb Wet/Dry 1/3 = Mixxx 效果单元 2 的 mix 0.33 | 位置对位置；混响本身不同 | 听尾巴 |
 | #06 Key Lock 关（音高 +0.8 半音） | Mixxx keylock 的延迟会让叠放出双击（测试台实测 17–29ms） | 觉得音高不能接受就把 set 的 keylock 打开，同时听过渡里有没有双击 |
+| Mac 上 20 倍速录 MP3 读盘跟得上（录音里没有缺口） | Linux 4 核上 20 / 60 倍速 0 次；Mac 的 CoreAudio 解码速度没量过 | 录一次整套 set，看网页上是不是「20 倍速」录完（跟不上会自动放慢重录并说明）；听一遍录音有没有掉音 |
 | Mixxx ReplayGain 开着 | Mixxx 默认开；关着时两首满音量叠加会削波 | 体检「ReplayGain」一项 |
 | 按谱找曲子能读到「下载 / 桌面 / 文稿 / 音乐」 | macOS 的文件夹权限（TCC）：从终端启动时第一次会弹窗问；没核对过 App 方式启动 | 放进打碟谱后看「在电脑里找到 N 首」 |
 | 自动更新、关旧服务在 Mac 上能用 | `git pull --ff-only`（需要能免密拉取）；`lsof -t -iTCP:8430 -sTCP:LISTEN` + `ps -ww`（macOS 自带）；只在 Linux 上测过 | 启动时终端里的「已更新到最新版本」「之前打开的 DJ Studio 还在运行，先关掉它」；右上角提交号和 GitHub 上一致 |

@@ -183,12 +183,16 @@ class EngineLink(SimLink):
     audio=True 且 speed == 1 时从系统默认输出设备出声，引擎按声卡时钟走。"""
 
     def __init__(self, binary: Path, library: list[dict[str, Any]], speed: float = 1.0, audio: bool = False,
-                 mapping_xml: Path | None = None) -> None:
+                 mapping_xml: Path | None = None, clock: bool = False) -> None:
+        """clock=True：引擎时钟（录音用，不出声）——DJStudio.js 的 tick 和计时按引擎处理到的时间走，倍速时和原速放出来的一样；
+        引擎数读盘跟不上的次数（record_stop 回 cache_misses），为此放开 Mixxx 的 default 日志分类（引擎里不打出来）。"""
         from .bundled import engine_env
 
         mapping_xml = mapping_xml or Path(__file__).parent / "mapping" / "DJStudio.midi.xml"
         env = {**engine_env(Path(binary)), "DJSTUDIO_MAPPING": str(mapping_xml), "DJSTUDIO_SPEED": str(speed),
                "DJSTUDIO_AUDIO": "1" if audio else "0"}
+        if clock:
+            env.update(DJSTUDIO_CLOCK="engine", QT_LOGGING_RULES="*.debug=false;default.debug=true")
         super().__init__(library, speed, cmd=[str(binary)], env=env)
 
     def audio(self, timeout: float = 5.0) -> dict[str, Any]:

@@ -114,6 +114,13 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
 - iCloud「仅云端」文件会让读取阻塞 → 代码和托管曲库都放在 iCloud 之外；导入时会标出云端文件。
 - Mixxx 网格可能误判（2/3、1.5 倍），或整条放在反拍上（真曲实测 5 首里 3 首）→ 分析时和自估网格比对，曲库页标「网格存疑」，set 校验报错；「校正网格」把自估网格写进 mixxxdb 并 `bpm_lock`。自估网格的线放在 kick 起音点上（`analysis.kick_phase`）。
 - 自估速度（`analysis.estimate_grid`）：自相关粗估 → 在 ±4% 里用整首 kick 最多的 8 个 30 秒窗口找（0.05 BPM 一步，落在边上再往外扩一次）→ 整首 ±0.15 细找 → 逐拍线性拟合。以前细找只在粗估 ±1% 里，粗估偏多了就卡在范围边上（How You Move 138 估成 137.00）。改算法时加 `GRID_VERSION`，旧分析会自动重做。
+- 录成 MP3（`Studio.record`，网页 `/api/sets/{id}/record`）：起一个不出声的声音引擎（`EngineLink(clock=True)`，20 倍速），
+  和演出同一套 DJStudio.js、conductor、`_sim_rows`（音量统一），引擎 `record` 命令带 `trim`（开头结尾的数字静音不录）、路径 `.mp3`
+  → Mixxx 的 `EncoderMp3`（320 kbps CBR）。**引擎时钟**：`DJSTUDIO_CLOCK=engine` 时引擎每处理 20ms 音频给 `[DJStudio],tick`、
+  `[DJStudio],clock_ms`，脚本（0.4.4）的 tick、`now()`、`after()`（过渡后 3 秒归位）都按它走；墙钟 20ms 的定时器在倍速时等于音乐里几百毫秒。
+  实测 20 / 40 / 60 倍速录出来和原速逐点相同（差别只在切点落在哪个 20ms tick 上，原速演出本身就有这么大的抖动）。
+  读盘跟不上（Mixxx 放一块静音）由引擎数 Mixxx 的那条调试日志（`record_stop` 回 `cache_misses`），有就按 8、3 倍速重录。
+  录完在 MP3 前面加 UTF-16 的 ID3v2.3（Mixxx 的编码器写标签只支持 Latin-1）。录音状态单独记（`Studio.recording`，SSE「recording」），不占任务槽。
 - 网格按谱定（`Studio._grid_from_score`，内置引擎）：谱上的原 BPM 和网格差 0.05 以上 → 带着谱上的 BPM 重新分析（`library.enqueue(bpm_hint=)`），`analysis.bpm_check` 按它在 ±0.1 里找网格，30 秒一段看低频起音离网格线多远（≤35ms 算对上；有没有 kick 按两个 BPM 里强的看）。有 kick 的段 ≥80% 对上、不比自估的差 → 存成这首的网格（`grid_from = "score"`，以后重新分析也按它）；对不上 → 还按音频的，结果在 `analysis.score_check`，转换时 BPM 不一致降成提示（两首对调了也提示）。曲库页手动定的网格不动。
 - **不要用 kick 相似度自动决定接法**（研究里 25 次实测相关性只有 +0.19）。
 

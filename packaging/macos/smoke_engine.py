@@ -121,3 +121,26 @@ p.wait(10)
 if p.returncode != 0:
     print("".join(err_lines[-30:]))
 check(p.returncode == 0, "引擎正常退出")
+
+# 「录成 MP3」那条路：不出声、20 倍速、引擎时钟，用 Mixxx 的 MP3 编码器（LAME，静态链接在引擎里）录一段
+mp3 = tmp / "rec.mp3"
+env2 = {**ENV, "DJSTUDIO_AUDIO": "0", "DJSTUDIO_SPEED": "20", "DJSTUDIO_CLOCK": "engine",
+        "QT_LOGGING_RULES": "*.debug=false;default.debug=true"}
+p = subprocess.Popen([str(BIN)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env2, text=True)
+replies.clear()
+threading.Thread(target=read, daemon=True).start()
+threading.Thread(target=lambda: err_lines.extend(p.stderr), daemon=True).start()
+cmd(50, {"cmd": "library", "tracks": [{"id": "k", "path": str(m4a), "bpm": 128.0, "first_beat": 0.0}]}, 60)
+cmd(51, {"cmd": "load", "deck": 1, "id": "k"})
+time.sleep(1.0)
+r = cmd(52, {"cmd": "record", "path": str(mp3), "trim": True})
+check(r and r.get("ok"), f"开始录 MP3：{r}")
+cmd(53, {"cmd": "set", "group": "[Channel1]", "key": "play", "value": 1})
+time.sleep(0.4)  # 20 倍速 ≈ 8 秒
+r = cmd(54, {"cmd": "record_stop"}, 60)
+data = mp3.read_bytes() if mp3.exists() else b""
+check(r and r.get("seconds", 0) > 3 and r.get("cache_misses") == 0 and data[:2] == b"\xff\xfb" and b"Info" in data[:200],
+      f"录成 MP3：{r and round(r.get('seconds', 0), 1)} 秒、{len(data) // 1024} KB，读盘跟不上 {r and r.get('cache_misses')} 次，"
+      f"开头是 MP3 帧 + LAME 的 Info 帧")
+cmd(55, {"cmd": "quit"})
+p.wait(10)

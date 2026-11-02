@@ -73,6 +73,9 @@
 #include "effects/effectsmanager.h"
 #include "engine/channels/enginedeck.h"
 #include "effects/backends/builtin/lvmixeqbase.h"
+#include "encoder/encodercallback.h"
+#include "encoder/encodermp3.h"
+#include "encoder/encodermp3settings.h"
 #include "engine/enginebuffer.h"
 #include "engine/filters/enginefilterbessel4.h"
 #include "engine/enginemixer.h"
@@ -426,6 +429,54 @@ const QString kMainGroup = QStringLiteral("[Master]");
 
 } // namespace
 
+// 读盘跟不上（cache miss）：deck 要的那段音频读盘线程还没读好，Mixxx 就放这一块静音（readaheadmanager.cpp:93-100），
+// 恢复时打一条调试日志「ReadAheadManager: continue after number cache misses」（readaheadmanager.cpp:107-109）。
+// 录音（不出声、倍速）时引擎可能比读盘线程快：打开这条日志并数它，录完报告——有就说明录音里有缺口，要放慢重录。
+// 要看得到这条日志，起引擎的一方要给 QT_LOGGING_RULES="*.debug=false;default.debug=true"（只放开 default 分类，
+// 即 Mixxx 的 qDebug()）：Qt 在第一次建日志分类时读这个环境变量，Mixxx 的静态 Logger 在 main 之前就建了，在这里改来不及
+std::atomic<int> g_cacheMisses{0};
+QtMessageHandler g_prevMessageHandler = nullptr;
+void countingMessageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
+    if (msg.contains(QLatin1String("cache misses"))) {
+        g_cacheMisses.fetch_add(1);
+        return;
+    }
+    if (type == QtDebugMsg) {
+        return; // 别的调试信息照旧不打
+    }
+    if (g_prevMessageHandler) {
+        g_prevMessageHandler(type, ctx, msg);
+    }
+}
+
+// 录 MP3：Mixxx 自己的 MP3 编码器（EncoderMp3，录音功能用的那个）把编好的数据交给回调，这里写进文件
+class FileEncoderCallback : public EncoderCallback {
+  public:
+    explicit FileEncoderCallback(QFile* f)
+            : m_f(f) {
+    }
+    void write(const unsigned char* header, const unsigned char* body, int headerLen, int bodyLen) override {
+        if (header && headerLen > 0) {
+            m_f->write(reinterpret_cast<const char*>(header), headerLen);
+        }
+        if (body && bodyLen > 0) {
+            m_f->write(reinterpret_cast<const char*>(body), bodyLen);
+        }
+    }
+    int tell() override {
+        return static_cast<int>(m_f->pos());
+    }
+    void seek(int pos) override {
+        m_f->seek(pos);
+    }
+    int filelen() override {
+        return static_cast<int>(m_f->size());
+    }
+
+  private:
+    QFile* m_f;
+};
+
 // ------------------------------------------------------------ 引擎（两个 deck + 混音器 + 效果 + 控制器）
 
 class Engine {
@@ -478,6 +529,11 @@ class Engine {
         }
         m_metersFlag = std::make_unique<ControlObject>(ConfigKey("[DJStudio]", "meters"));
         m_metersFlag->set(1.0);
+        // 引擎时钟（录音用）：不出声、倍速跑时 DJStudio.js 的 tick 和计时按引擎处理到的时间走，不按墙钟——
+        // 20 倍速时墙钟 20ms 一次的 tick 等于音乐里 400ms 一次，EQ 的切点会落不到拍上。clock_mode = 1 时脚本改看这两个控件
+        m_clockMode = std::make_unique<ControlObject>(ConfigKey("[DJStudio]", "clock_mode"));
+        m_clockMs = std::make_unique<ControlObject>(ConfigKey("[DJStudio]", "clock_ms"));
+        m_tick = std::make_unique<ControlObject>(ConfigKey("[DJStudio]", "tick"));
         PlayerInfo::create();
         // EQ 与快速效果链（真 Mixxx 里由 PlayerManager::addDeckInner 注册），以及标准效果单元
         for (int n = 1; n <= 2; ++n) {
@@ -542,6 +598,12 @@ class Engine {
         if (!pMapping) {
             std::fprintf(stderr, "映射加载失败：%s\n", mappingPath.constData());
             return 2;
+        }
+        // 引擎时钟：DJSTUDIO_CLOCK=engine 且不出声时（录音）。要在脚本 init 之前设好，脚本 init 时读它
+        m_clocked = qEnvironmentVariable("DJSTUDIO_CLOCK") == QLatin1String("engine") && !(wantAudio && speed == 1.0);
+        m_clockMode->set(m_clocked ? 1.0 : 0.0);
+        if (m_clocked) {
+            g_prevMessageHandler = qInstallMessageHandler(countingMessageHandler);
         }
         m_ctrl = std::make_unique<EngineController>();
         m_ctrl->setMapping(pMapping);
@@ -619,17 +681,7 @@ class Engine {
                         ++n;
                     }
                 }
-                auto pending = std::move(m_pending);
-                m_pending.clear();
-                for (auto& f : pending) {
-                    f();
-                }
-                QCoreApplication::processEvents();
-                while (!m_ctrl->loopback.empty()) {
-                    QByteArray b = m_ctrl->loopback.front();
-                    m_ctrl->loopback.pop_front();
-                    m_ctrl->feed(b);
-                }
+                service();
             }
             QThread::msleep(2);
         }
@@ -662,6 +714,30 @@ class Engine {
         recordBuffer();
         m_engineFrames += kBufferFrames;
         autodjPositionTick();
+        if (m_clocked) {
+            // 引擎时钟：每处理满 20ms（脚本的 TICK_MS）给脚本一个 tick，并把脚本、AutoDJ 的事当场处理掉——
+            // 和原速出声时一样，每一块音频之前旋钮都已经是那一刻该在的位置
+            m_clockMs->set(engineMs());
+            if (engineMs() >= m_nextTickMs) {
+                m_nextTickMs = engineMs() + kClockTickMs;
+                m_tick->set(m_tick->get() + 1.0);
+                service();
+            }
+        }
+    }
+    // 主线程上的杂事：AutoDJ 的请求、Qt 事件（脚本的定时器和控件连接）、脚本发给自己的回环消息
+    void service() {
+        auto pending = std::move(m_pending);
+        m_pending.clear();
+        for (auto& f : pending) {
+            f();
+        }
+        QCoreApplication::processEvents();
+        while (!m_ctrl->loopback.empty()) {
+            QByteArray b = m_ctrl->loopback.front();
+            m_ctrl->loopback.pop_front();
+            m_ctrl->feed(b);
+        }
     }
 
     // 每处理一块（512 帧）更新一次：RMS 按 300 ms 积分（VU 表的速度），峰值每秒落 20 dB；单位 dBFS
@@ -868,15 +944,41 @@ class Engine {
         return r;
     }
 
-    // ------------------------------------------------------------ 录音（测试用：把主输出录成 WAV）
+    // ------------------------------------------------------------ 录音（主输出录成 WAV，或用 Mixxx 的编码器录成 MP3）
+    // trim：开头的数字静音不录、结尾的数字静音丢掉（中间的静音照录：有声音接上时补回去）。只在不出声时录（processOne）
 
-    void startRecord(const QString& path) {
+    void startRecord(const QString& path, bool trim, QString* err) {
+        stopRecord();
         m_rec.reset(new QFile(path));
         if (!m_rec->open(QIODevice::WriteOnly)) {
+            *err = QStringLiteral("写不了：") + path;
             m_rec.reset();
             return;
         }
         m_recFrames = 0;
+        m_recMisses0 = g_cacheMisses.load();
+        m_recTrim = trim;
+        m_recStarted = false;
+        m_recPendingSilent = 0;
+        if (path.endsWith(QLatin1String(".mp3"), Qt::CaseInsensitive)) {
+            // 320 kbps CBR（Mixxx 录音设置里的 MP3_Quality 第 11 档、MP3_VBR_MODE 0 = CBR，encodermp3settings.cpp:12-43）
+            m_pConfig->set(ConfigKey(QStringLiteral("[Recording]"), QStringLiteral("MP3_Quality")), ConfigValue(11));
+            m_pConfig->set(ConfigKey(QStringLiteral("[Recording]"), QStringLiteral("MP3_VBR_MODE")), ConfigValue(0));
+            EncoderMp3Settings settings(m_pConfig);
+            m_recCb = std::make_unique<FileEncoderCallback>(m_rec.get());
+            m_recMp3 = std::make_unique<EncoderMp3>(m_recCb.get());
+            m_recMp3->setEncoderSettings(settings);
+            if (m_recMp3->initEncoder(mixxx::audio::SampleRate(kSampleRate), err) < 0) {
+                if (err->isEmpty()) {
+                    *err = QStringLiteral("MP3 编码器初始化失败");
+                }
+                m_recMp3.reset();
+                m_recCb.reset();
+                m_rec->close();
+                m_rec.reset();
+            }
+            return;
+        }
         writeWavHeader();
     }
     void writeWavHeader() {
@@ -906,6 +1008,33 @@ class Engine {
             return;
         }
         const CSAMPLE* p = m_pEngineMixer->getMainBuffer();
+        if (m_recTrim) {
+            float peak = 0.0f;
+            for (int i = 0; i < kBufferSamples; ++i) {
+                peak = std::max(peak, std::fabs(p[i]));
+            }
+            if (peak < 1e-5f) { // -100 dBFS：数字静音（没在放、或推子拉到底）
+                if (m_recStarted) {
+                    ++m_recPendingSilent;
+                }
+                return;
+            }
+            m_recStarted = true;
+            if (m_recPendingSilent > 0) { // 中间的静音：后面又有声音了，补回去
+                const std::vector<CSAMPLE> zeros(kBufferSamples, 0.0f);
+                for (; m_recPendingSilent > 0; --m_recPendingSilent) {
+                    writeRecBuffer(zeros.data());
+                }
+            }
+        }
+        writeRecBuffer(p);
+    }
+    void writeRecBuffer(const CSAMPLE* p) {
+        m_recFrames += kBufferFrames;
+        if (m_recMp3) {
+            m_recMp3->encodeBuffer(p, kBufferSamples);
+            return;
+        }
         QByteArray b;
         b.resize(kBufferSamples * 2);
         auto* s = reinterpret_cast<qint16*>(b.data());
@@ -914,11 +1043,16 @@ class Engine {
             s[i] = static_cast<qint16>(v * 32767.0f);
         }
         m_rec->write(b);
-        m_recFrames += kBufferFrames;
     }
     void stopRecord() {
         if (m_rec) {
-            writeWavHeader();
+            if (m_recMp3) {
+                m_recMp3->flush(); // 编码器里剩下的 + LAME 的 Info 帧（时长、跳转表）写回文件开头
+                m_recMp3.reset();
+                m_recCb.reset();
+            } else {
+                writeWavHeader();
+            }
             m_rec->close();
             m_rec.reset();
         }
@@ -1080,9 +1214,17 @@ class Engine {
             ControlObject::set(ConfigKey(c["group"].toString(), c["key"].toString()), c["value"].toDouble());
             r["ok"] = true;
         } else if (cmd == "record") {
-            startRecord(c["path"].toString());
+            QString err;
+            startRecord(c["path"].toString(), c["trim"].toBool(), &err);
             r["ok"] = static_cast<bool>(m_rec);
+            if (!err.isEmpty()) {
+                r["err"] = err;
+            }
         } else if (cmd == "record_stop") {
+            r["frames"] = static_cast<double>(m_recFrames); // 录下来的长度（帧，44.1 kHz）
+            r["seconds"] = static_cast<double>(m_recFrames) / kSampleRate;
+            // 录音期间读盘跟不上的次数（只在引擎时钟下数）：> 0 = 录音里有静音缺口
+            r["cache_misses"] = m_clocked ? g_cacheMisses.load() - m_recMisses0 : -1;
             stopRecord();
             r["ok"] = true;
         } else if (cmd == "quit") {
@@ -1120,7 +1262,19 @@ class Engine {
     std::vector<std::function<void()>> m_pending;
     QString m_adj = "DISABLED";
     std::unique_ptr<QFile> m_rec;
+    std::unique_ptr<FileEncoderCallback> m_recCb;
+    std::unique_ptr<EncoderMp3> m_recMp3;
     qint64 m_recFrames = 0;
+    int m_recMisses0 = 0;
+    bool m_recTrim = false;
+    bool m_recStarted = false;
+    long m_recPendingSilent = 0;
+    static constexpr double kClockTickMs = 20.0; // = DJStudio.TICK_MS
+    bool m_clocked = false;
+    double m_nextTickMs = 0.0;
+    std::unique_ptr<ControlObject> m_clockMode;
+    std::unique_ptr<ControlObject> m_clockMs;
+    std::unique_ptr<ControlObject> m_tick;
     std::atomic<qint64> m_engineFrames{0};
     std::atomic<bool> m_frozen{false};
     bool m_quit = false;

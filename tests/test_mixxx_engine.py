@@ -482,3 +482,105 @@ def test_eq_ramp_in_a_set_is_heard_while_the_knob_moves(tmp_path):
         assert abs(heard - knob) < 3.5, f"旋钮 {knob:.1f} dB，录音里中频只变了 {heard:.1f} dB"
         checked += 1
     assert checked > 20
+
+
+def test_record_whole_set_to_mp3(tmp_path, monkeypatch):
+    """「录成 MP3」：整套 set 在声音引擎里 20 倍速、不出声地放一遍，引擎时钟（旋钮按音乐时间拧）+ Mixxx 的 MP3 编码器。
+    录下来的和原速演出一样：MID 按谱渐变、LOW 在那一小节的拍上切；开头结尾没有静音；标签里是 set 名（中文不乱码）。
+    录的时候不能开始演出。"""
+    import subprocess
+
+    from djstudio.config import Config
+    from djstudio.studio import Studio, StudioError
+
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", BIN)
+    bpm = 128.0
+    src = tmp_path / "src"
+    src.mkdir()
+    for k, seed in (("a", 1), ("b", 2)):
+        _pink(src / f"{k}.wav", 70.0, kick_bpm=bpm, seed=seed)
+    studio = Studio(Config(home=tmp_path / "home", library=tmp_path / "Music" / "DJStudio", mixxx_dir=tmp_path / "no-mixxx",
+                           browse_roots=[tmp_path]))
+    res = studio.library.import_paths([str(src)])
+    assert studio.library.wait_idle(120) and len(res.added) == 2
+    ids = [studio.store.by_path(str(studio.cfg.library / "src" / f"{k}.wav")).id for k in "ab"]
+    a_grid = studio.store.get(ids[0]).chosen_grid()
+    assert a_grid and abs(a_grid[0] - bpm) < 0.01
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": "rec", "name": "录音测试 set",
+        "tracks": [{"id": ids[0]}, {"id": ids[1]}],
+        "transitions": [{"technique": "custom", "start": 9, "b_in": 1, "play_at": 12, "bars": 16,
+                         "lanes": {"A.mid": [[0, 0], [8, -25]], "A.lo": [[0, 0], [10, -60, "step"]],
+                                   "B.vol": [[0, 0], [12, 0], [16, 1]], "A.vol": [[0, 1], [16, 1]]}}],
+        "ending": {"mode": "fade", "bar": 9, "bars": 2},
+    })
+    studio.save(s)
+    c = studio.compile(s)
+    assert c.ok
+    st = studio.record("rec")
+    assert st["state"] == "running"
+    with pytest.raises(StudioError, match="录"):
+        studio.play("rec", speed=1.0)  # 录的时候不能开始演出
+    t0 = time.time()
+    while studio.recording["state"] == "running" and time.time() - t0 < 120:
+        time.sleep(0.2)
+    rec = studio.recording_state()
+    wall = time.time() - t0
+    assert rec["state"] == "ok", rec
+    assert rec["cache_misses"] == 0 and rec["speed"] == 20.0
+    f = Path(rec["file"])
+    assert f.parent == studio.recordings_dir and f.name.startswith("录音测试 set ") and f.suffix == ".mp3"
+    assert wall < c.duration / 5, f"{c.duration:.0f} 秒的 set 录了 {wall:.1f} 秒"
+    # 标签：ID3v2.3，标题是 set 名（UTF-16）
+    head = f.read_bytes()[:200]
+    assert head[:3] == b"ID3" and "录音测试 set".encode("utf-16-le") in head
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration,bit_rate:format_tags=title",
+                            "-of", "json", str(f)], capture_output=True, text=True, check=True)
+    fmt = json.loads(probe.stdout)["format"]
+    assert fmt["tags"]["title"] == "录音测试 set" and 300_000 < float(fmt["bit_rate"]) < 340_000
+    # 开头结尾的静音裁掉了：长度 = set 从 A 起播到淡出完（容差：MP3 编码器前后的补零）
+    assert abs(float(fmt["duration"]) - rec["seconds"]) < 0.1
+    assert abs(rec["seconds"] - c.duration) < 1.0, (rec["seconds"], c.duration)
+
+    # 录下来的声音：解成 PCM，按 A 的拍子看中频（逐小节和谱比）和 LOW 切的那一拍
+    x = np.frombuffer(subprocess.run(["ffmpeg", "-v", "error", "-i", str(f), "-f", "f32le", "-ac", "1", "-ar", "44100", "-"],
+                                     capture_output=True, check=True).stdout, dtype="<f4").astype(np.float64)
+    beat = 60 / bpm
+    a_first = a_grid[1]  # A 从文件开头放：录音的第 0 点 ≈ A 的第 0 秒（开头没有静音）
+    win = 4096
+    freqs = np.fft.rfftfreq(win, 1 / 44100)
+
+    def band_db(t: float, lo: float, hi: float) -> float:
+        i = int(t * 44100)
+        spec = np.abs(np.fft.rfft(x[i:i + win] * np.hanning(win))) ** 2
+        return 10 * np.log10(spec[(freqs >= lo) & (freqs <= hi)].sum() + 1e-20)
+
+    def bar_t(b: float) -> float:
+        return a_first + (b - 1) * 4 * beat
+
+    def mid_rel(b: float) -> float:  # 小节 b 的「第 2 拍和第 3 拍之间」（避开 kick）：中频 - 高频
+        t = bar_t(b) + 1.5 * beat
+        return band_db(t, 650, 950) - band_db(t, 6000, 10000)
+
+    base = np.median([mid_rel(b) for b in (6, 7, 8)])
+    for b in (10, 11, 12, 13):
+        want = -25 * (b + 0.375 - 9) / 8  # 小节 b 第 2.5 拍时谱上的 MID
+        got = mid_rel(b) - base
+        assert abs(got - want) < 3.5, f"第 {b} 小节：谱上 MID {want:.1f} dB，录音里 {got:.1f} dB"
+    # LOW 在 A 的第 19 小节（时间线第 10 小节）切到底：那一拍以前的 kick 低频还在，之后的 kick 没了
+    def kick_lo(t: float) -> float:
+        return band_db(t, 40, 120)
+
+    before = kick_lo(bar_t(19) - beat)
+    after = kick_lo(bar_t(19) + beat)
+    assert before - after > 25, (before, after)
+
+    # 取消：录到一半取消，不留下半截文件（录好的那个还在）
+    studio.record("rec")
+    time.sleep(0.5)
+    studio.cancel_recording()
+    t0 = time.time()
+    while studio.recording["state"] == "running" and time.time() - t0 < 60:
+        time.sleep(0.1)
+    assert studio.recording["state"] == "cancelled"
+    assert [p.name for p in studio.recordings_dir.iterdir()] == [f.name]

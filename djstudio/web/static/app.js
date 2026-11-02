@@ -211,6 +211,7 @@ function connectEvents() {
       loadState().then(() => { if (S.tab === "show") renderShow(); if (S.tab === "home") renderHome(); });
     }
   });
+  es.addEventListener("recording", (e) => { S.recording = JSON.parse(e.data); renderRecordPanel(); });
   es.addEventListener("track", () => { scheduleTracksReload(); if (S.tab === "home") schedulePlanReload(); });
   es.addEventListener("plan", () => { if (S.tab === "home") schedulePlanReload(); });
   es.onerror = () => { S.engine = { connected: false, online: false }; updateEngineBadge(); };
@@ -231,6 +232,7 @@ async function loadState() {
   S.engine = st.engine;
   S.progress = st.progress;
   S.job = st.job;
+  S.recording = st.recording;
   updateEngineBadge();
 }
 
@@ -520,6 +522,46 @@ function renderHomePlan() {
   }
 }
 
+// 整套 set 录成 MP3：倍速、不出声地在声音引擎里放一遍（旋钮、音量和演出一样），存到「音乐 / DJ Studio 录音」
+function fmtLen(sec) {
+  const s = Math.round(sec), m = Math.floor(s / 60);
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${m}:${String(s % 60).padStart(2, "0")}`;
+}
+function renderRecordPanel() {
+  const el = $("#rec-panel");
+  if (!el) return;
+  const setId = el.dataset.set, dur = +el.dataset.dur || 0;
+  const rec = S.recording && S.recording.set === setId ? S.recording : null;
+  const start = () => guard(async () => { S.recording = await api("POST", `/api/sets/${setId}/record`); renderRecordPanel(); });
+  el.innerHTML = "";
+  el.className = "rec-panel";
+  if (rec && rec.state === "running") {
+    const pct = Math.round((rec.progress || 0) * 100);
+    el.append(h("div", { class: "row" }, h("b", {}, "● 正在录成 MP3"), h("span", { class: "grow dim" }, rec.detail || ""),
+      h("span", { class: "big-pct" }, `${pct}%`),
+      h("button", { class: "small", onclick: () => guard(() => api("POST", "/api/recording/cancel")) }, "取消")),
+      h("div", { class: "big-bar" }, h("div", { style: `width:${pct}%` })),
+      h("div", { class: "dim", style: "margin-top:6px" }, "不出声，在后台按 20 倍速放一遍，旋钮、推子、音量和演出时一模一样。录的时候不能开始演出。"));
+    return;
+  }
+  const btn = h("button", { class: "rec-btn", onclick: start, title: "存到「音乐 / DJ Studio 录音」，MP3 320 kbps" },
+    rec && rec.state === "ok" ? "● 再录一次" : "● 录成 MP3");
+  const est = dur ? `整套 ${fmtLen(dur)}，大约 ${Math.max(1, Math.ceil(dur / 20 / 60 + 0.3))} 分钟录好` : "";
+  if (rec && rec.state === "ok") {
+    const url = `/api/recordings/${encodeURIComponent(rec.file_name)}`;
+    el.append(h("div", { class: "row" }, h("b", { class: "rec-ok" }, "✓ 录好了"),
+      h("span", { class: "grow" }, `${rec.file_name}（${fmtLen(rec.seconds)}，${Math.round(rec.size / 1e6)} MB）`),
+      h("a", { href: url, download: rec.file_name }, "下载"),
+      h("a", { href: "#home", onclick: (e) => { e.preventDefault(); guard(async () => {
+        const r = await api("POST", `${url}/reveal`); if (!r.ok) toast(`存在：${r.path}`); }); } }, "在访达里显示"), btn),
+      h("div", { class: "dim" }, "存在「音乐 / DJ Studio 录音」里。"));
+  } else {
+    el.append(h("div", { class: "row" }, btn, h("span", { class: "dim" }, `把整套 set 录成一个 MP3（320 kbps）。${est}`)));
+    if (rec && rec.state === "error") el.append(h("div", { class: "err-box" }, rec.detail || "没录成"));
+    if (rec && rec.state === "cancelled") el.append(h("div", { class: "dim" }, "上一次录音取消了。"));
+  }
+}
+
 function renderHomeJob() {
   const el = $("#home-job");
   if (!el) return;
@@ -564,6 +606,7 @@ function renderHomeJob() {
           : `约 ${Math.round(r.duration / 60)} 分钟。Mixxx 已经准备好。`), opts),
       h("button", { class: "primary huge", onclick: (e) => busy(e, "启动中…", () =>
         startShow(r.set, builtin ? { from: +$("#play-from").value, speed: +$("#play-speed").value } : {})) }, "▶ 开始演出")));
+    if (hasSound()) { el.append(h("div", { id: "rec-panel", "data-set": r.set, "data-dur": r.duration })); renderRecordPanel(); }
     if (warns.length) el.append(h("div", { class: "warn-box" }, h("b", {}, "需要注意"), warns.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
     el.append(h("div", { class: "row dim", style: "margin-top:10px" }, builtin ? null :
       h("a", { href: "#home", onclick: (e) => { e.preventDefault(); guard(async () => {

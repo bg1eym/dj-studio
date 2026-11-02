@@ -445,6 +445,7 @@ function simCommand(c) {
       return reply({
         t: vnow, autodj: adjState, queue: autodjQueue, loads: loadLog, crossfader: storeGet("[Master]", "crossfader"),
         xFaderMode: storeGet("[Mixer Profile]", "xFaderMode"),
+        clocked: DJ.clocked ? 1 : 0, timers: timers.size, // 脚本按引擎时钟走没有；脚本开着几个定时器
         decks: [1, 2].map((n) => {
           const d = decks[n];
           return { n, id: d.track?.id ?? null, playing: d.playing, pos: d.pos, rate: d.rate,
@@ -479,6 +480,11 @@ rl.on("close", () => process.exit(0));
 
 // ------------------------------------------------------------------ 启动
 
+// 引擎时钟（同 DJ Studio 声音引擎录音时，DJSTUDIO_CLOCK=engine）：脚本的 tick 按虚拟时间每 20ms 一次由「引擎」给，
+// 不用脚本自己的 20ms 定时器
+const CLOCKED = process.env.DJSTUDIO_CLOCK === "engine";
+let nextTick = 0, tickN = 0;
+if (CLOCKED) storeSet("[DJStudio]", "clock_mode", 1);
 DJ.init("sim", false);
 let lastWall = Date.now();
 setInterval(() => {
@@ -489,6 +495,10 @@ setInterval(() => {
     const dt = Math.min(STEP_MS, budget);
     budget -= dt;
     vnow += dt;
+    if (CLOCKED) {
+      storeSet("[DJStudio]", "clock_ms", vnow);
+      if (vnow >= nextTick) { nextTick = vnow + 20; storeSet("[DJStudio]", "tick", ++tickN); }
+    }
     while (autodjRequests.length) autodjRequests.shift()();
     advanceAudio(dt);
     runLoads();

@@ -23,7 +23,7 @@
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.4.3";
+DJStudio.VERSION = "0.4.4";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -43,6 +43,9 @@ DJStudio.reset = function () {
     DJStudio.mode = "sysex";
     DJStudio.ccBuf = null;
     DJStudio.tickCount = 0;
+    DJStudio.clocked = false;
+    DJStudio.later = []; // 引擎时钟下的一次性定时（DJStudio.after）
+    DJStudio.lastStatusWall = 0;
     DJStudio.t0 = Date.now();
     DJStudio.prog = null;
     DJStudio.loader = null;
@@ -62,12 +65,30 @@ DJStudio.fxGroup = function (u) { return "[EffectRack1_EffectUnit" + u + "]"; };
 DJStudio.get = function (g, k) { return engine.getValue(g, k); };
 DJStudio.set = function (g, k, v) { engine.setValue(g, k, v); };
 
-DJStudio.now = function () { return Date.now() - DJStudio.t0; };
+// 时间：平时按墙钟；DJ Studio 声音引擎录音（不出声、倍速）时按引擎处理到的时间（[DJStudio],clock_ms）——
+// 倍速时墙钟上的 20ms 是音乐里的几百毫秒，计时（装载超时、相位检查、过渡后 3 秒归位）都会跟着变长
+DJStudio.wall = function () { return DJStudio.clocked ? DJStudio.get("[DJStudio]", "clock_ms") : Date.now(); };
+DJStudio.now = function () { return DJStudio.wall() - DJStudio.t0; };
+// ms 毫秒后执行一次 fn（引擎时钟下在 tick 里按引擎时间到点执行）
+DJStudio.after = function (ms, fn) {
+    if (DJStudio.clocked) { DJStudio.later.push({ at: DJStudio.now() + ms, fn: fn }); }
+    else { engine.beginTimer(ms, fn, true); }
+};
+DJStudio.runLater = function () {
+    if (!DJStudio.later.length) { return; }
+    var due = [], keep = [], now = DJStudio.now();
+    for (var i = 0; i < DJStudio.later.length; i++) { (DJStudio.later[i].at <= now ? due : keep).push(DJStudio.later[i]); }
+    DJStudio.later = keep;
+    for (var j = 0; j < due.length; j++) { due[j].fn(); }
+};
 
 // ------------------------------------------------------------------ 生命周期
 
 DJStudio.init = function (id, debugging) {
     DJStudio.reset();
+    // 引擎时钟（DJ Studio 声音引擎录音时；真 Mixxx 没有这个控件 = 0，按墙钟）：tick 由引擎每处理 20ms 音频给一次
+    DJStudio.clocked = DJStudio.get("[DJStudio]", "clock_mode") > 0;
+    DJStudio.t0 = DJStudio.wall();
     // DJ Studio 声音引擎有 dBFS 电平表（真 Mixxx 没有这个控件，读一次会在 Mixxx 日志里提示一次未知控件）
     DJStudio.meters = DJStudio.get("[DJStudio]", "meters") > 0;
     for (var d = 1; d <= 2; d++) {
@@ -92,7 +113,11 @@ DJStudio.init = function (id, debugging) {
     // 装载计数：track_loaded 变成 1 就加一（用来区分「同一首」和「装了新的一首」）
     engine.makeConnection("[Channel1]", "track_loaded", function (v) { if (v > 0) { DJStudio.loadSeq[1]++; } });
     engine.makeConnection("[Channel2]", "track_loaded", function (v) { if (v > 0) { DJStudio.loadSeq[2]++; } });
-    DJStudio.timer = engine.beginTimer(DJStudio.TICK_MS, function () { DJStudio.tick(); });
+    if (DJStudio.clocked) {
+        engine.makeConnection("[DJStudio]", "tick", function () { DJStudio.tick(); });
+    } else {
+        DJStudio.timer = engine.beginTimer(DJStudio.TICK_MS, function () { DJStudio.tick(); });
+    }
     DJStudio.send({ t: "hello", v: DJStudio.VERSION, boot: 1 });
 };
 
@@ -499,11 +524,11 @@ DJStudio.runProg = function () {
         var aDeck = p.a.deck;
         // 留 3 秒给 reverb/echo 尾巴，再把出场 deck 归位。这 3 秒里下一首可能已经装进这个 deck、下一段已经就位：
         // 归位之后把它（下一段的 B）的旋钮再摆回过渡开头的位置
-        engine.beginTimer(3000, function () {
+        DJStudio.after(3000, function () {
             DJStudio.neutral(aDeck);
             var q = DJStudio.prog;
             if (q && q.st === "armed" && q.p.b && q.p.b.deck === aDeck) { DJStudio.presetB(q); }
-        }, true);
+        });
     }
 };
 
@@ -576,12 +601,17 @@ DJStudio.runLoader = function () {
 DJStudio.tick = function () {
     DJStudio.tickCount++;
     try {
+        DJStudio.runLater();
         DJStudio.runLoader();
         DJStudio.runProg();
     } catch (e) {
         DJStudio.error("tick: " + e);
     }
-    if (DJStudio.tickCount % DJStudio.STATUS_EVERY === 0) {
+    // 状态帧：平时每 5 个 tick（100ms）一帧；引擎时钟下 tick 按音乐时间来，倍速时一秒几百个——按墙钟 100ms 一帧，不刷屏
+    var statusDue = DJStudio.clocked ? Date.now() - DJStudio.lastStatusWall >= 100
+        : DJStudio.tickCount % DJStudio.STATUS_EVERY === 0;
+    if (statusDue) {
+        DJStudio.lastStatusWall = Date.now();
         var pr = DJStudio.prog;
         DJStudio.send({
             t: "st",

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -53,6 +54,26 @@ def _heard_at(c: EngineClient, audio: dict[str, Any] | None) -> float | None:
         return None
     lat = float(audio.get("latency_ms") or 0) + float(audio.get("eq_delay_ms") or 0) if audio and audio.get("on") else 0.0
     return round(c.last_status_wall * 1000 + lat, 1)
+
+
+def _safe_name(name: str) -> str:
+    """文件名：去掉文件系统不认的字符（/ : 等），保留中文。"""
+    return re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", name).strip() or "set"
+
+
+def _mmss(seconds: float) -> str:
+    m, sec = divmod(int(round(seconds)), 60)
+    return f"{m // 60}:{m % 60:02d}:{sec:02d}" if m >= 60 else f"{m}:{sec:02d}"
+
+
+def _id3v2(frames: dict[str, str]) -> bytes:
+    """ID3v2.3 标签（文字帧用 UTF-16，中文 set 名不乱码；Mixxx 的编码器写标签只支持 Latin-1）。"""
+    body = b""
+    for fid, text in frames.items():
+        data = b"\x01" + text.encode("utf-16")  # 编码 1 = UTF-16（带 BOM）
+        body += fid.encode("ascii") + len(data).to_bytes(4, "big") + b"\x00\x00" + data
+    n = len(body)
+    return b"ID3\x03\x00\x00" + bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F]) + body
 
 
 LOUDNESS_TARGET = -14.0  # LUFS：每首统一到这个响度（技巧曲常见 -6 ~ -9 LUFS，压低 5–8 dB，两首叠加不削波）
@@ -170,6 +191,9 @@ class Studio:
         self.rehearsal_link_factory: Callable[..., Link] = _default_engine_link
         self.job: Job | None = None
         self._job_lock = threading.Lock()
+        # 整套 set 录成 MP3（不出声、倍速，用真引擎）：和任务分开记，首页「可以演出了」那一屏不受影响
+        self.recording: dict[str, Any] | None = None
+        self._record_lock = threading.Lock()
         # 按打碟谱在电脑里找曲子（网页显示进度）；一键分析自动开始过的「打碟谱 + 曲目」组合
         self.finder: dict[str, Any] = {"state": "idle"}
         self._find_lock = threading.Lock()
@@ -1369,6 +1393,8 @@ class Studio:
                   start: tuple[int, float] | None) -> Progress:
         if self.conductor and self.conductor.running:
             raise StudioError("正在播放或预演，先停下")
+        if self.recording and self.recording["state"] == "running":
+            raise StudioError("正在录 MP3，录完再开始（或者先取消录音）")
         if self.job and self.job.state == "running":
             raise StudioError(f"任务进行中：{self.job.name}")
         miss = _engine_missing() if self.rehearsal_link_factory is _default_engine_link else None
@@ -1431,6 +1457,125 @@ class Studio:
         cond.start()
         threading.Thread(target=reap, name="rehearsal-reaper", daemon=True).start()
         return cond.progress
+
+    # ------------------------------------------------------------ 整套 set 录成 MP3
+
+    # 先 20 倍速录（90 分钟的 set 约 4.5 分钟）；录完引擎报读盘跟不上（录音里有缺口）就放慢重录
+    RECORD_SPEEDS = (20.0, 8.0, 3.0)
+
+    @property
+    def recordings_dir(self) -> Path:
+        return self.cfg.library.parent / "DJ Studio 录音"
+
+    def recording_state(self) -> dict[str, Any] | None:
+        r = self.recording
+        return {k: v for k, v in r.items() if k != "cancel"} if r else None
+
+    def _emit_recording(self) -> None:
+        self.emit("recording", self.recording_state())
+
+    def record(self, set_id: str) -> dict[str, Any]:
+        """把整套 set 录成 MP3：在 DJ Studio 声音引擎里不出声、倍速放一遍，和演出同一套 DJStudio.js、指挥、旋钮、音量统一，
+        引擎时钟（旋钮按音乐时间拧，倍速和原速放出来的一样），Mixxx 的 MP3 编码器（320 kbps）。后台跑，网页看进度。"""
+        from .engine.bundled import engine_binary
+
+        with self._record_lock:
+            if self.recording and self.recording["state"] == "running":
+                raise StudioError("已经在录了")
+            if self.conductor and self.conductor.running:
+                raise StudioError("正在演出 / 预演，先停下再录")
+            binary = engine_binary()
+            if not binary:
+                raise StudioError("没有声音引擎，录不了（DJ Studio.app 里自带；开发环境先构建 tools/mixxx-engine）")
+            s = self.load(set_id)
+            c = self.compile(s)
+            if not c.ok:
+                raise StudioError("set 校验没通过")
+            self.recording = {"state": "running", "set": set_id, "title": s.name or s.id, "progress": 0.0,
+                              "detail": "启动引擎…", "started": time.time(), "duration": round(c.duration, 1),
+                              "cancel": threading.Event()}
+        self._emit_recording()
+        threading.Thread(target=self._record, args=(self.recording, s, c, binary), name="record", daemon=True).start()
+        return self.recording_state()  # type: ignore[return-value]
+
+    def cancel_recording(self) -> None:
+        r = self.recording
+        if r and r["state"] == "running":
+            r["cancel"].set()
+
+    def _record(self, rec: dict[str, Any], s: SetFile, c: Compiled, binary: Path) -> None:
+        out_dir = self.recordings_dir
+        name = _safe_name(f"{rec['title']} {time.strftime('%Y-%m-%d %H%M')}") + ".mp3"
+        part = out_dir / f".{name}.part.mp3"  # 引擎按扩展名选编码器
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            rows = self._sim_rows(s, c)
+            for k, speed in enumerate(self.RECORD_SPEEDS):
+                res = self._record_once(rec, s, c, rows, binary, speed, part)
+                if rec["cancel"].is_set():
+                    rec.update(state="cancelled", detail="取消了")
+                    part.unlink(missing_ok=True)
+                    return
+                misses = int(res.get("cache_misses") or 0)
+                if misses > 0 and k + 1 < len(self.RECORD_SPEEDS):
+                    rec["detail"] = (f"电脑太忙，读盘跟不上 {misses} 次（录音里会有缺口），"
+                                     f"放慢到 {self.RECORD_SPEEDS[k + 1]:g} 倍重录")
+                    self._emit_recording()
+                    continue
+                break
+            final = out_dir / name
+            with open(final, "wb") as f, open(part, "rb") as src:
+                f.write(_id3v2({"TIT2": rec["title"], "TPE1": "DJ Studio", "TYER": time.strftime("%Y")}))
+                shutil.copyfileobj(src, f, 1 << 20)
+            part.unlink(missing_ok=True)
+            rec.update(state="ok", progress=1.0, file=str(final), file_name=name, seconds=round(res["seconds"], 1),
+                       size=final.stat().st_size, speed=speed, cache_misses=misses,
+                       detail=f"录好了：{_mmss(res['seconds'])}，{final.stat().st_size / 1e6:.0f} MB")
+        except Exception as e:  # noqa: BLE001
+            rec.update(state="error", error=str(e), detail=f"没录成：{e}")
+            part.unlink(missing_ok=True)
+        finally:
+            rec["finished"] = time.time()
+            self._emit_recording()
+
+    def _record_once(self, rec: dict[str, Any], s: SetFile, c: Compiled, rows: list[dict[str, Any]], binary: Path,
+                     speed: float, part: Path) -> dict[str, Any]:
+        from .engine.link import EngineLink
+
+        link = EngineLink(binary, rows, speed=speed, audio=False, clock=True)
+        client = EngineClient(link)
+        try:
+            if not client.wait_until(client.online, 15):
+                raise StudioError("声音引擎没有启动起来")
+            link.sim({"cmd": "queue", "ids": [t.id for t in s.tracks]})
+            r = link.sim({"cmd": "record", "path": str(part), "trim": True})
+            if not r.get("ok"):
+                raise StudioError(f"录音文件打不开：{r.get('err') or part}")
+            cond = Conductor(client, c, stop_fade=self.STOP_FADE_BUILTIN)
+            cond.start()
+            last_emit = 0.0
+            while cond.running:
+                if rec["cancel"].is_set():
+                    cond.request_stop()
+                    break
+                t = float(link.sim({"cmd": "state"}, timeout=5).get("t") or 0) / 1000.0
+                rec["progress"] = round(min(0.99, t / max(1.0, c.duration)), 4)
+                rec["detail"] = f"{speed:g} 倍速，录到 {_mmss(t)} / {_mmss(c.duration)}"
+                if time.monotonic() - last_emit > 1.0:
+                    last_emit = time.monotonic()
+                    self._emit_recording()
+                time.sleep(0.3)
+            cond.join(30)
+            stop = link.sim({"cmd": "record_stop"}, timeout=120)
+            if not rec["cancel"].is_set() and cond.progress.stage != "done":
+                raise StudioError(f"录到一半停了：{cond.progress.error or cond.progress.stage}")
+            return stop
+        finally:
+            try:
+                link.sim({"cmd": "quit"}, timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            link.close()
 
     # ------------------------------------------------------------ 真机探测
 

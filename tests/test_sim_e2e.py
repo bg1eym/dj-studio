@@ -43,11 +43,21 @@ def make_compiled():
     return c
 
 
-@pytest.fixture
-def rig():
-    link = SimLink(sim_library(), speed=SPEED)
+@pytest.fixture(params=["wall", "engine"])
+def rig(request):
+    """模拟器 + DJStudio.js。两种时钟各跑一遍：wall = 脚本自己 20ms 一次的定时器（演出）；engine = 引擎每处理 20ms 音频
+    给一个 tick、计时按引擎时间（录 MP3 时，倍速放出来和原速一样）。"""
+    import os
+
+    env = {**os.environ, "DJSTUDIO_CLOCK": request.param} if request.param == "engine" else None
+    link = SimLink(sim_library(), speed=SPEED, env=env)
     client = EngineClient(link)
     assert client.wait_until(client.online, 5)
+    st = link.sim({"cmd": "state"})
+    if request.param == "engine":
+        assert st["clocked"] == 1 and st["timers"] == 0  # tick 由引擎给，脚本自己不开定时器
+    else:
+        assert st["clocked"] == 0 and st["timers"] >= 1
     link.sim({"cmd": "queue", "ids": ["a", "b", "c"]})
     yield link, client
     link.close()

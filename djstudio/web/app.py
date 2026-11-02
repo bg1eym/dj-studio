@@ -72,6 +72,7 @@ def create_app(studio: Studio) -> FastAPI:
             "sound_engine": engine_binary() is not None,  # 有声音引擎（Mixxx 的引擎核心）；没有时内置引擎是没声音的模拟器
             "last_play": studio.last_play,  # 这一场从哪开始（set / 第几首 / 第几小节 / 倍速）：演出画面按它找编译结果
             "resume": studio.resume_point,  # 手动停下的位置：「继续」从这里接着放
+            "recording": studio.recording_state(),  # 整套 set 录成 MP3 的进度 / 结果
         }
 
     @app.get("/api/state")
@@ -360,6 +361,48 @@ def create_app(studio: Studio) -> FastAPI:
         if not 0.25 <= speed <= 16:
             raise HTTPException(400, "预演倍速应在 0.25–16 之间")
         return studio.rehearse(sid, speed, int(body.get("from") or 0)).to_dict()
+
+    @app.post("/api/sets/{sid}/record")
+    def api_record(sid: str) -> dict[str, Any]:
+        """整套 set 录成 MP3（后台，倍速、不出声）：进度在 /api/state 的 recording 和 SSE「recording」里。"""
+        try:
+            return studio.record(sid)
+        except StudioError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.post("/api/recording/cancel")
+    def api_record_cancel() -> dict[str, Any]:
+        studio.cancel_recording()
+        return {"ok": True}
+
+    def _recording_file(name: str) -> Path:
+        d = studio.recordings_dir.resolve()
+        f = (d / name).resolve()
+        if f.parent != d or not f.is_file() or f.suffix.lower() != ".mp3":
+            raise HTTPException(404, "没有这个录音")
+        return f
+
+    @app.get("/api/recordings")
+    def api_recordings() -> list[dict[str, Any]]:
+        d = studio.recordings_dir
+        files = sorted(d.glob("*.mp3"), key=lambda f: f.stat().st_mtime, reverse=True) if d.is_dir() else []
+        return [{"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime} for f in files]
+
+    @app.get("/api/recordings/{name}")
+    def api_recording_file(name: str) -> FileResponse:
+        return FileResponse(_recording_file(name), media_type="audio/mpeg", filename=name)
+
+    @app.post("/api/recordings/{name}/reveal")
+    def api_recording_reveal(name: str) -> dict[str, Any]:
+        """在访达里显示（Mac）。"""
+        import subprocess
+        import sys
+
+        f = _recording_file(name)
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(f)])
+            return {"ok": True}
+        return {"ok": False, "path": str(f)}
 
     def parse_set(body: dict[str, Any]) -> SetFile:
         try:
