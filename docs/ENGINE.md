@@ -27,6 +27,7 @@
 | `bpm` | `deck`, `v` | 设 BPM（Mixxx `bpm` 控件） |
 | `vol` | `deck`, `v` | 通道推子 |
 | `neutral` | `deck` | EQ 归 1、滤波归中、关效果路由、关 loop |
+| `plan` | `deck`, `grid`, `acts` | 0.4.5：这个 deck 上刚装好的这首独奏时的跳段 / loop。`acts`：`{"at": 拍, "jump": 拍数}`（到那一拍 `beatjump`）或 `{"at": 拍, "loop": 拍数, "times": 遍数}`（`beatloop_activate`，跳回 loop 头 times-1 次后 `reloop_toggle`）。只认这一次装载；起播时已经过了 1 小节以上的不做。conductor 每装好一首就发（没有的发空的） |
 | `eject` | `deck` | 弹出（在播时拒绝） |
 | `set` / `get` | `g`,`k`,`v` / `keys:[[g,k],…]` | 调试与探测用 |
 
@@ -47,6 +48,9 @@
 ```
 
 时间线拍位：A 在播时 = A 网格拍号 − `a.start`；A 停了以后 = B 网格拍号 − `b.in` + `play`。
+0.4.5 起程序开始以后（`running`）每一边各记一个偏移：一次 tick 里位置变化比按速度该走的多出 0.5 拍以上（过渡里打的 loop 跳回 loop 头），
+按整拍记进偏移，时间线照常往前走（事件 `wrap`：`side`、`by` 拍）。`A.loop_off` 编译时提前半遍（最后一遍转到一半时关 loop），
+不和 loop 尾那一拍抢。
 原生值：音量 0..1；EQ 增益 0..4（1 = 0 dB）；滤波 `super1` 0..1（0.5 中性）；echo / reverb = 效果单元 1 / 2 的 mix。
 
 ## 引擎 → Python
@@ -55,7 +59,7 @@
 |---|---|
 | `st`（每 100ms） | `d: [[loaded, playing, pos_ms, dur_ms, bpm, file_bpm, vol, load_seq], …×2]`，`m: [[hi, mid, lo, filter, echo, reverb, vu], …×2]`（0.4.0 起：从 Mixxx 读回的旋钮原生值，网页混音台用；echo / reverb = 效果单元对该通道开着时的 mix，否则 0；vu = `[ChannelN],vu_meter`，推子前），`x`（crossfader），`mv`（`[Main],vu_meter`），`pg: {id, st, tl, b}`，`ld`（装载中的 deck），`ad`（AutoDJ），`n`，`up` |
 | `hello` | `v`，`boot: 1`（映射刚加载 = 状态已丢失） |
-| `ev` | `started` / `b_play`（`over` 拍）/ `fired`（事件）/ `phase_fix` / `bar_slip` / `done` / `loaded`（`deck, dur, fbpm`）/ `load_failed` |
+| `ev` | `started` / `b_play`（`over` 拍）/ `fired`（事件）/ `phase_fix` / `bar_slip` / `done` / `loaded`（`deck, dur, fbpm`）/ `load_failed` / `wrap`（`side, by`）/ 独奏的 `jump`（`deck, at, by`）、`loop_in`（`deck, at, beats, times`）、`loop_out`（`deck, at`） |
 | `err` | `m` |
 
 程序状态 `pg.st`：`armed` → `running` → `done`（或 `aborted`）。

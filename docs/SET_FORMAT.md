@@ -37,6 +37,10 @@
         {"pad": 8, "name": "VOCAL", "bar": 41, "color": "#FF5FA2", "note": "人声进来"}   // auto 不写 = 手写的，重新填时不动
       ],
       "loops": [],                      // Prime 4+ 的保存 loop：{"pad", "name", "bar", "beats", "note", "auto"}
+      "moves": [                        // 独奏时的跳段 / loop（这首自己的小节号，在那一小节的第 1 拍做），见下「跳段与 loop」
+        {"bar": 49, "to": 65},          // 放到第 49 小节跳到第 65 小节（往前跳 = 再放一遍）
+        {"bar": 105, "loop": 4, "times": 2}   // 第 105 小节起 4 小节 loop，一共转 2 遍，接着往下放
+      ],
       "note": ""
     }
   ],
@@ -93,7 +97,18 @@ B:            b_in ────────────────────�
 
 ## 事件（events）
 
-`[小节, "动作"]`：`A.stop` / `B.stop`、`A.loop:8`（从当前拍起 8 拍 loop）、`A.loop_off`。
+`[小节, "动作"]`：`A.stop` / `B.stop`、`A.loop:8`（在这一拍开 8 拍 loop）、`A.loop_off`（出 loop）。
+
+## 跳段与 loop
+
+- **独奏时**（`tracks[].moves`）：上一段过渡结束以后（第一首从 `start` 起）、下一段过渡开始以前（最后一首到淡出开始）。
+  按放的顺序一条一条做，每条在上一条之后；往后跳跳过的、往回跳再放一遍的那段里不能再有别的。
+  引擎到那一拍做（Mixxx 的 beat jump 按整拍跳，loop 头落在拍上），独奏的时长按多放 / 少放的小节算。
+- **过渡里**（`events` 的 `A.loop:N` / `A.loop_off`，B 一样）：时间线照常往前数（loop 开着时这一边在 loop 里转），
+  出 loop 要在转满整遍的地方（开的那一小节 + loop 长度的整数倍）；B 的 loop 要在过渡结束以前出；
+  A 的 loop 开到最后时 A 要停（`A.stop`），不能自己播完。出 loop 以后这一边从 loop 尾接着放——
+  它自己的小节比时间线少走了多转的那几小节（编译时 B 过渡后的位置、A 的结尾都按这个算）。
+- 过渡里不能跳段（Mixxx 在开着的 loop 里 beat jump 是把 loop 挪走，`loopingcontrol.cpp:1747-1751`）。
 
 ## 主控 BPM（tempo）
 

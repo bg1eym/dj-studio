@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SCHEMA = "djset/2"
 
@@ -78,6 +78,37 @@ class SavedLoop(_Model):
     auto: bool = False  # 按过渡里的 loop 事件自动放的
 
 
+class TrackMove(_Model):
+    """独奏时的跳段 / loop（这首自己的小节号，在那一小节的第 1 拍做）：
+    - 跳段：``{"bar": 65, "to": 97}``——放到第 65 小节时跳到第 97 小节（往后 = 跳过一段，往前 = 再放一遍）；
+    - loop：``{"bar": 129, "loop": 4, "times": 2}``——第 129 小节起 4 小节一直转，一共转 2 遍，然后接着往下放。
+    只能在这首独奏的部分（上一段过渡结束以后、下一段过渡开始以前），过渡里的 loop 写成过渡的事件。"""
+
+    bar: float = Field(ge=1)
+    to: float | None = Field(None, ge=1)  # 跳到第几小节
+    loop: float | None = Field(None, gt=0, le=128)  # loop 多长（小节；0.5 = 2 拍）
+    times: int = Field(2, ge=2, le=64)  # loop 一共转几遍
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _one(self) -> "TrackMove":
+        if (self.to is None) == (self.loop is None):
+            raise ValueError("跳段写 to（跳到第几小节），loop 写 loop（多少小节）+ times（转几遍），二选一")
+        if self.to is not None and abs(self.to - self.bar) < 1e-9:
+            raise ValueError(f"第 {self.bar:g} 小节跳到第 {self.to:g} 小节：原地不动")
+        return self
+
+    @property
+    def extra(self) -> float:
+        """比一直往下放多放（+）/ 少放（-）的小节数。"""
+        return self.bar - self.to if self.to is not None else self.loop * (self.times - 1)  # type: ignore[operator]
+
+    @property
+    def end(self) -> float:
+        """做完以后接着从第几小节往下放。"""
+        return self.to if self.to is not None else self.bar + self.loop  # type: ignore[operator]
+
+
 class SetTrack(_Model):
     id: str = ""  # 曲库 track id（library.store 里的 id）
     title: str = ""
@@ -90,6 +121,7 @@ class SetTrack(_Model):
     hot_cues: list[HotCue] = Field(default_factory=list)  # Prime 4+ 的 hot cue（≤ 8 个，打击垫不重复），见 docs/SET_SPEC.md
     main_cue: float | None = None  # Prime 4+ 的主 Cue 点（CUE 键）：小节号；规范里 = 进点
     loops: list[SavedLoop] = Field(default_factory=list)  # Prime 4+ 的保存 loop（可选）
+    moves: list[TrackMove] = Field(default_factory=list)  # 独奏时的跳段 / loop（按小节排）
     plan_bar_offset: int | None = None  # 谱（Engine DJ）上第 b 小节 = 本应用第 b + 这个数 小节；cue 表里同时写两种编号
     note: str = ""
 

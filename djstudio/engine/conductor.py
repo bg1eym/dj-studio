@@ -277,6 +277,24 @@ class Conductor:
     # ------------------------------------------------------------ 装载
 
     def _load(self, k: int) -> None:
+        self._load_track(k)
+        self._send_plan(k)
+
+    def _send_plan(self, k: int) -> None:
+        """这首独奏时的跳段 / loop（按它自己的拍）交给引擎：装好了就发，到了那一拍引擎自己做（DJStudio.js runPlans）。
+        没有的也发一个空的，清掉这个 deck 上一首的。"""
+        plans = getattr(self.compiled, "plans", None) or []
+        acts = plans[k] if k < len(plans) else []
+        info = self.tracks[k]
+        assert info is not None
+        self.c.send({"t": "plan", "deck": deck_for(k), "grid": [round(info.grid.first_beat * 1000.0, 3), info.grid.bpm],
+                     "acts": acts})
+        for a in acts:
+            bar = info.grid.beat_bar(a["at"])
+            self.log(f"  {self._title(k)}：第 {bar:g} 小节" + (f"跳 {a['jump'] / 4:+g} 小节" if "jump" in a else
+                                                         f"打 {a['loop'] / 4:g} 小节 loop，转 {a['times']} 遍"))
+
+    def _load_track(self, k: int) -> None:
         d = deck_for(k)
         info = self.tracks[k]
         assert info is not None
@@ -382,6 +400,13 @@ class Conductor:
 
         def check() -> bool:
             for ev in self.c.drain(cursor):
+                e = ev.get("e")
+                if e == "jump":
+                    self.log(f"  ⤳ deck{ev.get('deck')} 跳段 {float(ev.get('by') or 0) / 4:+g} 小节")
+                elif e == "loop_in":
+                    self.log(f"  ⟲ deck{ev.get('deck')} 打 {float(ev.get('beats') or 0) / 4:g} 小节 loop（转 {ev.get('times')} 遍）")
+                elif e == "loop_out":
+                    self.log(f"  ⟲ deck{ev.get('deck')} 出 loop")
                 if ev.get("id") != pid:
                     continue
                 e = ev.get("e")

@@ -131,7 +131,8 @@ cue 存在 Engine 的数据库里，不在音频文件里，所以要照本应�
 | IN | 绿 #22D45A | 进：这首从这里起播（开场曲 = 起播小节；其它 = 过渡里进场的小节）。主 Cue 也在这里 |
 | BASS IN / BASS OUT / MID UP / HIGH DOWN / EQ DOWN / HPF / LPF / FILTER OFF / FADER UP / FADER DOWN | 黄 #FFD60A | 过渡里这首的旋钮 / 推子开始拧，或一下拧到位 |
 | ECHO / REVERB / ECHO OFF / REVERB OFF | 青 #00C8FF | 过渡里开 / 关效果 |
-| LOOP 8 … | 粉 #FF5FA2 | 过渡里打 loop |
+| JUMP 97 … | 蓝 #2F7BFF | 跳段：跳到的那一小节（谱上写的那一小节按这个垫，quantize 开着就对着拍跳过去） |
+| LOOP 8 … | 粉 #FF5FA2 | 打 loop（过渡里，或者独奏时） |
 | OUT | 红 #FF3B3B | 出：这首当出曲的那段过渡从这里开始 |
 | STOP | 紫 #A45CFF | 这首在这里停（谱上的「停」） |
 | FADE | 红 #FF3B3B | 最后一首：从这里开始淡出 |
@@ -146,7 +147,9 @@ cue 存在 Engine 的数据库里，不在音频文件里，所以要照本应�
 2. **进来时要处理的点**：上一段过渡里 B 的曲线在起播之后开始动的地方（换到这首自己的小节号）。
 3. **OUT**：这首当出曲（A）的那段过渡的 `start`。
 4. **出去时要处理的点**：那段过渡里 A 的曲线开始动的地方。
-5. **STOP**（过渡里的 `A.stop`）、**LOOP n**（过渡事件里的 loop）。
+5. **STOP**（过渡里的 `A.stop`）、**LOOP n**（过渡事件里的 loop；同一拍还有别的动作，名字接在后面：`LOOP 2 ECHO`；
+   A 在开着的 loop 里停的，不另放 STOP，写进 LOOP 的注释）。
+5½. 独奏时的跳段 / loop（`moves`）：跳段在**跳到的那一小节**放 `JUMP n`（注释：放到第几小节按这个垫），loop 在开 loop 的地方放 `LOOP n`。
 6. **FADE**：最后一首淡出开始的小节（`ending` 是 `playout` 时没有）。
 
 「开始动」：一下拧到位（`step`）= 那一拍；渐变 = 渐变开始的那一拍；同方向接着拧的几段算一次。同一拍开始的几个动作是一个点。
@@ -173,7 +176,7 @@ cue 存在 Engine 的数据库里，不在音频文件里，所以要照本应�
 - 点比空垫子多：先留 IN / OUT / STOP / FADE，再留效果，其它按时间先后；留下的照样按时间排。
 - 自动放的垫子写 `"auto": true`：set 改了重新填时重算（网页 Set 页保存、打碟谱重新生成）。
 - **主 Cue** = IN（手写了名字叫 IN 的垫子就用它）。
-- **保存 loop**：过渡事件里的 loop（`A.loop:8` 等）依次放进 loop 垫子 1–8，名字 `LOOP 8`（拍数），`"auto": true`。
+- **保存 loop**：过渡事件里的 loop（`A.loop:8` 等）和独奏时的 loop（`moves`，≤ 64 拍的）依次放进 loop 垫子 1–8，名字 `LOOP 8`（拍数），`"auto": true`。
 - v1 的 set（`"spec": "1"`，固定用途的 START / MIX IN / BREAK 1 / DROP 1 / BREAK 2 / DROP 2 / MIX OUT / END）重新填时换成 v2。
 
 ### 7.4 名字、注释、位置

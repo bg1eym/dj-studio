@@ -23,7 +23,7 @@
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.4.4";
+DJStudio.VERSION = "0.4.5";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -53,6 +53,7 @@ DJStudio.reset = function () {
     DJStudio.lastErr = "";
     DJStudio.xfMode = null;
     DJStudio.loadSeq = [0, 0, 0]; // 每个 deck 装上新歌的次数（下标 1、2）
+    DJStudio.plans = [null, null, null]; // 每个 deck 上这首歌独奏时的跳段 / loop（conductor 装好歌后发「plan」）
     DJStudio.meters = false;
 };
 DJStudio.reset();
@@ -327,6 +328,8 @@ DJStudio.handle = function (m) {
         extra = { v: DJStudio.VERSION, mode: DJStudio.mode };
     } else if (t === "program") {
         err = DJStudio.arm(m);
+    } else if (t === "plan") {
+        DJStudio.setPlan(m);
     } else if (t === "abort") {
         if (DJStudio.prog && (DJStudio.prog.st === "armed" || DJStudio.prog.st === "running")) {
             DJStudio.prog.st = "aborted";
@@ -382,7 +385,8 @@ DJStudio.arm = function (p) {
     if (tl > DJStudio.LATE_TOL && !p.resume) { return "late: tl=" + tl.toFixed(2); }
     DJStudio.prog = {
         p: p, st: "armed", tl: tl, fired: {}, bStarted: false, aStopped: false,
-        lastPhase: 0, doneAt: 0
+        lastPhase: 0, doneAt: 0,
+        side: { a: { raw: null, at: 0, off: 0 }, b: { raw: null, at: 0, off: 0 } }, ta: null, tb: null
     };
     if (p.b) {
         var b = p.b.deck;
@@ -413,15 +417,40 @@ DJStudio.presetB = function (pr) {
     }
 };
 
+// 一边（A / B）按自己的位置算出的时间线（拍）。过渡进行中 deck 打 loop（Mixxx 到 loop 尾跳回 loop 头）或跳段时，
+// 位置会突然跳：一次 tick 里位置变化比按速度该走的多出 0.5 拍以上就当作跳了，按整拍记进偏移，时间线照常往前走
+// （loop / 跳段都在拍上，跳的距离是整拍；小数部分仍取 Mixxx 每块都更新的 beat_distance，相位不受影响）。
+// 过渡开始前（armed）不记：那时 A 在独奏，跳段改的就是 A 自己的小节号，时间线 0 点按 A 自己的小节定。
+DJStudio.sideTl = function (pr, side) {
+    var p = pr.p;
+    var d = side === "a" ? p.a.deck : p.b.deck;
+    var raw = side === "a" ? DJStudio.beatNow(d, p.a.grid) - p.a.start
+        : DJStudio.beatNow(d, p.b.grid) - p.b["in"] + p.play;
+    var o = pr.side[side];
+    var now = DJStudio.now();
+    if (!DJStudio.playing(d)) {
+        o.raw = null;
+        return raw + o.off;
+    }
+    if (pr.st === "running" && o.raw !== null) {
+        var expect = (now - o.at) * DJStudio.get(DJStudio.ch(d), "bpm") / 60000;
+        var jump = raw - o.raw - expect;
+        if (Math.abs(jump) > 0.5) {
+            o.off -= Math.round(jump);
+            DJStudio.send({ t: "ev", e: "wrap", id: p.id, side: side, by: Math.round(jump) });
+        }
+    }
+    o.raw = raw;
+    o.at = now;
+    return raw + o.off;
+};
+
 DJStudio.progTl = function (pr) {
     var p = pr.p;
-    var a = p.a.deck;
-    if (!pr.aStopped && DJStudio.playing(a)) {
-        return DJStudio.beatNow(a, p.a.grid) - p.a.start;
-    }
-    if (p.b && pr.bStarted) {
-        return DJStudio.beatNow(p.b.deck, p.b.grid) - p.b["in"] + p.play;
-    }
+    pr.ta = !pr.aStopped && DJStudio.playing(p.a.deck) ? DJStudio.sideTl(pr, "a") : null;
+    pr.tb = p.b && pr.bStarted && DJStudio.playing(p.b.deck) ? DJStudio.sideTl(pr, "b") : null;
+    if (pr.ta !== null) { return pr.ta; }
+    if (pr.tb !== null) { return pr.tb; }
     return pr.tl; // 两边都没在走：时间线冻结
 };
 
@@ -465,9 +494,8 @@ DJStudio.phaseCheck = function (pr) {
     var now = DJStudio.now();
     if (now - pr.lastPhase < DJStudio.PHASE_CHECK_MS) { return; }
     pr.lastPhase = now;
-    var ta = DJStudio.beatNow(p.a.deck, p.a.grid) - p.a.start;
-    var tb = DJStudio.beatNow(p.b.deck, p.b.grid) - p.b["in"] + p.play;
-    var diff = tb - ta;
+    if (pr.ta === null || pr.tb === null) { return; }
+    var diff = pr.tb - pr.ta; // 两边的时间线（打 loop 的那边按整拍补过）
     var frac = diff - Math.round(diff);
     if (Math.abs(Math.round(diff)) >= 1) {
         DJStudio.send({ t: "ev", e: "bar_slip", id: p.id, diff: Math.round(diff * 1000) / 1000 });
@@ -529,6 +557,58 @@ DJStudio.runProg = function () {
             var q = DJStudio.prog;
             if (q && q.st === "armed" && q.p.b && q.p.b.deck === aDeck) { DJStudio.presetB(q); }
         });
+    }
+};
+
+// ------------------------------------------------------------------ 独奏时的跳段 / loop（按 deck 自己的小节）
+// conductor 每装好一首就发这首的 plan：{t:"plan", deck, grid, acts:[{at:拍, jump:拍数} | {at:拍, loop:拍数, times:遍数}]}。
+// 跳段 = Mixxx 的 beatjump（从当前位置跳整拍数，相位不变，loopingcontrol.cpp:1738-1758）；
+// loop = beatloop_activate（quantize 开着时 loop 头落在最近的拍上，loopingcontrol.cpp:1568-1585），
+// 转满 times 遍：跳回 loop 头 times-1 次以后 reloop_toggle 关掉 loop（不跳位置，接着往下放，loopingcontrol.cpp:1076-1090）。
+// 只认这一次装载（换了歌 plan 作废）；起播位置已经过了的（停下后继续、点波形）不做。
+
+DJStudio.setPlan = function (m) {
+    var acts = [];
+    for (var i = 0; i < (m.acts || []).length; i++) {
+        var a = m.acts[i];
+        acts.push({ at: a.at, jump: a.jump, loop: a.loop, times: a.times || 2, done: false, on: false, wraps: 0, last: 0 });
+    }
+    DJStudio.plans[m.deck] = { seq: DJStudio.loadSeq[m.deck], grid: m.grid, acts: acts };
+};
+
+DJStudio.runPlans = function () {
+    for (var d = 1; d <= 2; d++) {
+        var pl = DJStudio.plans[d];
+        if (!pl || pl.seq !== DJStudio.loadSeq[d] || !DJStudio.playing(d)) { continue; }
+        var g = DJStudio.ch(d);
+        var b = DJStudio.beatNow(d, pl.grid);
+        for (var i = 0; i < pl.acts.length; i++) {
+            var a = pl.acts[i];
+            if (a.done) { continue; }
+            if (a.on) {
+                if (b < a.last - 1) { a.wraps++; } // 跳回了 loop 头
+                a.last = b;
+                if (a.wraps >= a.times - 1) { // 最后一遍：关掉 loop，转完这遍接着往下放
+                    if (DJStudio.get(g, "loop_enabled") > 0) { DJStudio.set(g, "reloop_toggle", 1); }
+                    a.done = true;
+                    DJStudio.send({ t: "ev", e: "loop_out", deck: d, at: a.at, times: a.times });
+                }
+                continue;
+            }
+            if (b >= a.at + 4) { a.done = true; continue; } // 起播就在后面
+            if (b < a.at) { continue; }
+            if (a.jump !== undefined && a.jump !== null) {
+                DJStudio.set(g, "beatjump", a.jump);
+                a.done = true;
+                DJStudio.send({ t: "ev", e: "jump", deck: d, at: a.at, by: a.jump });
+            } else {
+                DJStudio.set(g, "beatloop_size", a.loop);
+                DJStudio.set(g, "beatloop_activate", 1);
+                a.on = true;
+                a.last = b;
+                DJStudio.send({ t: "ev", e: "loop_in", deck: d, at: a.at, beats: a.loop, times: a.times });
+            }
+        }
     }
 };
 
@@ -603,6 +683,7 @@ DJStudio.tick = function () {
     try {
         DJStudio.runLater();
         DJStudio.runLoader();
+        DJStudio.runPlans();
         DJStudio.runProg();
     } catch (e) {
         DJStudio.error("tick: " + e);

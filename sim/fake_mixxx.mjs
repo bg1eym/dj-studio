@@ -181,10 +181,19 @@ function setValue(group, key, value) {
         }
         return;
       case "beatloop_activate":
+        // quantize 开着：loop 头 = 最近的一拍（loopingcontrol.cpp:1568-1585 findQuantizedBeatloopStart）
         if (value && t) {
           const size = getValue(group, "beatloop_size");
-          const start = Math.floor(beatPos(d));
+          const start = Math.round(beatPos(d));
           d.loop = { start: t.first_beat + start * beatLen(t), len: size * beatLen(t) };
+        }
+        return;
+      case "beatjump":
+        // 从当前位置跳整拍数（相位不变）；在开着的 loop 里 = 把 loop 一起挪过去（loopingcontrol.cpp:1738-1758）
+        if (t && value) {
+          const dx = value * beatLen(t);
+          if (d.loop && d.pos >= d.loop.start && d.pos <= d.loop.start + d.loop.len) d.loop.start += dx;
+          d.pos = Math.max(0, Math.min(t.dur, d.pos + dx));
         }
         return;
       case "reloop_toggle":

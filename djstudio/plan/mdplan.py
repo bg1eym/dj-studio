@@ -6,7 +6,8 @@
     - 规范：v1 / 开场：… / 结尾：…          （可选）
     ## 曲目          一张表：# / 曲名 / 文件名 / 原 BPM / 播放 BPM / Key Lock / 小节数 / 第 1 小节（秒） / 调性
     ## Hot Cue       每首一个「### #N 曲名」，下面一张表：垫 / 名字 / 颜色 / 位置 / 注释
-    ## 过渡 N：A → B  几条「- 手法：…」「- 进场：…」「- 主速：…」「- 效果：…」，再一张逐小节旋钮表
+    ## Loop 与跳段   一张表：# / 小节 / 做什么（跳到 97、跳到 3 号垫、loop 4 小节 × 2）/ 注释（v4，可以不写）
+    ## 过渡 N：A → B  几条「- 手法：…」「- 进场：…」「- 主速：…」「- 效果：…」，再一张逐小节旋钮表（可以有 A Loop / B Loop 列）
 
 读出来和 PDF 模板（cdw.py）是同一套 Plan 结构，后面的换算（convert.py）完全一样。出错时报谱文件里的行号。
 表格的列按表头的名字认（顺序随意，空格和全角 / 半角括号不计较）；表外的文字、「>」引用、<!-- 注释 --> 都当说明，不读。
@@ -18,11 +19,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..setspec import COLOR_NAMES, NAME_MAX, default_color
-from .cdw import TECH, CueRef, Knobs, Plan, PlanCue, PlanEffect, PlanError, PlanRow, PlanTrack, PlanTransition, check, clock, fader
+from .cdw import (TECH, CueRef, Knobs, Plan, PlanCue, PlanEffect, PlanError, PlanMove, PlanRow, PlanTrack, PlanTransition,
+                  check, clock, fader)
 
-SCORE_SPEC_VERSION = "3"
-# v1 / v2 的谱写法一样：hot cue 按 v2 放（垫子没有固定用途）；v3 起过渡 / 开场 / 结尾可以引用谱上的 hot cue
-ACCEPTED_VERSIONS = ("1", "2", "3")
+SCORE_SPEC_VERSION = "4"
+# v1 / v2 的谱写法一样：hot cue 按 v2 放（垫子没有固定用途）；v3 起过渡 / 开场 / 结尾可以引用谱上的 hot cue；
+# v4 起可以写跳段和 loop（「## Loop 与跳段」，过渡表里的 A Loop / B Loop 列）。都是加的写法，旧谱照样认
+ACCEPTED_VERSIONS = ("1", "2", "3", "4")
 SUFFIXES = (".md", ".markdown")
 DASHES = ("—", "-", "–", "－", "--")
 
@@ -145,8 +148,11 @@ CUE_COLS = _alias({"垫": ["打击垫", "垫子", "pad"], "名字": ["名称", "
 ROW_COLS = _alias({
     "A小节": [], "B小节": [], "动作": ["说明", "备注"],
     **{f"{d}{p}": [f"{d}{p.lower()}"] for d in "AB" for p in ("LOW", "MID", "HIGH", "FILTER")},
-    "A推子": ["a音量"], "B推子": ["b音量"],
+    "A推子": ["a音量"], "B推子": ["b音量"], "ALoop": ["a循环"], "BLoop": ["b循环"],
 })
+MOVE_COLS = _alias({"#": ["编号", "no", "曲目"], "小节": ["在第几小节", "bar"], "做什么": ["动作", "跳段/loop"],
+                    "注释": ["说明", "备注", "note"]})
+MOVE_SECTIONS = ("loop与跳段", "跳段与loop", "loop和跳段", "跳段和loop", "loop", "跳段")
 
 
 # ---------------------------------------------------------------- 取值
@@ -239,6 +245,9 @@ def parse_text(text: str, name: str = "") -> Plan:
     for s in sections:
         if _key(s.title) in ("hotcue", "hotcues"):
             _hot_cues(s, by_no)
+    for s in sections:
+        if _key(s.title) in MOVE_SECTIONS:
+            _moves(s, by_no)
     refs: list[CueRef] = []
     trans = []
     for s in sections:
@@ -587,6 +596,100 @@ def _knobs(where: str, side: str, r: dict[str, str], base: dict[str, float | Non
     return Knobs(v["lo"] or 0.0, v["mid"] or 0.0, v["hi"] or 0.0, v["filter"] or 0.0, float(v["vol"]))  # type: ignore[arg-type]
 
 
+_LOOP_CELL = re.compile(r"^(?:开|loop)?\s*(\d+(?:\.\d+)?)\s*(小节|拍)$", re.I)
+
+
+def _loop_cell(text: str, side: str, line: int) -> str:
+    """旋钮表的「A Loop / B Loop」格：空 = 不动；「4 小节」「8 拍」= 这一小节开这么长的 loop；「出」= 出 loop。返回 "" / 拍数 / "off"。"""
+    t = text.strip()
+    if not t or _dash(t):
+        return ""
+    if re.fullmatch(r"出\s*(loop)?|关|off", t, re.I):
+        return "off"
+    m = _LOOP_CELL.match(t)
+    if not m:
+        raise _err(line, f"{side} Loop「{t}」：写 loop 多长（「4 小节」「8 拍」），出 loop 写「出」")
+    beats = float(m.group(1)) * (4 if m.group(2) == "小节" else 1)
+    if not 1 <= beats <= 512:
+        raise _err(line, f"{side} Loop「{t}」：loop 要在 1 拍到 128 小节之间")
+    return f"{beats:g}"
+
+
+def _check_loops(where: str, rows: list[PlanRow], lines: list[int], x: int) -> None:
+    """过渡里的 loop：开着时不能再开、出之前要开过、出要在转满整遍的地方；B 要在最后一行以前出；
+    A 一直开到最后的话最后一行要写「停」（开着 loop，A 不会自己播完）。"""
+    for side in ("A", "B"):
+        on: tuple[int, float, int] | None = None  # (开的 A 小节, loop 多少小节, 行号)
+        for r, line in zip(rows, lines):
+            cell = r.a_loop if side == "A" else r.b_loop
+            if not cell:
+                continue
+            if cell == "off":
+                if on is None:
+                    raise _err(line, f"{side} Loop 写了「出」，但前面没开 loop")
+                n = (r.a_bar - on[0]) / on[1]
+                if n < 1 - 1e-9 or abs(n - round(n)) > 1e-9:
+                    ok = on[0] + max(1, round(n)) * on[1]
+                    raise _err(line, f"{side} 的 loop（第 {on[0]} 小节开，{on[1]:g} 小节一遍）要转满整遍再出：现在是 {n:.2f} 遍，"
+                                     f"可以写在第 {ok:g} 小节")
+                on = None
+            else:
+                if on is not None:
+                    raise _err(line, f"{side} 第 {on[0]} 小节开的 loop 还没出（第 {on[2]} 行），不能再开")
+                if side == "B" and r.a_bar < x:
+                    raise _err(line, f"B 还没进场（A 第 {x} 小节才进），不能打 loop")
+                on = (r.a_bar, float(cell) / 4, line)
+        if on is not None:
+            if side == "B":
+                raise _err(on[2], f"{where}：B 第 {on[0]} 小节开的 loop 要在最后一行以前出（B Loop 写「出」）")
+            if not rows[-1].stop:
+                raise _err(on[2], f"{where}：A 第 {on[0]} 小节开的 loop 一直没出，A 不会自己播完：写「出」，或者最后一行写「停」")
+
+
+def _moves(sec: _Section, by_no: dict[int, PlanTrack]) -> None:
+    """「## Loop 与跳段」：# / 小节 / 做什么 / 注释。做什么：「跳到 97」「跳到第 97 小节」「跳到 3 号垫」「跳到 DROP」、
+    「loop 4 小节 × 2」「loop 8 拍 × 4」「loop 4 小节 转 3 遍」。"""
+    tables = _tables(sec.body, MOVE_COLS)
+    if not tables:
+        raise _err(sec.line, "「## Loop 与跳段」下面要有一张表：# / 小节 / 做什么 / 注释")
+    t = tables[0]
+    for need in ("#", "小节", "做什么"):
+        if need not in t.cols:
+            raise _err(t.line, f"Loop 与跳段的表少了「{need}」这一列")
+    for line, r in t.rows:
+        no = int(_number(r["#"].lstrip("#"), line, "#"))
+        track = by_no.get(no)
+        if track is None:
+            raise _err(line, f"曲目表里没有 #{no}")
+        bar = _number(r["小节"], line, "小节")
+        what = re.sub(r"\s+", " ", r["做什么"].strip())
+        note = r.get("注释", "")
+        m = re.fullmatch(r"跳(?:到|回)?\s*(?:第\s*)?(\d+(?:\.\d+)?)\s*(?:小节)?", what)
+        if m:
+            track.moves.append(PlanMove(bar, to=float(m.group(1)), note=note, line=line))
+            continue
+        m = re.fullmatch(r"跳(?:到|回)\s*(.+)", what)
+        if m:
+            cue = ref_cue(track, m.group(1), line)
+            if cue.bar is None:
+                raise _err(line, f"{cue.pad} 号垫 {cue.name} 是用时间写的：跳段写小节号（Engine DJ 里看这个垫在第几小节）")
+            track.moves.append(PlanMove(bar, to=float(cue.bar), note=note, line=line))
+            continue
+        m = re.fullmatch(r"loop\s*(\d+(?:\.\d+)?)\s*(小节|拍)\s*(?:[×xX*]\s*(\d+)\s*遍?|转?\s*(\d+)\s*遍)?", what, re.I)
+        if m:
+            size = float(m.group(1)) / (1 if m.group(2) == "小节" else 4)
+            times = m.group(3) or m.group(4)
+            if not times:
+                raise _err(line, f"「{what}」：写转几遍，比如「loop 4 小节 × 2」（一共转 2 遍）")
+            if int(times) < 2:
+                raise _err(line, f"「{what}」：loop 至少转 2 遍（转 1 遍 = 没打 loop）")
+            if not 0.25 <= size <= 128:
+                raise _err(line, f"「{what}」：loop 要在 1 拍到 128 小节之间")
+            track.moves.append(PlanMove(bar, loop=size, times=int(times), note=note, line=line))
+            continue
+        raise _err(line, f"做什么「{what}」：写「跳到 97」「跳到 3 号垫」或者「loop 4 小节 × 2」")
+
+
 def _rows(where: str, t: _Table, x: int, b_in: float | None) -> list[PlanRow]:
     """b_in = None：B 从用时间写的 hot cue 进，读谱时还不知道是第几小节（B 小节这一列不核对）。"""
     rows: list[PlanRow] = []
@@ -617,9 +720,11 @@ def _rows(where: str, t: _Table, x: int, b_in: float | None) -> list[PlanRow]:
                 raise _err(line, f"B 小节写的是 {b_txt}，按「B 第 {b_in:g} 小节落在 A 第 {x} 小节」应该是 {int(b_bar)}")
             b = _knobs(where, "B", r, b_prev, line)
             b_prev = vars(b).copy()
-        rows.append(PlanRow(a_bar, b_bar, bool(mark), a, b, r.get("动作", ""), stop=(mark == "停")))
+        rows.append(PlanRow(a_bar, b_bar, bool(mark), a, b, r.get("动作", ""), stop=(mark == "停"),
+                            a_loop=_loop_cell(r.get("ALoop", ""), "A", line), b_loop=_loop_cell(r.get("BLoop", ""), "B", line)))
     if not rows:
         raise _err(t.line, f"{where} 的旋钮表是空的")
+    _check_loops(where, rows, [line for line, _ in t.rows], x)
     return rows
 
 

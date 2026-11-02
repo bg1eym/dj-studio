@@ -584,3 +584,92 @@ def test_record_whole_set_to_mp3(tmp_path, monkeypatch):
         time.sleep(0.1)
     assert studio.recording["state"] == "cancelled"
     assert [p.name for p in studio.recordings_dir.iterdir()] == [f.name]
+
+
+def _bar_tones(path: Path, bpm: float, first_beat: float, bars: int, f0: float) -> None:
+    """每小节一个音高（第 n 小节 = f0 + 20n Hz）：录音里听得出放的是哪一小节。"""
+    sr = 44100
+    bar_s = 4 * 60 / bpm
+    n = int((first_beat + bars * bar_s + 1.0) * sr)
+    t = np.arange(n) / sr
+    k = np.clip(np.floor((t - first_beat) / bar_s).astype(int) + 1, 1, bars)  # 第几小节（第 1 小节之前算第 1 小节）
+    phase = 2 * np.pi * np.cumsum(f0 + 20.0 * k) / sr  # 相位连续，换小节不咔哒
+    write_wav(path, (0.5 * np.sin(phase)).astype(np.float32), sr=sr)
+
+
+def _played_bars(x: np.ndarray, bpm: float, f0: float) -> list[tuple[int, float]]:
+    """录音里一段一段放的是第几小节（按 f0 那组音高认），每 1/4 小节看一次，连着同一小节的合成一段：[(小节, 多少小节长)]。"""
+    sr = 44100
+    win = int(4 * 60 / bpm / 4 * sr)
+    f = np.fft.rfftfreq(win, 1 / sr)
+    band = (f > f0 + 10) & (f < f0 + 20 * 60)
+    seq: list[int | None] = []
+    for i in range(0, len(x) - win, win):
+        spec = np.abs(np.fft.rfft(x[i:i + win] * np.hanning(win)))
+        j = int(np.argmax(spec * band))
+        seq.append(round((f[j] - f0) / 20) if spec[j] > 0.02 * win else None)
+    runs: list[tuple[int, float]] = []
+    for v in seq:
+        if v is None:
+            continue
+        if runs and runs[-1][0] == v:
+            runs[-1] = (v, runs[-1][1] + 0.25)
+        else:
+            runs.append((v, 0.25))
+    return [(b, n) for b, n in runs if n >= 0.5]  # 换小节那一格两边都有，去掉
+
+
+def test_jumps_and_loops_heard_in_order(tmp_path):
+    """跳段和 loop 在真引擎里：每小节一个音高的两首，录下来按音高认出放的顺序。
+    A：独奏时第 5 小节跳到 9、第 13 小节 2 小节 loop 转 3 遍；过渡里第 27 小节 2 小节 loop 转 2 遍、A 在时间线第 12 小节停。
+    B：过渡里第 5 小节 1 小节 loop 转 2 遍；独奏时第 13 小节跳回 9。20 倍速、引擎时钟（录 MP3 那条路）。"""
+    import wave
+
+    bpm, fb = 128.0, 0.5
+    _bar_tones(tmp_path / "a.wav", bpm, fb, 40, 300.0)
+    _bar_tones(tmp_path / "b.wav", bpm, fb, 40, 1500.0)
+    speed = 20.0
+    link = EngineLink(Path(BIN), [], speed=speed, clock=True)
+    client = EngineClient(link)
+    assert client.wait_until(client.online, 30)
+    lib = link.sim({"cmd": "library", "tracks": [{"id": k, "path": str(tmp_path / f"{k}.wav"), "bpm": bpm, "first_beat": fb}
+                                                 for k in "ab"]}, timeout=60)["tracks"]
+    infos = {t["id"]: TrackInfo(t["id"], t["id"], Grid(bpm, fb, 0, t["duration"])) for t in lib}
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": "moves",
+        "tracks": [{"id": "a", "moves": [{"bar": 5, "to": 9}, {"bar": 13, "loop": 2, "times": 3}]},
+                   {"id": "b", "moves": [{"bar": 13, "to": 9}]}],
+        "transitions": [{"technique": "custom", "start": 21, "b_in": 1, "play_at": 4, "bars": 12, "params": {"a_end": "stop"},
+                         "lanes": {"B.vol": [[4, 1.0]], "A.vol": [[0, 1.0]]},
+                         "events": [[6, "A.loop:8"], [10, "A.loop_off"], [8, "B.loop:4"], [10, "B.loop_off"], [12, "A.stop"]]}],
+        "ending": {"mode": "fade", "bar": 18, "bars": 2},
+    })
+    c = compile_set(s, lambda t: infos.get(t.id))
+    assert c.ok, [str(i) for i in c.issues]
+    link.sim({"cmd": "queue", "ids": ["a", "b"]})
+    rec = tmp_path / "rec.wav"
+    link.sim({"cmd": "record", "path": str(rec), "trim": True})
+    cond = Conductor(client, c, stall_timeout=8 * speed)
+    cond.start()
+    cond.join(300)
+    stop = link.sim({"cmd": "record_stop"}, timeout=30)
+    link.sim({"cmd": "quit"})
+    time.sleep(0.5)
+    link.close()
+    log = "\n".join(cond.progress.log)
+    assert cond.progress.stage == "done", log + f"\n{cond.progress.error}"
+    assert stop["cache_misses"] == 0
+    with wave.open(str(rec)) as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).reshape(-1, 2).mean(axis=1) / 32768.0
+    a = _played_bars(x, bpm, 300.0)
+    b = _played_bars(x, bpm, 1500.0)
+    # A：1–4，跳到 9–12，13 14 转 3 遍，15–26，27 28 转 2 遍，29 30，停
+    want_a = [1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 13, 14, 13, 14, *range(15, 27), 27, 28, 27, 28, 29, 30]
+    assert [bar for bar, _ in a] == want_a, a
+    assert all(abs(n - 1) < 0.3 for _, n in a[1:-1]), a  # 每一段都是一小节长（第一段和最后一段可能被裁）
+    # B：1–4，第 5 小节转 2 遍（连着同一小节 = 一段 2 小节长），6–12，跳回 9–12，13–19（淡出到 20）
+    want_b = [1, 2, 3, 4, 5, *range(6, 13), *range(9, 20)]
+    assert [bar for bar, _ in b] == want_b, b
+    assert abs(dict(b)[5] - 2) < 0.3, b
+    # 录音长度 = 编译算出的整套时长（跳过的 4 小节、多转的 4 + 2 + 1 小节、往回跳再放的 4 小节都算进去了）
+    assert abs(stop["seconds"] - c.duration) < 1.0, (stop["seconds"], c.duration)

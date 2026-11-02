@@ -13,7 +13,7 @@
 ## 打碟谱规范（自己写谱）
 
 谱由你写，DJ Studio 照谱打碟：[docs/SCORE_SPEC.md](docs/SCORE_SPEC.md)《打碟谱规范》说明怎么写——曲目表、Prime 4+ 的 Hot Cue（8 个打击垫）、
-每段过渡逐小节的旋钮位（EQ / Filter 钟点位、推子 0–10、Echo / Reverb 湿度、换速）。
+每段过渡逐小节的旋钮位（EQ / Filter 钟点位、推子 0–10、Echo / Reverb 湿度、换速），以及 loop 和跳段（规范 v4）。
 复制模板 [docs/score_template.md](docs/score_template.md)（一份能直接跑的 3 首例子）改成自己的，存成 .md 拖到首页；写错了网页会报第几行。
 首页也能下载规范和模板。
 

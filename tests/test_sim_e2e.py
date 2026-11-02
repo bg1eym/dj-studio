@@ -206,3 +206,63 @@ def test_incoming_knobs_preset_when_loaded(rig):
     settled = armed[2:]  # 下发后第一两帧可能还是下发前的
     assert all(abs(st["m"][1][2] - b_lo0) < 0.01 for st in settled), [st["m"][1][2] for st in settled[:10]]
     assert all(st["d"][0][1] and not st["d"][1][1] for st in settled)  # 这时 A 还在独奏，B 没在放
+
+
+def test_jumps_and_loops(rig):
+    """跳段和 loop（规范 v4）：独奏时 A 往后跳 8 小节、打 2 小节 loop 转 3 遍；过渡里 A 打 2 小节 loop 转 3 遍（旋钮照常按时间走）、
+    B 打 1 小节 loop 转 2 遍；B 独奏时往回跳 4 小节再放一遍。全套照常跑完，过渡的时间线不被 loop 打乱，没有小节错位。"""
+    link, client = rig
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": "moves",
+        "tracks": [
+            {"id": "a", "title": "A", "moves": [{"bar": 5, "to": 13}, {"bar": 17, "loop": 2, "times": 3}]},
+            {"id": "b", "title": "B", "moves": [{"bar": 25, "to": 21}]},
+            {"id": "c", "title": "C"},
+        ],
+        "transitions": [
+            {"technique": "custom", "start": 33, "b_in": 1, "play_at": 8, "bars": 24, "params": {"a_end": "stop"},
+             "lanes": {"A.vol": [[0, 1], [20, 1], [24, 0]], "B.vol": [[8, 0.5], [16, 1]], "A.lo": [[8, 0], [12, -15]]},
+             "events": [[4, "A.loop:8"], [10, "A.loop_off"], [12, "B.loop:4"], [14, "B.loop_off"], [24, "A.stop"]]},
+            {"technique": "instant", "start": 41, "b_in": 17},
+        ],
+        "ending": {"mode": "fade", "bar": 40, "bars": 8},
+    })
+    c = compile_set(s, lambda t: LIB.get(t.id))
+    assert c.ok, [str(i) for i in c.issues]
+    beat_a = LIB["a"].grid.bar_beat
+    assert c.plans[0] == [{"at": beat_a(5), "jump": 32.0}, {"at": beat_a(17), "loop": 8.0, "times": 3}]
+    assert c.plans[1] == [{"at": round(LIB["b"].grid.bar_beat(25), 4), "jump": -16.0}] and c.plans[2] == []
+    # 过渡 1 的 loop 出口提前半遍（不和 loop 尾那一拍抢）；B 过渡后在自己的第 16 小节（loop 多转了 1 小节）
+    p1 = c.programs[0]
+    assert [e for e in p1["events"] if "loop" in e[1]] == [[16.0, "A.loop:8"], [36.0, "A.loop_off"],
+                                                          [48.0, "B.loop:4"], [54.0, "B.loop_off"]]
+    # 时间表：A 独奏 33-1 小节 - 8（跳过）+ 4（loop 多转 2 遍）；B 独奏 41-16 + 4（往回跳再放 4 小节）
+    solos = [seg for seg in c.schedule if seg.kind == "solo"]
+    assert abs(solos[0].t1 - solos[0].t0 - (32 - 8 + 4) * 4 * 60 / 128) < 1e-6
+    assert abs(solos[1].t1 - solos[1].t0 - (41 - 16 + 4) * 4 * 60 / 130) < 1e-6
+
+    sts, evs = [], []
+    client.add_listener(lambda m: sts.append(m) if m.get("t") == "st" else evs.append(m) if m.get("t") == "ev" else None)
+    cond = Conductor(client, c)
+    run(cond, 120)
+    log = "\n".join(cond.progress.log)
+    assert cond.progress.stage == "done", log + f"\n{cond.progress.error}"
+    assert "小节错位" not in log and "失联" not in log, log
+    assert "跳段 +8 小节" in log and "跳段 -4 小节" in log and "出 loop" in log, log
+    h = link.sim({"cmd": "history", "keys": ["beatjump", "beatloop_activate", "reloop_toggle"]})["h"]
+    acts = [(g, k, v) for _, g, k, v in h if v]
+    assert ("[Channel1]", "beatjump", 32) in acts and ("[Channel2]", "beatjump", -16) in acts
+    assert sum(1 for g, k, _ in acts if g == "[Channel1]" and k == "beatloop_activate") == 2  # 独奏 + 过渡里
+    assert sum(1 for g, k, _ in acts if g == "[Channel2]" and k == "beatloop_activate") == 1
+    # 过渡里 A 在 loop 里转的时候，旋钮读数照常跟着时间线（loop 不把时间线拉回去）
+    checked, bad = lanes_mismatch(sts, p1)
+    assert checked > 30 and bad <= checked * 0.05, (checked, bad)
+    tls = [st["pg"]["tl"] for st in sts if (st.get("pg") or {}).get("id") == "tr1" and st["pg"]["st"] == "running"]
+    assert len(tls) > 30 and all(b >= a - 1e-6 for a, b in zip(tls, tls[1:])), "时间线往回走了"
+    # 引擎报的「位置跳了」：A 在 loop 里跳回 2 次（每次 -8 拍）、B 1 次（-4 拍），都按整拍补进时间线
+    wraps = [(e["side"], e["by"]) for e in evs if e.get("e") == "wrap" and e.get("id") == "tr1"]
+    assert wraps == [("a", -8), ("a", -8), ("b", -4)], wraps
+    # 过渡完（状态里 tr1 第一次是 done）B 在自己的第 16 小节附近（loop 多转的 1 小节没往前走；状态 100ms 一帧，差不到 1 拍）
+    first_done = next(st for st in sts if (st.get("pg") or {}).get("id") == "tr1" and st["pg"]["st"] == "done")
+    b_bar = LIB["b"].grid.beat_bar(LIB["b"].grid.time_beat(first_done["d"][1][2] / 1000))
+    assert abs(b_bar - 16) < 0.3, b_bar

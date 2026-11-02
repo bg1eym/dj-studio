@@ -55,6 +55,58 @@ class Segment:
 
 
 @dataclass
+class LoopSpan:
+    """过渡里一边（A / B）打的一个 loop：时间线第 t_on 小节开，loop 长 bars 小节，第 t_off 小节出（None = 没出，A 在 loop 里停）。"""
+
+    t_on: float
+    bars: float
+    t_off: float | None
+
+
+def loop_spans(events: list[list[Any]], side: str) -> tuple[list[LoopSpan], list[str]]:
+    """从过渡事件里取出一边的 loop（「A.loop:16」开 16 拍、「A.loop_off」出），顺带查写法（返回 [错误]）。"""
+    spans: list[LoopSpan] = []
+    errs: list[str] = []
+    cur: LoopSpan | None = None
+    for e in sorted(events, key=lambda e: float(e[0])):
+        t, ev = float(e[0]), str(e[1])
+        if not ev.startswith(side + "."):
+            continue
+        act = ev.split(".", 1)[1]
+        if act.startswith("loop:"):
+            if cur is not None:
+                errs.append(f"{side} 在第 {t:g} 小节又开 loop：第 {cur.t_on:g} 小节开的 loop 还没出")
+                continue
+            cur = LoopSpan(t, float(act[5:]) / BEATS_PER_BAR, None)
+            spans.append(cur)
+        elif act == "loop_off":
+            if cur is None:
+                errs.append(f"{side} 在第 {t:g} 小节出 loop，但前面没开 loop")
+                continue
+            n = (t - cur.t_on) / cur.bars
+            if n < 1 - 1e-6 or abs(n - round(n)) > 1e-6:
+                errs.append(f"{side} 的 loop（第 {cur.t_on:g} 小节开，{cur.bars:g} 小节一遍）在第 {t:g} 小节出：要转满整遍"
+                            f"（现在是 {n:.2f} 遍；可以在第 {cur.t_on + max(1, round(n)) * cur.bars:g} 小节出）")
+            cur.t_off = t
+            cur = None
+    return spans, errs
+
+
+def own_offset(spans: list[LoopSpan], t: float) -> float:
+    """时间线第 t 小节时，这一边按自己的小节算走到了哪（时间线一直往前数；打 loop 的那几遍，自己的小节在 loop 里转）。
+    A：自己的小节 = start + 这个值；B：= b_in + 这个值 − play_at。"""
+    shift = 0.0
+    for sp in sorted(spans, key=lambda x: x.t_on):
+        if t < sp.t_on:
+            break
+        if sp.t_off is not None and t >= sp.t_off:
+            shift += sp.t_off - sp.t_on - sp.bars
+            continue
+        return sp.t_on - shift + ((t - sp.t_on) % sp.bars)
+    return t - shift
+
+
+@dataclass
 class Compiled:
     set: SetFile
     tracks: list[TrackInfo | None]
@@ -64,6 +116,8 @@ class Compiled:
     issues: list[Issue] = field(default_factory=list)
     schedule: list[Segment] = field(default_factory=list)
     expanded: list[Any] = field(default_factory=list)  # 每段过渡展开后的曲线（人读单位、小节；hot cue 按它找点）
+    loops: list[dict[str, list[LoopSpan]]] = field(default_factory=list)  # 每段过渡里 A / B 打的 loop
+    plans: list[list[dict[str, Any]]] = field(default_factory=list)  # 每首独奏时的跳段 / loop（拍，发给引擎）
 
     @property
     def ok(self) -> bool:
@@ -164,7 +218,19 @@ def compile_transition(
     a_left = a.grid.last_bar - tr.start if a.grid.duration else None
     ex = expand(tr, a_bpm, b_bpm, a_left)
     lanes = {name: _lane_native(name, pts, ex.play_at) for name, pts in sorted(ex.lanes.items())}
-    events = sorted(([round(float(e[0]) * BEATS_PER_BAR, 4), str(e[1])] for e in ex.events), key=lambda e: e[0])
+    # 出 loop：在最后一遍转到一半时关（Mixxx 关 loop 不挪位置，接着放到 loop 尾再往下）。正好在 loop 尾那一拍关的话，
+    # 引擎可能已经跳回 loop 头了，会多转一遍
+    events = []
+    size: dict[str, float] = {}
+    for e in sorted(ex.events, key=lambda e: float(e[0])):
+        x, ev = float(e[0]) * BEATS_PER_BAR, str(e[1])
+        side, _, act = ev.partition(".")
+        if act.startswith("loop:"):
+            size[side] = float(act[5:])
+        elif act == "loop_off" and side in size:
+            x -= size[side] / 2
+        events.append([round(x, 4), ev])
+    events.sort(key=lambda e: e[0])
     prog = {
         "t": "program",
         "id": f"tr{i + 1}",
@@ -181,6 +247,47 @@ def compile_transition(
         "events": events,
     }
     return prog, ex
+
+
+def _moves(c: Compiled, k: int, t: SetTrack, info: TrackInfo, lo: float, hi: float,
+           err: Callable[[str, str], None]) -> float:
+    """第 k 首独奏（第 lo–hi 小节）时的跳段 / loop：查位置，记成发给引擎的 plan（拍），返回多放（+）/ 少放（-）的小节数。
+    按放的顺序走一遍：每一步都要在上一步之后；往后跳跳过的那段、往回跳再放一遍的那段里不能再有别的跳段 / loop
+    （往回跳以后再经过时不会再做一遍，容易弄错）。"""
+    while len(c.plans) <= k:
+        c.plans.append(None)  # type: ignore[arg-type]
+    where = f"#{k + 1} {t.title or t.id}"
+    acts: list[dict[str, Any]] = []
+    pos, extra = lo, 0.0
+    done: list[float] = []
+    for m in sorted(t.moves, key=lambda m: m.bar):
+        what = f"第 {m.bar:g} 小节" + (f"跳到第 {m.to:g} 小节" if m.to is not None else f"的 {m.loop:g} 小节 loop")
+        if m.bar < pos - 1e-6 or m.bar > hi - 1e-6:
+            err(where, f"{what}：只能在这首独奏的部分（第 {pos:g}–{hi:g} 小节）——过渡里的 loop 写在过渡里，"
+                       "上一个跳段跳过的地方也不行")
+            continue
+        if m.to is not None:
+            if not lo - 1e-6 <= m.to <= hi + 1e-6:
+                err(where, f"{what}：要跳到这首独奏的部分里（第 {lo:g}–{hi:g} 小节）")
+                continue
+            if m.to < m.bar and any(b >= m.to - 1e-6 for b in done):
+                err(where, f"{what}：往回跳会再放一遍第 {m.to:g}–{m.bar:g} 小节，那里面的跳段 / loop 不会再做一遍，"
+                           "把它们挪到别处")
+                continue
+            acts.append({"at": round(info.grid.bar_beat(m.bar), 4), "jump": round((m.to - m.bar) * BEATS_PER_BAR, 4)})
+            pos = m.bar if m.to < m.bar else m.to
+        else:
+            assert m.loop is not None
+            if m.bar + m.loop > hi + 1e-6:
+                err(where, f"{what}：loop 到第 {m.bar + m.loop:g} 小节，超出这首独奏的部分（到第 {hi:g} 小节，下一段从那里开始）")
+                continue
+            acts.append({"at": round(info.grid.bar_beat(m.bar), 4), "loop": round(m.loop * BEATS_PER_BAR, 4),
+                         "times": m.times})
+            pos = m.bar + m.loop
+        done.append(m.bar)
+        extra += m.extra
+    c.plans[k] = acts
+    return extra
 
 
 def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], resume: bool = False) -> Compiled:
@@ -245,16 +352,31 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], res
             continue
         c.programs.append(prog)
         c.expanded.append(ex)
+        spans: dict[str, list[LoopSpan]] = {}
+        for side in ("A", "B"):
+            spans[side], errs = loop_spans(ex.events, side)
+            for m in errs:
+                err(where, m)
+        c.loops.append(spans)
+        a_stop = next((float(e[0]) for e in ex.events if str(e[1]) == "A.stop"), None)
+        for sp in spans["A"]:
+            if sp.t_off is None and (a_stop is None or a_stop < sp.t_on) and ex.a_playout:
+                err(where, f"A 在第 {sp.t_on:g} 小节开的 loop 一直没出：A 不会自己播完。出 loop，或者让 A 停（最后一行写「停」）")
+        for sp in spans["B"]:
+            if sp.t_on < ex.play_at - 1e-6:
+                err(where, f"B 在第 {sp.t_on:g} 小节开 loop，但 B 第 {ex.play_at:g} 小节才起播")
+            if sp.t_off is None or sp.t_off > ex.bars + 1e-6:
+                err(where, f"B 在第 {sp.t_on:g} 小节开的 loop 要在过渡结束（第 {ex.bars:g} 小节）以前出")
 
         # 时序校验
         if tr.start < established - 1e-6 and not (resume and i == 0):
             err(where, f"A 在第 {tr.start:g} 小节开始过渡，但上一段要到第 {established:g} 小节才结束")
-        a_end_bar = tr.start + ex.bars
+        a_end_bar = tr.start + own_offset(spans["A"], ex.bars)
         if not ex.a_playout and a_end_bar > a.grid.last_bar + 0.25:
             err(where, f"过渡要用到 A 的第 {a_end_bar:g} 小节，但 A 只有 {a.grid.last_bar:.1f} 小节")
         if b.grid.bar_time(tr.b_in) < -0.01:
             err(where, f"B 的起播小节 {tr.b_in:g} 在曲首之前")
-        b_est = tr.b_in + (ex.bars - ex.play_at)
+        b_est = tr.b_in + own_offset(spans["B"], ex.bars) - ex.play_at
         if b_est > b.grid.last_bar:
             err(where, f"过渡结束时 B 已经播到第 {b_est:g} 小节，超过曲末 {b.grid.last_bar:.1f}")
         for name in ("echo", "reverb"):
@@ -263,8 +385,8 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], res
         if tr.technique == "longhand" and ex.bars - ex.play_at < 24:
             warn(where, f"长交接只有 {ex.bars - ex.play_at:g} 小节（职业实测 25–57）")
 
-        # 时间表
-        solo_bars = tr.start - established
+        # 时间表（独奏时的跳段 / loop：多放 / 少放的小节）
+        solo_bars = tr.start - established + _moves(c, i, a_t, a, established, tr.start, err)
         t_solo = solo_bars * BEATS_PER_BAR * 60.0 / a_bpm
         c.schedule.append(Segment("solo", i, t_now, t_now + t_solo, a_t.title or a_t.id))
         t_now += t_solo
@@ -302,9 +424,11 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], res
         end_bar = start + end.bars
     else:
         end_bar = last.grid.last_bar
-    t_solo = (end_bar - established) * BEATS_PER_BAR * 60.0 / lb
+    extra = _moves(c, last_i, last_t, last, established, start if end.mode == "fade" else end_bar, err)
+    t_solo = (end_bar - established + extra) * BEATS_PER_BAR * 60.0 / lb
     c.schedule.append(Segment("solo" if end.mode == "playout" else "ending", last_i, t_now, t_now + max(0.0, t_solo),
                               last_t.title or last_t.id))
+    c.plans = [c.plans[k] if k < len(c.plans) and c.plans[k] is not None else [] for k in range(n)]
     # hot cue / 主 Cue / 保存 loop：按播放规范（docs/SET_SPEC.md）检查
     from .setspec import check_hot_cues
 

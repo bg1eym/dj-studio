@@ -49,6 +49,20 @@ class PlanRow:
     b: Knobs | None  # B 还没起播时为 None（「—」）
     marks: str = ""
     stop: bool = False  # 「停」：A 在这一小节的第 1 拍停（Markdown 谱）；False =「结束」，A 自己播完
+    a_loop: str = ""  # 「A Loop」列：""（不动）/ 拍数（这一小节开 loop）/ "off"（出 loop）
+    b_loop: str = ""
+
+
+@dataclass
+class PlanMove:
+    """谱上「## Loop 与跳段」的一行：这首独奏时在第 bar 小节跳到第 to 小节，或打 loop 小节的 loop 转 times 遍。"""
+
+    bar: float
+    to: float | None = None
+    loop: float | None = None  # 小节
+    times: int = 2
+    note: str = ""
+    line: int = 0
 
 
 @dataclass
@@ -116,6 +130,7 @@ class PlanTrack:
     cues: list[tuple[float, str]] = field(default_factory=list)  # (小节, breakdown / break / drop …)
     key: str = ""
     hot_cues: list[PlanCue] = field(default_factory=list)  # 谱上写明的 hot cue（Markdown 谱）；没写的按规范自动补
+    moves: list[PlanMove] = field(default_factory=list)  # 独奏时的跳段 / loop（规范 v4）
 
 
 @dataclass
@@ -399,5 +414,5 @@ def check(plan: Plan) -> None:
             plan.warnings.append(f"过渡 {tr.no}：换速后 {tr.tempo_to:g} 与 #{nxt.no} 的播放 BPM {nxt.bpm_play:g} 不同")
 
 
-__all__ = ["Plan", "PlanError", "PlanRow", "PlanTrack", "PlanTransition", "PlanEffect", "PlanCue", "Knobs", "PdfError",
+__all__ = ["Plan", "PlanError", "PlanRow", "PlanTrack", "PlanTransition", "PlanEffect", "PlanCue", "PlanMove", "Knobs", "PdfError",
            "parse", "clock", "fader", "check"]

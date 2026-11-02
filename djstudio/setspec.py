@@ -55,13 +55,14 @@ CUE_KINDS: tuple[CueKind, ...] = (
     CueKind("move", "BASS IN / BASS OUT / MID UP / HIGH DOWN / EQ DOWN / HPF / LPF / FILTER OFF / FADER UP / FADER DOWN",
             "黄", "过渡里这首的旋钮 / 推子开始拧，或一下拧到位"),
     CueKind("fx", "ECHO / REVERB / ECHO OFF / REVERB OFF", "青", "过渡里开 / 关效果"),
-    CueKind("loop", "LOOP 8 …", "粉", "过渡里打 loop"),
+    CueKind("jump", "JUMP 97 …", "蓝", "跳段：跳到的那一小节（谱上写的那一小节按这个垫，quantize 开着就对着拍跳过去）"),
+    CueKind("loop", "LOOP 8 …", "粉", "打 loop（过渡里，或者独奏时）"),
     CueKind("out", "OUT", "红", "出：这首当出曲的那段过渡从这里开始"),
     CueKind("stop", "STOP", "紫", "这首在这里停（谱上的「停」）"),
     CueKind("fade", "FADE", "红", "最后一首：从这里开始淡出"),
 )
 KIND = {k.key: k for k in CUE_KINDS}
-_PRIO = {"in": 0, "out": 0, "stop": 0, "fade": 0, "fx": 1, "loop": 2, "move": 2}  # 点太多放不下时先留的
+_PRIO = {"in": 0, "out": 0, "stop": 0, "fade": 0, "jump": 0, "fx": 1, "loop": 2, "move": 2}  # 点太多放不下时先留的
 
 
 def default_color(name: str) -> str:
@@ -222,7 +223,7 @@ class SetPoint:
 def set_points(s: SetFile, c: Compiled) -> list[list[SetPoint]]:
     """每首歌在这套 set 里的点（按时间排）：IN → 进来时要处理的点 → OUT → 出去时要处理的点 → STOP / FADE。
     过渡里的动作分给动的那个 deck：A 的放在出曲上（A 的小节），B 的放在进曲上（B 的小节）。谱上「动作」列的字写进注释。"""
-    from .compiler import NEUTRAL
+    from .compiler import NEUTRAL, own_offset
 
     n = len(s.tracks)
     out: list[list[SetPoint]] = [[] for _ in range(n)]
@@ -237,6 +238,7 @@ def set_points(s: SetFile, c: Compiled) -> list[list[SetPoint]]:
         marks = {round(float(m[0]), 4): str(m[1]) for m in tr.marks}
         nxt = s.tracks[i + 1]
         play = float(ex.play_at)
+        spans = c.loops[i] if i < len(c.loops) else {"A": [], "B": []}  # 过渡里打了 loop：自己的小节号按 loop 换算
 
         def note(head: str, t: float, moves: list[Move]) -> str:
             parts = [head]
@@ -250,6 +252,10 @@ def set_points(s: SetFile, c: Compiled) -> list[list[SetPoint]]:
         a_moves = lane_moves(ex.lanes, "A")
         stop = next((float(e[0]) for e in ex.events if str(e[1]) == "A.stop"), None)
         loops = {round(float(e[0]), 4): str(e[1]).split(":")[1] for e in ex.events if str(e[1]).startswith("A.loop:")}
+        # A 在开着的 loop 里停（loop 卷上去、B 进来时停）：停的位置就是 loop 头，不另放 STOP，写进 LOOP 的注释
+        open_at = next((sp.t_on for sp in spans["A"] if sp.t_off is None and stop is not None and sp.t_on <= stop), None)
+        if open_at is not None:
+            stop_note, stop = f"loop 一直开着，到时间线第 {stop:g} 小节停", None
         times = sorted(set(a_moves) | {0.0} | ({round(stop, 4)} if stop is not None else set()) | set(loops))
         for t in times:
             mv = a_moves.get(t, [])
@@ -257,12 +263,15 @@ def set_points(s: SetFile, c: Compiled) -> list[list[SetPoint]]:
                 name, kind, head = "OUT", "out", f"{where}从这里开始，交给 #{i + 2} {nxt.title or nxt.id}"
             elif stop is not None and abs(t - stop) < 1e-9:
                 name, kind, head = "STOP", "stop", f"{where}：这首在这里停"
-            elif t in loops:
-                name, kind, head = f"LOOP {loops[t]}", "loop", f"{where}：在这里打 {loops[t]} 拍 loop"
+            elif t in loops:  # 同一拍还有别的动作：名字接在后面（LOOP 2 ECHO）
+                name = f"LOOP {loops[t]}" + (f" {move_name(mv)[0]}" if mv else "")
+                name, kind, head = name[:NAME_MAX].strip(), "loop", f"{where}：在这里打 {loops[t]} 拍 loop"
+                if open_at is not None and abs(t - open_at) < 1e-9:
+                    head += f"，{stop_note}"
             else:
                 name, kind = move_name(mv)
                 head = f"{where}，时间线第 {t:g} 小节"
-            out[i].append(SetPoint(tr.start + t, kind, name, note(head, t, mv), mv))
+            out[i].append(SetPoint(tr.start + own_offset(spans["A"], t), kind, name, note(head, t, mv), mv))
         # B：进曲
         b_moves = lane_moves(ex.lanes, "B")
         state = []
@@ -283,11 +292,25 @@ def set_points(s: SetFile, c: Compiled) -> list[list[SetPoint]]:
                 continue
             mv = b_moves.get(t, [])
             if t in b_loops:
-                name, kind, head = f"LOOP {b_loops[t]}", "loop", f"{where}：在这里打 {b_loops[t]} 拍 loop"
+                name = f"LOOP {b_loops[t]}" + (f" {move_name(mv)[0]}" if mv else "")
+                name, kind, head = name[:NAME_MAX].strip(), "loop", f"{where}：在这里打 {b_loops[t]} 拍 loop"
             else:
                 name, kind = move_name(mv)
                 head = f"{where}，时间线第 {t:g} 小节"
-            out[i + 1].append(SetPoint(tr.b_in + t - play, kind, name, note(head, t, mv), mv))
+            out[i + 1].append(SetPoint(tr.b_in + own_offset(spans["B"], t) - play, kind, name, note(head, t, mv), mv))
+    # 独奏时的跳段 / loop
+    for k, st in enumerate(s.tracks):
+        off = st.plan_bar_offset or 0
+        for m in st.moves:
+            if m.to is not None:
+                what = f"跳过 {m.to - m.bar:g} 小节" if m.to > m.bar else f"再放一遍 {m.bar - m.to:g} 小节"
+                out[k].append(SetPoint(m.to, "jump", f"JUMP {m.to - off:g}"[:NAME_MAX],
+                                       f"独奏时放到第 {m.bar - off:g} 小节按这个垫，跳到第 {m.to - off:g} 小节（{what}）"
+                                       + (f"。{m.note}" if m.note else "")))
+            else:
+                out[k].append(SetPoint(m.bar, "loop", f"LOOP {m.loop * 4:g}"[:NAME_MAX],  # type: ignore[operator]
+                                       f"独奏时第 {m.bar - off:g} 小节起 {m.loop:g} 小节 loop，一共转 {m.times} 遍再接着放"
+                                       + (f"。{m.note}" if m.note else "")))
     last = c.tracks[n - 1] if len(c.tracks) == n else None
     if c.ending and last is not None:
         bar = last.grid.beat_bar(c.ending["a"]["start"])
@@ -326,20 +349,31 @@ def fill_hot_cues(s: SetFile, c: Compiled) -> SetFile:
         main = manual_in.bar if manual_in else (auto_in.bar if auto_in else st.main_cue)
         tracks.append(st.model_copy(update={"hot_cues": sorted(manual + auto, key=lambda h: h.pad), "main_cue": main}))
     # 保存 loop：过渡事件里的 loop
+    from .compiler import own_offset
+
     loops: list[list[SavedLoop]] = [[lp for lp in t.loops if not lp.auto] for t in tracks]
     for i, tr in enumerate(s.transitions):
         ex = c.expanded[i] if i < len(c.expanded) else None
         play = float(ex.play_at) if ex else float(tr.play_at or 0)
+        spans = c.loops[i] if i < len(c.loops) else {"A": [], "B": []}
         for bar, ev in (ex.events if ex else tr.events):
             m = re.match(r"^(A|B)\.loop:(\d+(?:\.\d+)?)$", str(ev))
             if not m:
                 continue
             k = i if m.group(1) == "A" else i + 1
-            at = tr.start + float(bar) if m.group(1) == "A" else tr.b_in + float(bar) - play
+            side = m.group(1)
+            at = (tr.start + own_offset(spans[side], float(bar)) if side == "A"
+                  else tr.b_in + own_offset(spans[side], float(bar)) - play)
             if len(loops[k]) < PAD_COUNT:
                 beats = float(m.group(2))
                 loops[k].append(SavedLoop(pad=len(loops[k]) + 1, name=f"LOOP {beats:g}", bar=round(max(1.0, at), 4),
                                           beats=beats, note=f"第 {i + 1} 段过渡里的 {beats:g} 拍 loop", auto=True))
+    # 独奏时的 loop（Prime 4+ 的保存 loop 最长 64 拍）
+    for k, st in enumerate(tracks):
+        for mv in st.moves:
+            if mv.loop is not None and mv.loop * 4 <= 64 and len(loops[k]) < PAD_COUNT:
+                loops[k].append(SavedLoop(pad=len(loops[k]) + 1, name=f"LOOP {mv.loop * 4:g}", bar=round(mv.bar, 4),
+                                          beats=mv.loop * 4, note=f"独奏时转 {mv.times} 遍", auto=True))
     tracks = [t.model_copy(update={"loops": lp}) for t, lp in zip(tracks, loops)]
     return s.model_copy(update={"tracks": tracks, "spec": SPEC_VERSION})
 

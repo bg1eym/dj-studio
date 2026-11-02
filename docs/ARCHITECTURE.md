@@ -114,6 +114,11 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
 - iCloud「仅云端」文件会让读取阻塞 → 代码和托管曲库都放在 iCloud 之外；导入时会标出云端文件。
 - Mixxx 网格可能误判（2/3、1.5 倍），或整条放在反拍上（真曲实测 5 首里 3 首）→ 分析时和自估网格比对，曲库页标「网格存疑」，set 校验报错；「校正网格」把自估网格写进 mixxxdb 并 `bpm_lock`。自估网格的线放在 kick 起音点上（`analysis.kick_phase`）。
 - 自估速度（`analysis.estimate_grid`）：自相关粗估 → 在 ±4% 里用整首 kick 最多的 8 个 30 秒窗口找（0.05 BPM 一步，落在边上再往外扩一次）→ 整首 ±0.15 细找 → 逐拍线性拟合。以前细找只在粗估 ±1% 里，粗估偏多了就卡在范围边上（How You Move 138 估成 137.00）。改算法时加 `GRID_VERSION`，旧分析会自动重做。
+- 跳段与 loop（打碟谱规范 v4）：独奏时的 `tracks[].moves` → 编译成每首的 plan（`Compiled.plans`，拍），conductor 每装好一首发
+  `{"t":"plan"}`，DJStudio.js（0.4.5）的 `runPlans` 到那一拍 `beatjump` / `beatloop_activate`，数跳回 loop 头的次数，转满就 `reloop_toggle`。
+  过渡里的 loop 是事件；程序开始后每一边的时间线按整拍补上 loop 跳回去的距离（`sideTl`），旋钮、B 起播、相位检查都照常按时间走。
+  编译用 `loop_spans` / `own_offset` 把时间线换成两首自己的小节（B 过渡后的位置、A 的结尾、hot cue、点波形跳过去）；
+  独奏多放 / 少放的小节进时间表。点波形 / 停下后继续落在打了 loop 的过渡里 = 从这段过渡开头重来。
 - 录成 MP3（`Studio.record`，网页 `/api/sets/{id}/record`）：起一个不出声的声音引擎（`EngineLink(clock=True)`，20 倍速），
   和演出同一套 DJStudio.js、conductor、`_sim_rows`（音量统一），引擎 `record` 命令带 `trim`（开头结尾的数字静音不录）、路径 `.mp3`
   → Mixxx 的 `EncoderMp3`（320 kbps CBR）。**引擎时钟**：`DJSTUDIO_CLOCK=engine` 时引擎每处理 20ms 音频给 `[DJStudio],tick`、

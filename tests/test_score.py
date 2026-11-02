@@ -90,7 +90,11 @@ def test_template_converts_and_compiles():
     assert tr1.lanes["A.reverb"] == [[32, 0.0], [32, 0.333, "step"]]
     # 过渡 2：drop 对 drop，B 从第 33 小节进，A 在第 97 小节第 1 拍停；Echo 在最后一小节，尾巴留着
     assert (tr2.start, tr2.b_in, tr2.play_at, tr2.bars, tr2.params) == (93, 33, 4, 4, {"a_end": "stop"})
-    assert tr2.events == [[4.0, "A.stop"]] and tr2.lanes["B.vol"] == [[4, 1.0, "step"]]
+    assert tr2.events == [[3.0, "A.loop:2"], [4.0, "A.stop"]]
+    assert tr2.lanes["B.vol"] == [[4, 1.0, "step"]]
+    # v4：独奏时的跳段 / loop（换成本应用的小节号）；过渡 2 里 A 最后一小节打 2 拍 loop，loop 开着停
+    assert [(m.bar, m.loop, m.times, m.note) for m in s.tracks[0].moves] == [(105, 4, 2, "进过渡前 groove 多转一遍")]
+    assert [(m.bar, m.to) for m in s.tracks[1].moves] == [(49, 65)]
     assert tr2.lanes["A.filter"][-2:] == [[3, 0.6], [4, 0.6]] and tr2.lanes["A.echo"] == [[3, 0.0], [3, 0.5, "step"]]
     c = compile_with(s, tracks)
     assert c.ok, [vars(i) for i in c.issues]
@@ -99,12 +103,21 @@ def test_template_converts_and_compiles():
     s = fill_hot_cues(s, c)
     assert s.spec == "2" and compile_with(s, tracks).ok
     got = [[(h.pad, h.name, h.bar) for h in t.hot_cues] for t in s.tracks]
-    assert got[0] == [(1, "IN", 1), (2, "OUT", 121), (3, "HIGH DOWN", 129), (4, "BASS OUT", 145), (5, "REVERB LPF", 153)]
-    assert got[1] == [(1, "IN", 1), (2, "FADER UP", 9), (3, "BASS IN", 17), (4, "OUT", 93), (5, "ECHO", 96), (6, "STOP", 97)]
+    assert got[0] == [(1, "IN", 1), (2, "LOOP 16", 105), (3, "OUT", 121), (4, "HIGH DOWN", 129), (5, "BASS OUT", 145),
+                      (6, "REVERB LPF", 153)]
+    # A 在开着的 2 拍 loop 里停：停的地方就是 loop 头，不另放 STOP，写进 LOOP 的注释
+    assert got[1] == [(1, "IN", 1), (2, "FADER UP", 9), (3, "BASS IN", 17), (4, "JUMP 65", 65), (5, "OUT", 93),
+                      (6, "LOOP 2 ECHO", 96)]
+    assert "loop 一直开着，到时间线第 4 小节停" in s.tracks[1].hot_cues[5].note
+    # 保存 loop：独奏时的 4 小节 loop（16 拍）、过渡里的 2 拍 loop
+    assert [(lp.name, lp.bar, lp.beats) for lp in s.tracks[0].loops] == [("LOOP 16", 105, 16)]
+    assert [(lp.name, lp.bar, lp.beats) for lp in s.tracks[1].loops] == [("LOOP 2", 96, 2)]
+    jump = next(x for x in s.tracks[1].hot_cues if x.name == "JUMP 65")
+    assert jump.color == "#2F7BFF" and "放到第 49 小节按这个垫，跳到第 65 小节（跳过 16 小节）" in jump.note
     assert got[2] == [(1, "DROP", 33), (2, "FADE", 177), (7, "VOCAL", 40.5), (8, "DROP 2", 113)]  # 1、7、8 是谱上自己写的
     h = {x.name: x for x in s.tracks[1].hot_cues}
-    assert h["IN"].color == "#22D45A" and h["OUT"].color == "#FF3B3B" and h["STOP"].color == "#A45CFF"
-    assert h["BASS IN"].color == "#FFD60A" and h["ECHO"].color == "#00C8FF"
+    assert h["IN"].color == "#22D45A" and h["OUT"].color == "#FF3B3B"
+    assert h["BASS IN"].color == "#FFD60A" and h["LOOP 2 ECHO"].color == "#FF5FA2"
     assert "③ 换低频" in h["BASS IN"].note and "LOW 7点 → 12点（一拍到位）" in h["BASS IN"].note
     assert "推子 5、LOW 7点、HIGH 11点" in h["IN"].note and "推子 5 → 10（7 小节拧到）" in h["FADER UP"].note
     assert all(x.auto for x in s.tracks[1].hot_cues) and not any(x.auto for x in s.tracks[2].hot_cues if x.pad >= 7)
@@ -126,7 +139,8 @@ def test_bar_offset_when_score_bar1_is_later():
     a = conv.set.tracks[0]
     assert a.plan_bar_offset == 16 and conv.set.transitions[0].start == 121 + 16
     s = fill_hot_cues(conv.set, compile_with(conv.set, tracks))
-    assert [(h.name, h.bar) for h in s.tracks[0].hot_cues][:2] == [("IN", 1 + 16), ("OUT", 121 + 16)]
+    assert [(h.name, h.bar) for h in s.tracks[0].hot_cues][:3] == [("IN", 1 + 16), ("LOOP 16", 105 + 16), ("OUT", 121 + 16)]
+    assert [(m.bar, m.loop) for m in conv.set.tracks[0].moves] == [(105 + 16, 4)]  # 独奏的 loop 也换成本应用的小节号
 
 
 # ---------------------------------------------------------------- 规范的表 = 代码
@@ -217,7 +231,7 @@ def test_header_errors():
     with pytest.raises(PlanError, match="手法"):
         score(ok_rows, HEAD.replace("- 手法：长交接\n", ""))
     with pytest.raises(PlanError, match="规范"):
-        score(ok_rows, HEAD.replace("# 测试谱\n", "# 测试谱\n\n- 规范：v4\n"))
+        score(ok_rows, HEAD.replace("# 测试谱\n", "# 测试谱\n\n- 规范：v5\n"))
     with pytest.raises(PlanError, match="曲目"):
         mdplan.parse_text("# 随便写的笔记\n\n今天练了长交接。\n")
     plan = score(ok_rows, HEAD.replace("- 进场", "- 主速：128 → 130，B 第 9–12 小节换\n- 进场"))
@@ -272,7 +286,7 @@ def test_upload_md_score_and_download_docs(tmp_path):
     assert r.status_code == 422 and "行" in r.json()["detail"] and "结束" in r.json()["detail"]
     assert client.get("/api/plan").json()["file"] == "我的谱.md"  # 读不了的谱不算当前打碟谱
     spec = client.get("/api/score/spec.md")
-    assert spec.status_code == 200 and spec.text.startswith("# 打碟谱规范 v3")
+    assert spec.status_code == 200 and spec.text.startswith("# 打碟谱规范 v4")
     tmpl = client.get("/api/score/template.md", params={"download": 1})
     assert tmpl.status_code == 200 and "attachment" in tmpl.headers["content-disposition"]
     assert mdplan.parse_text(tmpl.text).title == "我的 set 打碟谱"
@@ -469,6 +483,9 @@ def test_seek_target_maps_clicks_onto_the_set(tmp_path):
     # 第 2 首在 97 停（交给第 3 首）：点 97 以后 = 第 3 首在那一刻的位置
     assert t(s, c, 1, 100) == (2, 36)
     assert t(s, c, 2, 20) == (2, 20)  # 第 3 首在进点（33）之前：就从那里放（跳过过渡 2）
+    # 过渡 2 里 A 在第 96 小节打 2 拍 loop（v4）：点在过渡里 = 从过渡开头（93）重来；97（谱上 A 停、交出去）以后才算第 3 首
+    assert t(s, c, 1, 96.25) == (1, 93) and t(s, c, 1, 94) == (1, 93) and t(s, c, 1, 96.5) == (1, 93)
+    assert t(s, c, 1, 97) == (2, 33)
     with pytest.raises(Exception):
         t(s, c, 5, 1)
 
@@ -530,3 +547,99 @@ def test_manual_grid_override(tmp_path):
     assert client.patch("/api/tracks/hym", json={"grid_bpm": 500}).status_code == 400
     r = client.patch("/api/tracks/hym", json={"grid_bpm": None}).json()
     assert r["grid"]["source"] == "own" and r["grid"]["bpm"] == 137.0
+
+
+# ---------------------------------------------------------------- v4：loop 与跳段
+
+LOOP_HEAD = HEAD.replace("| A 小节 | B 小节 | A LOW | B LOW | B 推子 |\n|---|---|---|---|---|\n",
+                         "| A 小节 | B 小节 | A LOW | B LOW | B 推子 | A Loop | B Loop |\n|---|---|---|---|---|---|---|\n")
+
+
+def test_loops_in_a_transition():
+    """过渡表的 A Loop / B Loop：开 loop 写长度，出 loop 写「出」；A 小节照样按时间往下数。"""
+    plan = score("| 21 | — | 12点 | — | — | 4 小节 | — |\n| 25 | 1 | | 7点 | 5 | 出 | 2 拍 |\n"
+                 "| 33 | 9 | 7点 | 12点 | 10 | | 出 |\n| 41 结束 | 17 | | | | | |\n", LOOP_HEAD)
+    rows = plan.transitions[0].rows
+    assert [(r.a_loop, r.b_loop) for r in rows] == [("16", ""), ("off", "2"), ("", "off"), ("", "")]
+    tracks = [LibTrack(k, f"/m/{k}.wav", k.upper(), "", 120.0, Grid(128, fb, 0, 120.0), []) for k, fb in (("a", 0.25), ("b", 0.40))]
+    conv = convert(plan, tracks)
+    assert conv.ok, [str(n) for n in conv.notes]
+    tr = conv.set.transitions[0]
+    assert [e for e in tr.events if "loop" in e[1]] == [[0.0, "A.loop:16"], [4.0, "A.loop_off"], [4.0, "B.loop:2"],
+                                                        [12.0, "B.loop_off"]]
+    c = compile_with(conv.set, tracks)
+    assert c.ok, [str(i) for i in c.issues]
+    # A 多转了 0 小节（4 小节 loop 只转 1 遍）；B 的 2 拍 loop 转了 16 遍（8 小节里），自己少走 7.5 小节
+    assert [(sp.t_on, sp.bars, sp.t_off) for sp in c.loops[0]["B"]] == [(4.0, 0.5, 12.0)]
+
+
+@pytest.mark.parametrize("rows,line,words", [
+    # 出 loop 要在转满整遍的地方
+    ("| 21 | — | 12点 | — | — | 8 小节 | — |\n| 25 | 1 | | 7点 | 5 | 出 | |\n| 41 结束 | 17 | | | 10 | | |\n", 18, "转满整遍"),
+    # 出之前要开过
+    ("| 21 | — | 12点 | — | — | 出 | — |\n| 25 | 1 | | 7点 | 5 | | |\n| 41 结束 | 17 | | | 10 | | |\n", 17, "前面没开"),
+    # B 的 loop 要在最后一行以前出
+    ("| 21 | — | 12点 | — | — | | — |\n| 25 | 1 | | 7点 | 5 | | 1 小节 |\n| 41 结束 | 17 | | | 10 | | |\n", 18, "最后一行以前出"),
+    # A 的 loop 一直开着，最后一行要写「停」
+    ("| 21 | — | 12点 | — | — | 4 小节 | — |\n| 25 | 1 | | 7点 | 5 | | |\n| 41 结束 | 17 | | | 10 | | |\n", 17, "停"),
+    # B 还没进场
+    ("| 21 | — | 12点 | — | — | | 1 小节 |\n| 25 | 1 | | 7点 | 5 | | 出 |\n| 41 结束 | 17 | | | 10 | | |\n", 17, "还没进场"),
+    # 写法不对
+    ("| 21 | — | 12点 | — | — | 很长 | — |\n| 25 | 1 | | 7点 | 5 | | |\n| 41 结束 | 17 | | | 10 | | |\n", 17, "loop 多长"),
+])
+def test_loop_errors_have_line_numbers(rows, line, words):
+    with pytest.raises(PlanError, match=rf"第 {line} 行.*{words}"):
+        score(rows, LOOP_HEAD)
+
+
+MOVES_OK_ROWS = "| 21 | — | 12点 | — | — |\n| 25 | 1 | | 7点 | 5 |\n| 41 结束 | 17 | | | 10 |\n"
+
+
+def moves_score(table_rows: str) -> mdplan.Plan:
+    head = HEAD.replace("## 过渡 1", "## Loop 与跳段\n\n| # | 小节 | 做什么 | 注释 |\n|---|---|---|---|\n" + table_rows + "\n## 过渡 1")
+    return score(MOVES_OK_ROWS, head)
+
+
+def test_moves_section():
+    plan = moves_score("| 1 | 5 | 跳到 9 | 跳过 |\n| 1 | 13 | loop 2 小节 × 3 | |\n| 2 | 21 | 跳回第 19 小节 | 再来 |\n"
+                       "| 2 | 25 | loop 8 拍 转 2 遍 | |\n")
+    a, b = plan.tracks
+    assert [(m.bar, m.to, m.loop, m.times) for m in a.moves] == [(5, 9, None, 2), (13, None, 2, 3)]
+    assert [(m.bar, m.to, m.loop, m.times, m.note) for m in b.moves] == [(21, 19, None, 2, "再来"), (25, None, 2, 2, "")]
+    tracks = [LibTrack(k, f"/m/{k}.wav", k.upper(), "", 120.0, Grid(128, fb, 0, 120.0), []) for k, fb in (("a", 0.25), ("b", 0.40))]
+    conv = convert(plan, tracks)
+    assert conv.ok, [str(n) for n in conv.notes]
+    c = compile_with(conv.set, tracks)
+    assert c.ok, [str(i) for i in c.issues]
+    # 第 1 首：跳过 4 小节、loop 多转 4 小节 → 独奏 21 - 1 小节照算；第 2 首：往回跳多放 2 小节、loop 多放 2 小节
+    solo = [seg for seg in c.schedule if seg.kind == "solo"]
+    assert abs((solo[0].t1 - solo[0].t0) - 20 * 4 * 60 / 128) < 1e-6
+    assert [a["jump"] if "jump" in a else a["loop"] for a in c.plans[0]] == [16.0, 8.0]
+
+
+@pytest.mark.parametrize("table_rows,words", [
+    ("| 1 | 5 | 跑到 9 | |\n", "写「跳到 97」"),
+    ("| 1 | 5 | loop 4 小节 | |\n", "转几遍"),
+    ("| 1 | 5 | loop 4 小节 × 1 | |\n", "至少转 2 遍"),
+    ("| 7 | 5 | 跳到 9 | |\n", "没有 #7"),
+    ("| 1 | 5 | 跳到 3 号垫 | |\n", "Hot Cue 里没有"),
+])
+def test_moves_errors(table_rows, words):
+    with pytest.raises(PlanError, match=rf"第 \d+ 行.*{words}"):
+        moves_score(table_rows)
+
+
+@pytest.mark.parametrize("table_rows,words", [
+    ("| 1 | 23 | 跳到 9 | |\n", "只能在这首独奏的部分"),          # 第 1 首第 21 小节就开始过渡了
+    ("| 1 | 19 | loop 4 小节 × 2 | |\n", "超出这首独奏的部分"),   # loop 到第 23 小节
+    ("| 2 | 13 | 跳到 21 | |\n", "只能在这首独奏的部分"),          # 第 2 首过渡到第 17 小节才结束
+    ("| 1 | 5 | 跳到 13 | |\n| 1 | 9 | 跳到 15 | |\n", "只能在这首独奏的部分"),  # 第 9 小节已经被跳过了
+    ("| 1 | 5 | loop 1 小节 × 2 | |\n| 1 | 9 | 跳到 3 | |\n", "往回跳会再放一遍"),
+])
+def test_moves_outside_solo_are_errors(table_rows, words):
+    plan = moves_score(table_rows)
+    tracks = [LibTrack(k, f"/m/{k}.wav", k.upper(), "", 120.0, Grid(128, fb, 0, 120.0), []) for k, fb in (("a", 0.25), ("b", 0.40))]
+    conv = convert(plan, tracks)
+    assert conv.ok, [str(n) for n in conv.notes]
+    c = compile_with(conv.set, tracks)
+    assert any(words in i.msg for i in c.issues if i.level == "error"), [str(i) for i in c.issues]

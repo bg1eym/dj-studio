@@ -371,9 +371,25 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment, b_in: float | Non
         notes.append(Note("warn", where, f"主速 {tr.tempo_from:g} → {tr.tempo_to:g} 没写在哪几小节换，按 B 起播时跳变处理"))
         tempo = [[0, tr.tempo_from], [play_at, tr.tempo_to, "step"]]
 
+    # 过渡里的 loop（v4 的 A Loop / B Loop 列）→ 事件；A 多转的小节数（表里 A 小节按时间数，A 自己的小节少走这么多）
+    events: list[list[Any]] = [[float(last), "A.stop"]] if stop else []
+    a_extra, on_at = 0.0, None
+    for r in tr.rows:
+        t = float(r.a_bar - a0)
+        for side, cell in (("A", r.a_loop), ("B", r.b_loop)):
+            if cell == "off":
+                events.append([t, f"{side}.loop_off"])
+            elif cell:
+                events.append([t, f"{side}.loop:{cell}"])
+        if r.a_loop == "off" and on_at is not None:
+            a_extra += t - on_at[0] - on_at[1]
+            on_at = None
+        elif r.a_loop and r.a_loop != "off":
+            on_at = (t, float(r.a_loop) / 4)
+    events.sort(key=lambda e: e[0])
     if not tr.rows[-1].end:
         notes.append(Note("warn", where, "最后一行没标「结束」，A 仍按自己播完处理"))
-    elif not stop and a.last_bar is not None and abs(a.last_bar - (tr.rows[-1].a_bar + 1)) > 2:
+    elif not stop and a.last_bar is not None and abs(a.last_bar - (tr.rows[-1].a_bar - a_extra + 1)) > 2:
         notes.append(Note("warn", where, f"谱上 A 在第 {tr.rows[-1].a_bar} 小节结束，A 实际播到第 {a.last_bar - 1:.1f} 小节才完"
                                          f"（「结束」= A 自己播完，时间线等它停）。要在这里停 A，写「{tr.rows[-1].a_bar} 停」"))
     note = f"打碟谱过渡 {tr.no}：{'长交接' if tr.technique == 'longhand' else '瞬时切换'}，B 从 {bar_beat(b_in)}（小节.拍）进 = A 第 {tr.b1_at_a} 小节"
@@ -387,7 +403,7 @@ def transition(tr: PlanTransition, a: Alignment, b: Alignment, b_in: float | Non
         "bars": bars,
         "params": {"a_end": "stop" if stop else "playout"},
         "lanes": lanes,
-        "events": [[float(last), "A.stop"]] if stop else [],
+        "events": events,
         "tempo": tempo,
         "label": "长交接" if tr.technique == "longhand" else "瞬时切换",
         "note": note,
@@ -478,6 +494,17 @@ def convert(plan: Plan, lib: list[LibTrack], source: str = "", set_id: str | Non
             cues[name] = float(bar + al.k)
         t["cues"] = cues
         t["plan_bar_offset"] = al.k
+        # 独奏时的跳段 / loop（v4「## Loop 与跳段」）：换成本应用的小节号
+        moves = []
+        for m in pt.moves:
+            mv: dict[str, Any] = {"bar": float(m.bar + al.k), "note": m.note}
+            if m.to is not None:
+                mv["to"] = float(m.to + al.k)
+            else:
+                mv.update(loop=m.loop, times=m.times)
+            moves.append(mv)
+        if moves:
+            t["moves"] = moves
         # 谱上写明的 hot cue（Markdown 谱）：照写的设；空着的垫子编译后按 set 放进、出和中间要处理的点
         # （setspec.fill_hot_cues 不动写了的）
         hot = []

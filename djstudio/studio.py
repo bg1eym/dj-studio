@@ -56,6 +56,11 @@ def _heard_at(c: EngineClient, audio: dict[str, Any] | None) -> float | None:
     return round(c.last_status_wall * 1000 + lat, 1)
 
 
+def _has_loops(tr: Any) -> bool:
+    """过渡里打了 loop（A / B）：时间线和这两首自己的小节号不再一一对应。"""
+    return any(".loop" in str(e[1]) for e in tr.events)
+
+
 def _safe_name(name: str) -> str:
     """文件名：去掉文件系统不认的字符（/ : 等），保留中文。"""
     return re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", name).strip() or "set"
@@ -1269,6 +1274,9 @@ class Studio:
             k, bar = int(start[0]), float(start[1])
             if not 0 <= k < len(s.tracks):
                 raise StudioError(f"没有第 {k + 1} 首")
+            # 停在打了 loop 的过渡中途：A 自己的小节和时间线对不上了，从这段过渡的开头重来
+            if k < len(s.transitions) and _has_loops(s.transitions[k]) and bar > s.transitions[k].start:
+                bar = s.transitions[k].start
             return k, max(1.0, bar)
         if from_transition:
             k = from_transition - 1
@@ -1283,7 +1291,9 @@ class Studio:
             return s
         k, bar = self.run_start(s, from_transition, start)
         tracks = [t.model_copy() for t in s.tracks[k:]]
-        tracks[0] = tracks[0].model_copy(update={"start": bar})
+        # 第 1 首从 bar 起：起播前（或 loop 中间）的跳段 / loop 不做了
+        moves = [m for m in tracks[0].moves if m.bar >= bar - 1e-6]
+        tracks[0] = tracks[0].model_copy(update={"start": bar, "moves": moves})
         sid = f"{s.id}-at{k + 1}-{bar:g}" if start is not None else f"{s.id}-from{from_transition}"
         ending = s.ending
         if k == len(s.tracks) - 1 and ending.mode == "fade" and ending.bar is not None and bar > ending.bar:
@@ -1324,18 +1334,30 @@ class Studio:
         if not 0 <= track < n:
             raise StudioError(f"没有第 {track + 1} 首")
         b = math.floor((max(1.0, bar) - 1) * 4 + 1e-6) / 4 + 1  # 落在拍上
+        from .compiler import own_offset
+
+        def spans(i: int) -> dict[str, list[Any]]:
+            return c.loops[i] if i < len(c.loops) else {"A": [], "B": []}
+
         ex_in = c.expanded[track - 1] if 0 < track <= len(c.expanded) else None
         if ex_in is not None:
             tr = s.transitions[track - 1]
-            if tr.b_in - 1e-6 <= b < tr.b_in + (ex_in.bars - ex_in.play_at) - 1e-6:
+            b_end = tr.b_in + own_offset(spans(track - 1)["B"], ex_in.bars) - ex_in.play_at
+            if tr.b_in - 1e-6 <= b < b_end - 1e-6:
+                if _has_loops(tr):  # 打了 loop：时间线和这首的小节不是一一对应，从这段过渡的开头重来
+                    return track - 1, tr.start
                 return track - 1, tr.start + ex_in.play_at + (b - tr.b_in)
         ex_out = c.expanded[track] if track < len(c.expanded) else None
         if ex_out is not None and track + 1 < n:
             tr = s.transitions[track]
             stop = next((float(e[0]) for e in ex_out.events if str(e[1]) == "A.stop"), None)
-            end = tr.start + (stop if stop is not None else ex_out.bars)
+            t_end = stop if stop is not None else ex_out.bars
+            # A 交出去的那一刻，按谱上 A 小节的数法（过渡表里 A 小节按时间数，A 打了 loop 也一样）；没打 loop 时就是 A 自己的小节
+            end = tr.start + t_end
             if not ex_out.a_playout and b >= end:
-                return track + 1, tr.b_in + (end - tr.start - ex_out.play_at) + (b - end)
+                return track + 1, tr.b_in + own_offset(spans(track)["B"], t_end) - ex_out.play_at + (b - end)
+            if _has_loops(tr) and b >= tr.start:  # 点在打了 loop 的过渡里：从这段过渡的开头重来
+                return track, tr.start
         return track, b
 
     def seek(self, track: int, bar: float) -> Progress:
