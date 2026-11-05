@@ -643,3 +643,79 @@ def test_moves_outside_solo_are_errors(table_rows, words):
     assert conv.ok, [str(n) for n in conv.notes]
     c = compile_with(conv.set, tracks)
     assert any(words in i.msg for i in c.issues if i.level == "error"), [str(i) for i in c.issues]
+
+
+# ---------------------------------------------------------------- 网格按谱的第 1 小节对齐（网格跟了反拍 bass）
+
+OVERDRIVE = """# 第 1 小节
+
+## 曲目
+
+| # | 曲名 | 文件名 | 原 BPM | 第 1 小节（秒） |
+|---|---|---|---|---|
+| 1 | A | a.wav | 138 | 0.40 |
+| 2 | Overdrive | b.wav | 138 | 0.147 |
+
+## 过渡 1：A → Overdrive
+
+- 手法：长交接
+- 进场：B 的第 1 小节落在 A 的第 25 小节
+
+| A 小节 | B 小节 | A LOW | B LOW | B 推子 |
+|---|---|---|---|---|
+| 21 | — | 12点 | — | — |
+| 25 | 1 | | 7点 | 5 |
+| 41 结束 | 17 | 7点 | 12点 | 10 |
+"""
+
+
+def overdrive_lib(b_first: float) -> list[LibTrack]:
+    beat = 60 / 138
+    a_dur, b_dur = 0.40 + 44 * 4 * beat, 0.147 + 64 * 4 * beat
+    return [LibTrack("a", "/m/a.wav", "A", "", a_dur, Grid(138, 0.40, 0, a_dur), []),
+            LibTrack("b", "/m/b.wav", "Overdrive", "", b_dur, Grid(138, b_first, 0, b_dur), [])]
+
+
+def test_grid_follows_score_bar1_when_it_is_off_the_beat():
+    """Overdrive：谱上第 1 小节在 0.147s；网格拍点比它早 0.43 拍（跟了前奏的反拍 bass）。
+    以前取整到前一拍，第 1 小节落在曲首前（≈ -0.04s）→「B 的起播小节 1 在曲首之前」；现在按谱把网格挪 +0.187s。"""
+    beat = 60 / 138
+    tracks = overdrive_lib(0.147 - 0.43 * beat)
+    plan = mdplan.parse_text(OVERDRIVE)
+    conv = convert(plan, tracks)
+    assert conv.ok, [str(n) for n in conv.notes]
+    al = conv.alignments[1]
+    assert al.grid_shift_s == pytest.approx(0.43 * beat, abs=1e-4) and al.bar1_s == pytest.approx(0.147, abs=1e-4)
+    assert any(n.level == "warn" and "按谱把网格挪到第 1 小节上" in n.msg and "+0.43 拍" in n.msg for n in conv.notes)
+    assert not any("可能对到了别的拍" in n.msg for n in conv.notes)
+    # 网格写回以后（一键流程做的事）编译出来 B 从 0.147s 起播；照旧网格编译，B 的第 1 小节在 -0.04s——
+    # 早了 0.43 拍，落在反拍 bass 上（以前还会报「B 的起播小节 1 在曲首之前」）
+    shifted = [tracks[0], LibTrack("b", "/m/b.wav", "Overdrive", "", tracks[1].duration,
+                                   Grid(138, 0.147, 0, tracks[1].duration), [])]
+    good = compile_with(conv.set, shifted)
+    assert good.ok and good.tracks[1].grid.bar_time(1) == pytest.approx(0.147, abs=1e-4)
+    assert compile_with(conv.set, tracks).tracks[1].grid.bar_time(1) == pytest.approx(0.147 - 0.43 * beat, abs=1e-4)
+    # 网格挪好以后再转一次：不再挪
+    again = convert(plan, shifted)
+    assert again.ok and again.alignments[1].grid_shift_s == 0
+
+
+def test_grid_not_shifted_without_score_bar1():
+    """谱上没写第 1 小节（秒）：照旧用网格自己的第 1 小节，不挪。"""
+    beat = 60 / 138
+    plan = mdplan.parse_text(OVERDRIVE.replace("| 0.147 |", "| |"))
+    conv = convert(plan, overdrive_lib(0.147 - 0.43 * beat))
+    assert conv.ok and conv.alignments[1].grid_shift_s == 0
+
+
+def test_bar1_slightly_before_the_file_start_is_fine():
+    """第 1 小节可以在曲首前一点点（≥ -50ms，和 grid.py 的 BAR1_TOL 一样）：Mixxx 定位到曲首之前时读盘补静音。"""
+    beat = 60 / 138
+    plan = mdplan.parse_text(OVERDRIVE.replace("| 0.147 |", "| 0.000 |"))
+    for first, ok in ((-0.019, True), (-0.049, True), (-0.06, False)):
+        tracks = overdrive_lib(first % beat)
+        conv = convert(plan, tracks)
+        s = conv.set
+        assert s is not None, [str(n) for n in conv.notes]
+        bad = [i for i in compile_with(s, tracks).issues if "曲首之前" in i.msg]
+        assert (not bad) == ok, (first, [str(i) for i in bad])

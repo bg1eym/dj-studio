@@ -161,7 +161,7 @@ function setValue(group, key, value) {
         return;
       case "playposition": // slotControlSeek → doSeekFractional；暂停时不做相位调整
         if (t) {
-          d.pos = Math.max(0, Math.min(t.dur, value * t.dur));
+          d.pos = Math.min(t.dur, value * t.dur); // 只截曲尾（enginebuffer.cpp:1353-1354）；曲首之前读盘补静音
           if (d.playing && getValue(group, "quantize")) d.phaseSyncPending = true;
           publishPlaypos(d);
         }

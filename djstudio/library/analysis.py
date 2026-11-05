@@ -33,7 +33,7 @@ WAVE_FULL_RMS = 0.5 * 2 ** 0.5
 WAVE_SHARES = {"low": 1.0, "mid": 0.48, "high": 0.48}
 # 网格估计的版本：2 = 节拍搜索不再被第一步（自相关）的估计困住。1 只在第一步估计的 ±1% 里找，第一步偏了 1% 以上
 # 就找不回来，结果停在搜索范围的边上（How You Move 138 BPM 被估成 137.00）。旧版本的分析会重做
-GRID_VERSION = 2
+GRID_VERSION = 3  # 3：网格落在反拍 bass 上时换到半拍外的 kick（kick_onset）
 TEMPO_SPAN = 0.04  # 第一步估计上下各 4% 都搜
 WAVEFORM_VERSION = 2  # 2 = 三频段（Denon 分界、按满幅标定）；1 = 旧的三段各自拉满
 
@@ -399,6 +399,71 @@ def kick_phase(x: np.ndarray, sr: int, bpm: float, first_beat: float) -> tuple[f
     return float(tj / beat), sharp
 
 
+# ---------------------------------------------------------------- 网格线放在 kick 上，不放在反拍 bass 上
+
+HALF_SWEEP_MARGIN = 2.0  # 半拍外的「音高下扫分」比网格那一拍高出这么多（能量比约 7 倍）才换过去
+HALF_EXCERPT_S = 120.0  # 只看曲子中间这么长（够了，也快）
+
+
+def _band_power(X: np.ndarray, nfft: int, n: int, sr: int, lo: float, hi: float) -> np.ndarray:
+    f = np.fft.rfftfreq(nfft, 1.0 / sr)
+    Z = np.zeros(nfft, dtype=complex)
+    Z[: len(X)] = X * ((f >= lo) & (f <= hi))
+    Z[1: nfft // 2] *= 2
+    return np.abs(np.fft.ifft(Z)[:n]) ** 2
+
+
+def sweep_score(x: np.ndarray, sr: int, bpm: float, onset: float) -> float:
+    """「像不像 kick」：kick 的音高在起音后几十毫秒里从一百多 Hz 往下扫到五十 Hz 左右，bass 音高不变。
+    每拍在起音后 0–15ms 和 40–100ms 各量一次 90–200Hz 对 35–70Hz 的能量比，前者除以后者取对数（有 kick 的拍取平均）。
+    onset = 网格里起音的时刻（秒）。kick 上一般 +5 以上，反拍 bass 上 +1 左右。"""
+    n = len(x)
+    nfft = 1 << (n - 1).bit_length()
+    X = np.fft.rfft(x, nfft)
+    hi, lo = _band_power(X, nfft, n, sr, 90, 200), _band_power(X, nfft, n, sr, 35, 70)
+    beat = 60.0 / bpm
+    early, late = [], []
+    for k in range(int(np.ceil(-onset / beat)) + 1, int((n / sr - onset) / beat) - 1):
+        c = int((onset + k * beat) * sr)
+        a0, a1, b0, b1 = c, c + int(0.015 * sr), c + int(0.04 * sr), c + int(0.10 * sr)
+        if a0 < 0 or b1 > n:
+            continue
+        early.append((hi[a0:a1].mean(), lo[a0:a1].mean()))
+        late.append((hi[b0:b1].mean(), lo[b0:b1].mean()))
+    if len(early) < 16:
+        return 0.0
+    e, l_ = np.array(early), np.array(late)
+    sel = e.sum(axis=1) > np.percentile(e.sum(axis=1), 40)  # 有 kick 的拍
+    r_early = e[sel, 0].mean() / (e[sel, 1].mean() + 1e-12)
+    r_late = l_[sel, 0].mean() / (l_[sel, 1].mean() + 1e-12)
+    return float(np.log((r_early + 1e-9) / (r_late + 1e-9)))
+
+
+def kick_onset(x: np.ndarray, sr: int, bpm: float, first_raw: float) -> tuple[float, float, dict[str, Any]]:
+    """网格线放到 kick 起音上：(第一拍秒数（模一拍）, 显著度, 诊断)。
+    粗估的拍相位可能落在反拍 bass 上（前奏 kick + 反拍 bass 的曲子，bass 的起音比 kick 还响），kick_phase 只在线前后几十毫秒里找，
+    找不回半拍外真正的 kick——那就把网格那一拍和半拍外各量一次「像不像 kick」（sweep_score），半拍外明显更像（而且有起音）才换过去。"""
+    beat = 60.0 / bpm
+    n = len(x)
+    seg_n = int(min(n, HALF_EXCERPT_S * sr))
+    s0 = (n - seg_n) // 2
+    seg = x[s0:s0 + seg_n]
+    t0 = s0 / sr
+    kp, sharp = kick_phase(x, sr, bpm, first_raw)
+    here = first_raw + kp * beat
+    alt_raw = first_raw + beat / 2
+    kp2, sharp2 = kick_phase(seg, sr, bpm, alt_raw - t0)
+    alt = alt_raw + kp2 * beat
+    a = sweep_score(seg, sr, bpm, (here - t0) % beat)
+    b = sweep_score(seg, sr, bpm, (alt - t0) % beat)
+    moved = sharp2 >= 1.5 and b - a > HALF_SWEEP_MARGIN
+    diag = {"here": round(a, 2), "half": round(b, 2), "moved": bool(moved)}
+    if moved:
+        kp3, sharp3 = kick_phase(x, sr, bpm, alt_raw)  # 整首重新找一次起音
+        return (alt_raw + kp3 * beat) % beat, sharp3, diag
+    return here % beat, sharp, diag
+
+
 # ---------------------------------------------------------------- 小节特征与段落
 
 def beat_features(fr: Frames, grid: Grid) -> np.ndarray:
@@ -512,8 +577,8 @@ def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = Non
     diag: dict[str, Any] = {}
     own_bpm, own_first_raw, own_conf = estimate_grid(fr, diag=diag)
     # 精修：把自估网格线放到 kick 起音点上（与其他曲子同一标准）
-    own_kick, own_kick_sharp = kick_phase(x, sr, own_bpm, own_first_raw)
-    own_first = (own_first_raw + own_kick * 60.0 / own_bpm) % (60.0 / own_bpm)
+    own_first, own_kick_sharp, half = kick_onset(x, sr, own_bpm, own_first_raw)
+    diag["half_beat"] = half
     if mixxx_grid and mixxx_grid[0] > 0:  # 给定的网格：Mixxx 的，或者手动定的（grid_source = "manual"），或者以前按谱定的
         bpm, first, src = mixxx_grid[0], mixxx_grid[1], grid_source
     else:
@@ -523,8 +588,9 @@ def analyze(x: np.ndarray, sr: int, mixxx_grid: tuple[float, float] | None = Non
         score_check = bpm_check(fr, float(bpm_hint), own_bpm)
         if score_check["fits"] and src not in ("mixxx", "manual"):
             sb, sf_raw = score_check["fit_bpm"], score_check["first_beat"]
-            sk, _ = kick_phase(x, sr, sb, sf_raw)  # 和自估网格一样，线放在 kick 起音点上
-            bpm, first, src = sb, (sf_raw + sk * 60.0 / sb) % (60.0 / sb), "score"
+            sf, _, half = kick_onset(x, sr, sb, sf_raw)  # 和自估网格一样，线放在 kick 起音点上
+            score_check["half_beat"] = half
+            bpm, first, src = sb, sf, "score"
     dur = len(x) / sr
     g = Grid(bpm, first, 0, dur)
     feat = beat_features(fr, g)

@@ -778,6 +778,10 @@ class Studio:
             gc = a.get("grid_check")
             if not m or not m.analyzed or not gc or gc.get("ok"):
                 continue
+            if t.grid_from == "score":
+                # 网格是按谱的第 1 小节放的（一键流程第 5 步按谱挪过）：自估网格（可能跟着前奏的反拍 bass）不能覆盖它。
+                # 只是在网页上确认过小节线的不算：那时 Mixxx 的网格可能本来就在反拍上，照样要校正
+                continue
             own = a["own_grid"]
             # BPM 一致（比值 ≈1）就保留 Mixxx 的 BPM 只换相位；Mixxx 判错倍数时整个换成自估
             bpm = m.bpm if abs(gc["ratio"] - 1) < 0.01 else own["bpm"]
@@ -1173,6 +1177,38 @@ class Studio:
         #   小节相位和这里自动估的不同时，按谱写回曲库（确认过的小节线），重新切段落后再转一次
         step("生成 set")
         conv = convert(plan, self.lib_tracks(ids), source=path.name, keylock_note=not self.builtin)
+        # 5a 谱的第 1 小节离网格拍 0.2 拍以上（网格多半跟了前奏的反拍 bass）→ 按谱把网格挪到第 1 小节上，写回去再转一次：
+        #    内置引擎写进曲库（这首的网格，来源「按谱」，以后重新分析也按它）；连 Mixxx 时写进 Mixxx 并锁定（先备份）
+        shifts = [(pt, lt, al) for pt, lt, al in zip(plan.tracks, conv.matches, conv.alignments)
+                  if lt and al and al.grid_shift_s and pt.bar1_s is not None]
+        if shifts:
+            job.say(f"{len(shifts)} 首的网格离谱的第 1 小节差 0.2 拍以上，按谱把网格挪到第 1 小节上")
+            mx: dict[str, Any] = {}
+            if not self.builtin:
+                self._ensure_quit(job)
+                bk = self.mixxx.backup(self.cfg.home / "backups")
+                job.say(f"  （先备份了 Mixxx 曲库 → {bk.name}）")
+                mx = self._mixxx_tracks([t for _, lt, _ in shifts if (t := self.store.get(lt.id))])
+            for pt, lt, al in shifts:
+                t = self.store.get(lt.id)
+                bpm = lt.grid.bpm
+                first = pt.bar1_s % (60.0 / bpm)
+                was = " 曲库页手动定的网格也按谱挪了" if t and t.grid_from == "manual" else ""
+                if not self.builtin:
+                    m = mx.get(lt.id)
+                    if not m or not m.grid:
+                        raise StudioError(f"#{pt.no:02d} {pt.title}：没有 Mixxx 网格，没法按谱挪")
+                    bpm = m.grid.bpm
+                    first = pt.bar1_s % (60.0 / bpm)
+                    self.mixxx.write_grid(m.id, bpm, first)
+                    was += "（Mixxx 里已锁定）"
+                # 曲库里也记成「按谱」的网格：以后重新分析按它切小节；连 Mixxx 时「网格核对」不拿自估网格覆盖它
+                self.store.update(lt.id, grid_bpm=bpm, grid_first=round(first, 5), grid_from="score",
+                                  bar1=al.bar1_s, bar1_confirmed=True)
+                self.library.enqueue(lt.id)
+                job.say(f"  #{pt.no:02d} {pt.title}：挪 {al.grid_shift_s * 1000:+.0f}ms → 第一拍 {first:.3f}s，{bpm:.3f} BPM{was}")
+            self._wait_analysis(job, 0.1, 0.5, "按谱挪过网格，重新切小节")
+            conv = convert(plan, self.lib_tracks(ids), source=path.name, keylock_note=not self.builtin)
         moved = []
         for pt, lt, al in zip(plan.tracks, conv.matches, conv.alignments):
             if lt and al and al.rephase:

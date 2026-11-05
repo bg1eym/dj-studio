@@ -114,6 +114,10 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
 - iCloud「仅云端」文件会让读取阻塞 → 代码和托管曲库都放在 iCloud 之外；导入时会标出云端文件。
 - Mixxx 网格可能误判（2/3、1.5 倍），或整条放在反拍上（真曲实测 5 首里 3 首）→ 分析时和自估网格比对，曲库页标「网格存疑」，set 校验报错；「校正网格」把自估网格写进 mixxxdb 并 `bpm_lock`。自估网格的线放在 kick 起音点上（`analysis.kick_phase`）。
 - 自估速度（`analysis.estimate_grid`）：自相关粗估 → 在 ±4% 里用整首 kick 最多的 8 个 30 秒窗口找（0.05 BPM 一步，落在边上再往外扩一次）→ 整首 ±0.15 细找 → 逐拍线性拟合。以前细找只在粗估 ±1% 里，粗估偏多了就卡在范围边上（How You Move 138 估成 137.00）。改算法时加 `GRID_VERSION`，旧分析会自动重做。
+- 网格按谱的第 1 小节（`convert.align` → `Alignment.grid_shift_s`；一键流程第 5a 步）：谱上写了第 1 小节（秒）、离网格拍 0.2 拍以上
+  （网格跟了前奏的反拍 bass）→ 网格整体挪到谱的第 1 小节上（BPM 不变），记成这首「按谱」的网格（`grid_from = "score"`），
+  连 Mixxx 时再写进 Mixxx 并锁定（先备份），重新切小节后再转一次。`grid_fix_plan` 不动「按谱」的网格。
+  自估网格本身：`analysis.kick_onset` 在网格那一拍和半拍外比「音高往下扫」（kick 有、bass 没有），半拍外明显更像 kick 才换。
 - 跳段与 loop（打碟谱规范 v4）：独奏时的 `tracks[].moves` → 编译成每首的 plan（`Compiled.plans`，拍），conductor 每装好一首发
   `{"t":"plan"}`，DJStudio.js（0.4.5）的 `runPlans` 到那一拍 `beatjump` / `beatloop_activate`，数跳回 loop 头的次数，转满就 `reloop_toggle`。
   过渡里的 loop 是事件；程序开始后每一边的时间线按整拍补上 loop 跳回去的距离（`sideTl`），旋钮、B 起播、相位检查都照常按时间走。

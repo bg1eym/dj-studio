@@ -91,6 +91,7 @@ class Alignment:
     rephase: bool  # 小节相位和曲库里的不同
     cue_dev: list[tuple[float, str, float | None]] = field(default_factory=list)  # (谱小节, 标签, 偏差小节)
     last_bar: float | None = None  # 曲子结束在谱上的第几小节（文件末尾的位置）
+    grid_shift_s: float = 0.0  # 谱的第 1 小节离网格拍超过 WRONG_BEAT_TOL：网格整体挪这么多秒，拍相位按谱
 
 
 @dataclass
@@ -239,6 +240,16 @@ def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
     anchor = pt.bar1_s if pt.bar1_s is not None else g.bar_time(1)
     jf = g.time_beat(anchor)
     j = round(jf)
+    grid_shift = 0.0
+    if pt.bar1_s is not None and abs(jf - j) > WRONG_BEAT_TOL:
+        # 谱的第 1 小节 = 你在 Engine DJ 里打 Hot Cue 1 的位置，以它为准：网格拍离它 0.2 拍以上，多半是网格跟了反拍
+        # （前奏的反拍 bass），不是谱错。网格整体挪过去（BPM 不变），一键流程把挪过的网格写回曲库 / Mixxx 再转一次
+        grid_shift = (jf - j) * g.beat_len
+        notes.append(Note("warn", where, f"网格拍点和谱的第 1 小节（{anchor:.3f}s）差 {jf - j:+.2f} 拍"
+                                         f"（{grid_shift * 1000:+.0f}ms）：按谱把网格挪到第 1 小节上"))
+        g = Grid(g.bpm, g.first_beat + grid_shift, g.downbeat, g.duration)
+        jf = g.time_beat(anchor)
+        j = round(jf)
     res = (jf - j) * g.beat_len * 1000
     if abs(jf - j) > WRONG_BEAT_TOL:
         notes.append(Note("warn", where, f"谱的第 1 小节（{anchor:.3f}s）离最近的网格拍 {res:+.0f}ms，"
@@ -247,7 +258,7 @@ def align(pt: PlanTrack, lt: LibTrack) -> tuple[Alignment | None, list[Note]]:
     g2 = Grid(g.bpm, g.first_beat, db, g.duration)
     k = round(g2.beat_bar(j)) - 1
     al = Alignment(db, k, round(res, 1), round(g2.bar_time(1), 5), db != g.downbeat,
-                   last_bar=round(g2.last_bar - k, 2) if g.duration else None)
+                   last_bar=round(g2.last_bar - k, 2) if g.duration else None, grid_shift_s=round(grid_shift, 5))
     if al.rephase:
         notes.append(Note("info", where, f"小节线按谱定（和原来自动估的差 {(db - g.downbeat) % 4} 拍）"))
     # 段落核对：谱上的 breakdown / drop 小节 vs 本应用切出的段落起点

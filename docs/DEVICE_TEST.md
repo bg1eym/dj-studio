@@ -69,6 +69,7 @@ Mixxx 的行为已经按 2.5.6 源码逐条核对过（见 [MIXXX_NOTES.md](MIXX
 | 谱上 Filter「左 / 右 N 点」= Mixxx QuickEffect 滤波旋钮同一位置 | 位置对位置；两边滤波器的截止频率曲线不同 | 听「左 9 点（切一半）」是否差不多 |
 | Main FX Reverb Wet/Dry 1/3 = Mixxx 效果单元 2 的 mix 0.33 | 位置对位置；混响本身不同 | 听尾巴 |
 | #06 Key Lock 关（音高 +0.8 半音） | Mixxx keylock 的延迟会让叠放出双击（测试台实测 17–29ms） | 觉得音高不能接受就把 set 的 keylock 打开，同时听过渡里有没有双击 |
+| 自估网格的半拍检查（`kick_onset`）在真曲上不会把对的网格换到反拍 | 只在合成曲上测过（kick 音高往下扫 +6 ～ +8，反拍 bass +0.5 ～ +1，门槛差 2）；60 分钟 set 的 18 首没有音频 | 曲库页看每首的网格线是不是压在 kick 上，尤其 Overdrive、Sanctum、Stigma、Fourth Dimension、High Street、Pria；The Realm、Pria、Rave On Time 反拍上也有 kick，挪完以后看一眼是不是压在主 kick 上 |
 | Mac 上 20 倍速录 MP3 读盘跟得上（录音里没有缺口） | Linux 4 核上 20 / 60 倍速 0 次；Mac 的 CoreAudio 解码速度没量过 | 录一次整套 set，看网页上是不是「20 倍速」录完（跟不上会自动放慢重录并说明）；听一遍录音有没有掉音 |
 | Mixxx ReplayGain 开着 | Mixxx 默认开；关着时两首满音量叠加会削波 | 体检「ReplayGain」一项 |
 | 按谱找曲子能读到「下载 / 桌面 / 文稿 / 音乐」 | macOS 的文件夹权限（TCC）：从终端启动时第一次会弹窗问；没核对过 App 方式启动 | 放进打碟谱后看「在电脑里找到 N 首」 |

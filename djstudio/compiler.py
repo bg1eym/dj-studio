@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .grid import BEATS_PER_BAR, Grid
+from .grid import BAR1_TOL, BEATS_PER_BAR, Grid
 from .setfile import SetFile, SetTrack, Transition
 from .techniques import Expanded, TechniqueError, expand
 
@@ -374,8 +374,10 @@ def compile_set(s: SetFile, resolve: Callable[[SetTrack], TrackInfo | None], res
         a_end_bar = tr.start + own_offset(spans["A"], ex.bars)
         if not ex.a_playout and a_end_bar > a.grid.last_bar + 0.25:
             err(where, f"过渡要用到 A 的第 {a_end_bar:g} 小节，但 A 只有 {a.grid.last_bar:.1f} 小节")
-        if b.grid.bar_time(tr.b_in) < -0.01:
-            err(where, f"B 的起播小节 {tr.b_in:g} 在曲首之前")
+        # 第 1 小节 = 起点 ≥ -BAR1_TOL 的第一个小节线（grid.py），所以起播点可以在曲首前一点点：
+        # Mixxx 定位到曲首之前不截到 0（enginebuffer.cpp:1353-1354 只截曲尾），读盘时那一段补静音（cachingreader.cpp:352-372）
+        if b.grid.bar_time(tr.b_in) < -BAR1_TOL - 1e-6:
+            err(where, f"B 的起播小节 {tr.b_in:g} 在曲首之前（{b.grid.bar_time(tr.b_in):.3f}s）")
         b_est = tr.b_in + own_offset(spans["B"], ex.bars) - ex.play_at
         if b_est > b.grid.last_bar:
             err(where, f"过渡结束时 B 已经播到第 {b_est:g} 小节，超过曲末 {b.grid.last_bar:.1f}")

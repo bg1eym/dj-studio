@@ -806,3 +806,141 @@ def test_grid_follows_the_score_bpm_when_the_kicks_fit(tmp_path, monkeypatch):
     job2 = studio.auto_prepare()
     job2 = wait_job(job2, 120)
     assert job2.state == "ok" and "把 kick 对一遍" not in "\n".join(job2.log)
+
+
+def test_one_click_moves_the_grid_onto_the_score_bar1(tmp_path, monkeypatch):
+    """网格跟了反拍（这里用曲库页手动定一个偏 0.43 拍的网格来造）：一键流程第 5 步按谱的第 1 小节把网格挪过去，
+    记成「按谱」的网格，再转一次，0 错误；再跑一次就不用再挪。"""
+    def boom(*a, **k):
+        raise AssertionError("内置引擎不该碰 Mixxx")
+
+    for name in ("mixxx_running", "launch_mixxx", "quit_mixxx"):
+        monkeypatch.setattr(process, name, boom)
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a.wav", "b.wav"):
+        bpm, fb, db = SPECS[name]
+        write_wav(src / name, techno(bpm, fb, db, LAYOUT, seed=hash(name) % 100))
+    studio = Studio(Config(home=tmp_path / "home", library=tmp_path / "Music" / "DJStudio", mixxx_dir=tmp_path / "no-mixxx",
+                           browse_roots=[tmp_path], find_dirs=[src]), link_factory=boom)
+    (ba, fa, da), (bb, fb_, db_) = SPECS["a.wav"], SPECS["b.wav"]
+    bar1_b = fb_ + db_ * 60 / bb
+    score = f"""# 第 1 小节
+
+## 曲目
+
+| # | 曲名 | 文件名 | 原 BPM | 播放 BPM | 第 1 小节（秒） |
+|---|---|---|---|---|---|
+| 1 | A | a.wav | {ba:g} | {ba:g} | {fa + da * 60 / ba:.4f} |
+| 2 | B | b.wav | {bb:g} | {ba:g} | {bar1_b:.4f} |
+
+## 过渡 1：A → B
+
+- 手法：长交接
+- 进场：B 的第 1 小节落在 A 的第 25 小节
+- 主速：{ba:g}
+
+| A 小节 | B 小节 | A LOW | B LOW | B 推子 |
+|---|---|---|---|---|
+| 21 | — | 12点 | — | — |
+| 25 | 1 | | 7点 | 5 |
+| 41 停 | 17 | 7点 | 12点 | 10 |
+"""
+    studio.plans_dir.mkdir(parents=True, exist_ok=True)
+    (studio.plans_dir / "bar1.md").write_text(score, encoding="utf-8")
+    studio.find_plan_tracks()
+    t0 = time.time()
+    while (studio.finder.get("state") == "running" or not studio.job) and time.time() - t0 < 30:
+        time.sleep(0.1)
+    job = wait_job(studio.job, 120)
+    assert job.state == "ok", "\n".join(job.log)
+    assert "按谱把网格挪" not in "\n".join(job.log)  # 自估网格本来就在 kick 上
+    b = next(t for t in studio.store.all() if t.path.endswith("b.wav"))
+    beat = 60 / bb
+    studio.store.update(b.id, grid_bpm=bb, grid_first=round((fb_ - 0.43 * beat) % beat, 5), grid_from="manual")
+
+    job = wait_job(studio.auto_prepare(), 120)
+    log = "\n".join(job.log)
+    assert job.state == "ok", log
+    assert "1 首的网格离谱的第 1 小节差 0.2 拍以上，按谱把网格挪到第 1 小节上" in log, log
+    assert "#02 B：挪 +198ms" in log and "曲库页手动定的网格也按谱挪了" in log, log
+    b = studio.store.get(b.id)
+    assert b.grid_from == "score" and b.bar1_confirmed
+    assert abs(((b.grid_first - fb_) / beat + 0.5) % 1 - 0.5) * beat < 0.001  # 第一拍回到 kick 上
+    assert b.analysis["grid_source"] == "score"
+
+    job = wait_job(studio.auto_prepare(), 120)
+    assert job.state == "ok" and "按谱把网格挪" not in "\n".join(job.log)
+
+
+def test_grid_check_keeps_score_placed_grids(env):
+    """连 Mixxx 时的「网格核对」：按谱的第 1 小节放的网格（「按谱」）不拿自估网格覆盖；只在网页上确认过小节线的照样校正。"""
+    studio, src, state = env
+    studio.library.import_paths([str(src)])
+    assert studio.library.wait_idle(60)
+    by_name = {t.path.split("/")[-1]: t for t in studio.store.all()}
+    db = studio.cfg.mixxx_db
+    for name, t in by_name.items():
+        bpm, fb, _ = SPECS[name]
+        off = fb + 0.5 * 60 / bpm if name in ("b.wav", "c.wav") else fb  # b、c 的 Mixxx 网格偏半拍
+        fake_mixxxdb.add_track(db, t.path, t.duration, bpm, off, samplerate=22050, title=name)
+    for t in by_name.values():
+        studio.library.enqueue(t.id)
+    assert studio.library.wait_idle(60)
+    b, c = by_name["b.wav"], by_name["c.wav"]
+    assert {p["title"] for p in studio.grid_fix_plan()} == {b.display, c.display}
+    studio.store.update(b.id, grid_from="score", grid_bpm=SPECS["b.wav"][0], grid_first=SPECS["b.wav"][1] + 0.5 * 60 / 130,
+                        bar1_confirmed=True)
+    studio.store.update(c.id, bar1_confirmed=True)
+    assert [p["title"] for p in studio.grid_fix_plan()] == [c.display]
+
+
+def _kick_and_offbeat_bass(bass_gain: float, bpm: float = 138.0, fb: float = 0.147, seconds: float = 150.0):
+    """kick 在拍上（音高从 155Hz 往下扫到 45Hz、带一点鼓槌声），反拍上一个方波 bass（音高不变、起音很陡）+ hi-hat。"""
+    import numpy as np
+
+    sr = 22050
+    rng = np.random.default_rng(1)
+    n = int(seconds * sr)
+    x = np.zeros(n)
+    beat = 60 / bpm
+    tt = np.arange(int(0.3 * sr)) / sr
+    kick = 0.8 * np.sin(2 * np.pi * np.cumsum(45 + 110 * np.exp(-tt / 0.025)) / sr) * np.exp(-tt / 0.16)
+    click = rng.standard_normal(int(0.006 * sr)) * 0.15
+    bt = np.arange(int(0.22 * sr)) / sr
+    bass = bass_gain * np.sign(np.sin(2 * np.pi * 48 * bt)) * 0.5 * np.minimum(1, bt / 0.002) * np.exp(-bt / 0.09)
+    ht = np.arange(int(0.04 * sr)) / sr
+    hat = rng.standard_normal(len(ht)) * np.exp(-ht / 0.01) * 0.12
+    k = 0
+    while fb + (k + 1) * beat < seconds:
+        for sig, at in ((kick, k), (click, k), (bass, k + 0.5), (hat, k + 0.5)):
+            i = int((fb + at * beat) * sr)
+            x[i:i + len(sig)] += sig[: n - i]
+        k += 1
+    return (x / np.abs(x).max() * 0.8).astype(np.float32)
+
+
+@pytest.mark.parametrize("bass_gain,moved", [(0.4, False), (1.2, False), (2.0, True), (3.0, True)])
+def test_own_grid_on_the_kick_not_the_offbeat_bass(bass_gain, moved):
+    """前奏 kick + 反拍 bass、bass 的起音比 kick 还响：粗估的拍相位落在 bass 上（以前网格就停在那，离 kick 半拍）。
+    kick_onset 在网格那一拍和半拍外各量一次「音高往下扫」（kick 有、bass 没有），半拍外明显更像 kick 才换过去。"""
+    from djstudio.library import analysis as A
+
+    x = _kick_and_offbeat_bass(bass_gain)
+    res, _ = A.analyze(x, 22050)
+    og = res["own_grid"]
+    beat = 60 / 138
+    off_ms = (((og["first_beat"] - 0.147) / beat + 0.5) % 1 - 0.5) * beat * 1000
+    assert abs(off_ms) < 15, (off_ms, og["half_beat"])
+    assert og["half_beat"]["moved"] is moved, og["half_beat"]
+
+
+def test_half_beat_check_leaves_ordinary_tracks_alone():
+    from djstudio.library import analysis as A
+
+    for bpm, fb, db, seed in ((128.0, 0.25, 0, 3), (132.0, 0.10, 1, 5)):
+        res, _ = A.analyze(techno(bpm, fb, db, (("intro", 8), ("groove", 48), ("breakdown", 8), ("drop", 32), ("outro", 8)),
+                                  seed=seed), 22050)
+        og = res["own_grid"]
+        assert not og["half_beat"]["moved"] and og["half_beat"]["here"] - og["half_beat"]["half"] > 4, og["half_beat"]
