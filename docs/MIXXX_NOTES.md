@@ -24,7 +24,7 @@
 | | 结论 | 源码 |
 |---|---|---|
 | ❌ | **`playposition` 每秒只更新 15 次**（约 67ms 一次）。原来用它每 20ms 算拍位，最多滞后 0.14 拍（128 BPM）。 | `engine/enginebuffer.cpp:53, 1475-1481` |
-| ✅ | `beat_distance` 在每个音频 buffer 的 `postProcess` 里更新。现在拍位 = `playposition` 估出的整数拍 + `beat_distance` 小数部分。 | `enginebuffer.cpp:1389-1399`；`controls/bpmcontrol.cpp:1244` |
+| ✅ | `beat_distance` 在每个音频 buffer 的 `postProcess` 里更新。现在拍位 = `playposition` 估出的整数拍 + `beat_distance` 小数部分。后果：loop 跳回 loop 头的那一刻 `beat_distance` 已经是 loop 头的（≈ 0.02），`playposition` 还在 loop 尾前面，拼出来的拍号是「loop 尾 + 0.02」→ 写在 loop 尾那一拍的动作会在第一遍就成立。0.4.6 起 `runPlans` / `runProg` 在 loop 没转完时不做后面的动作（模拟器两种时钟复现并验证；真引擎待验证）。 | `enginebuffer.cpp:1389-1399`；`controls/bpmcontrol.cpp:1244` |
 | ✅ | 写 `playposition` = 按比例 seek。**暂停时 seek 不做相位调整**（`processSeek` 里 `!paused && SEEK_PHASE`），所以 B 能停在 `b_in` 的精确整拍上。 | `enginebuffer.cpp:158-162, 698, 1305-1370` |
 | ✅ | **quantize 开着时按 play 会请求相位同步**：引擎把这一 deck 对齐到另一个正在播的 deck（`getBeatMatchPosition`，就近 ±0.5 拍；对方已过拍点 7/8 以上时对齐上一拍）。B 起播因此是采样级对齐，不再由脚本自己 seek 补偿。 | `enginebuffer.cpp:776-791`；`bpmcontrol.cpp:41, 877-1030`；`sync/enginesync.cpp:516-560`（同步目标 = 另一个在播 deck） |
 | ✅ | `beatsync_phase` 走同一个相位同步。 | `bpmcontrol.cpp` |

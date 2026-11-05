@@ -171,3 +171,19 @@ def test_track_gain_db_targets_loudness_and_limits_peak():
     assert track_gain_db({"loudness": -8.44, "peak": 1.0739}) == -5.56
     assert track_gain_db({"loudness": -20.0, "peak": 0.5}) == round(-1 - 20 * __import__("math").log10(0.5), 2)  # 峰值限制
     assert track_gain_db({}) is None and track_gain_db({"loudness": -70.0}) is None
+
+
+def test_lead_number_does_not_beat_the_name():
+    """别的 set 的 U 盘目录（文件名带编号）不能压过名字一样的原文件：60 分钟 set v1 里 #08 Kali 对到了「08 … Overdrive」。
+    名字一样的有几份时，编号和曲序一样的那份优先。"""
+    pt = PlanTrack(8, "Kali — Charlotte de Witte", 138, 138, False, None, None, None, "Charlotte de Witte - Kali.mp3")
+    plan = Plan("测试谱", [pt], [])
+    other = lib_track("x", 138, 0.1, 0, 408.0, "08 Charlotte de Witte - Overdrive.mp3")
+    orig = lib_track("k", 138, 0.6, 0, 421.5, "Charlotte de Witte - Kali.mp3")
+    m, notes = match_tracks(plan, [other, orig])
+    assert m[0].id == "k" and not notes
+    copy = lib_track("c", 138, 0.6, 0, 421.5, "08 Charlotte de Witte - Kali.mp3")
+    m, _ = match_tracks(plan, [other, orig, copy])
+    assert m[0].id == "c"
+    m, notes = match_tracks(plan, [other])  # 只剩一首像的：照样对上，但提示
+    assert m[0].id == "x" and notes and notes[0].level == "warn" and "名字只像" in notes[0].msg

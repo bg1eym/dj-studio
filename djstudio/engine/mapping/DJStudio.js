@@ -23,7 +23,7 @@
 
 var DJStudio = {};
 
-DJStudio.VERSION = "0.4.5";
+DJStudio.VERSION = "0.4.6";
 DJStudio.TICK_MS = 20;
 DJStudio.STATUS_EVERY = 5; // 5 × 20ms = 100ms
 DJStudio.CHUNK = 200;
@@ -512,6 +512,9 @@ DJStudio.runProg = function () {
     var p = pr.p;
     pr.tl = DJStudio.progTl(pr);
     if (pr.st === "armed") {
+        // A 的独奏 loop 还没转完：不开始（loop 尾 = 过渡开始的那一小节时，第一遍到 loop 尾那一刻拍号会多算一点点，见 runPlans）
+        var pa = DJStudio.plans[p.a.deck];
+        if (pa && pa.looping && pa.seq === DJStudio.loadSeq[p.a.deck]) { return; }
         if (pr.tl < 0) { return; }
         pr.st = "running";
         DJStudio.send({ t: "ev", e: "started", id: p.id, tl: Math.round(pr.tl * 1000) / 1000 });
@@ -582,6 +585,10 @@ DJStudio.runPlans = function () {
         if (!pl || pl.seq !== DJStudio.loadSeq[d] || !DJStudio.playing(d)) { continue; }
         var g = DJStudio.ch(d);
         var b = DJStudio.beatNow(d, pl.grid);
+        // 独奏 loop 还没转完时，后面的动作都不做：Mixxx 跳回 loop 头的那一刻，beat_distance 已经是 loop 头的，
+        // playposition 还停在 loop 尾前面（最多滞后约 67ms），拼出来的拍号会比 loop 尾多一点点——
+        // 写在 loop 尾那一小节的跳段会在第一遍就做（而且是在 loop 里跳 = 把 loop 挪走）。
+        var looping = false;
         for (var i = 0; i < pl.acts.length; i++) {
             var a = pl.acts[i];
             if (a.done) { continue; }
@@ -592,9 +599,12 @@ DJStudio.runPlans = function () {
                     if (DJStudio.get(g, "loop_enabled") > 0) { DJStudio.set(g, "reloop_toggle", 1); }
                     a.done = true;
                     DJStudio.send({ t: "ev", e: "loop_out", deck: d, at: a.at, times: a.times });
+                } else {
+                    looping = true;
                 }
                 continue;
             }
+            if (looping) { continue; }
             if (b >= a.at + 4) { a.done = true; continue; } // 起播就在后面
             if (b < a.at) { continue; }
             if (a.jump !== undefined && a.jump !== null) {
@@ -606,9 +616,11 @@ DJStudio.runPlans = function () {
                 DJStudio.set(g, "beatloop_activate", 1);
                 a.on = true;
                 a.last = b;
+                looping = true;
                 DJStudio.send({ t: "ev", e: "loop_in", deck: d, at: a.at, beats: a.loop, times: a.times });
             }
         }
+        pl.looping = looping;
     }
 };
 

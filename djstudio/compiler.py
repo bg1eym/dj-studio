@@ -262,6 +262,10 @@ def _moves(c: Compiled, k: int, t: SetTrack, info: TrackInfo, lo: float, hi: flo
     done: list[float] = []
     for m in sorted(t.moves, key=lambda m: m.bar):
         what = f"第 {m.bar:g} 小节" + (f"跳到第 {m.to:g} 小节" if m.to is not None else f"的 {m.loop:g} 小节 loop")
+        if any(abs(m.bar - b) < 1e-6 for b in done):
+            err(where, f"{what}：第 {m.bar:g} 小节已经有一个跳段 / loop 了。引擎同一拍的动作会一起发出去，往回跳那一下等于没做；"
+                       "「放两遍再往后跳」写成「loop N 小节 × 2」，再在 loop 结束的那一小节跳")
+            continue
         if m.bar < pos - 1e-6 or m.bar > hi - 1e-6:
             err(where, f"{what}：只能在这首独奏的部分（第 {pos:g}–{hi:g} 小节）——过渡里的 loop 写在过渡里，"
                        "上一个跳段跳过的地方也不行")

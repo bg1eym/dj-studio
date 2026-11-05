@@ -635,6 +635,8 @@ def test_moves_errors(table_rows, words):
     ("| 2 | 13 | 跳到 21 | |\n", "只能在这首独奏的部分"),          # 第 2 首过渡到第 17 小节才结束
     ("| 1 | 5 | 跳到 13 | |\n| 1 | 9 | 跳到 15 | |\n", "只能在这首独奏的部分"),  # 第 9 小节已经被跳过了
     ("| 1 | 5 | loop 1 小节 × 2 | |\n| 1 | 9 | 跳到 3 | |\n", "往回跳会再放一遍"),
+    # 同一小节两个动作：引擎会在同一拍一起做，往回跳那一下等于没做（60 分钟 set v1 录音少放 248 小节）
+    ("| 1 | 9 | 跳到 5 | |\n| 1 | 9 | 跳到 13 | |\n", "已经有一个跳段"),
 ])
 def test_moves_outside_solo_are_errors(table_rows, words):
     plan = moves_score(table_rows)
@@ -719,3 +721,23 @@ def test_bar1_slightly_before_the_file_start_is_fine():
         assert s is not None, [str(n) for n in conv.notes]
         bad = [i for i in compile_with(s, tracks).issues if "曲首之前" in i.msg]
         assert (not bad) == ok, (first, [str(i) for i in bad])
+
+
+def test_loop_twice_then_jump_at_the_loop_end_is_fine():
+    """「放两遍再往后跳」的正确写法：loop N 小节 × 2，在 loop 结束的那一小节跳（不同的小节，引擎一拍只做一个）。"""
+    plan = moves_score("| 1 | 5 | loop 4 小节 × 2 | |\n| 1 | 9 | 跳到 13 | |\n")
+    tracks = [LibTrack(k, f"/m/{k}.wav", k.upper(), "", 120.0, Grid(128, fb, 0, 120.0), []) for k, fb in (("a", 0.25), ("b", 0.40))]
+    conv = convert(plan, tracks)
+    c = compile_with(conv.set, tracks)
+    assert c.ok, [str(i) for i in c.issues]
+    assert [("jump" in a, a["at"]) for a in c.plans[0]] == [(False, 16.0), (True, 32.0)]
+
+
+def test_jump_landing_on_out_shares_one_pad():
+    """跳段落在 OUT 那一小节：一个垫子（OUT），不再多占一个 JUMP。"""
+    plan = moves_score("| 1 | 13 | 跳到 21 | |\n")
+    tracks = [LibTrack(k, f"/m/{k}.wav", k.upper(), "", 120.0, Grid(128, fb, 0, 120.0), []) for k, fb in (("a", 0.25), ("b", 0.40))]
+    conv = convert(plan, tracks)
+    s = fill_hot_cues(conv.set, compile_with(conv.set, tracks))
+    at21 = [h for h in s.tracks[0].hot_cues if abs(h.bar - 21) < 1 / 8]
+    assert [h.name for h in at21] == ["OUT"] and "JUMP 21" in at21[0].note

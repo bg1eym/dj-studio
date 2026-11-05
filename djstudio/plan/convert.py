@@ -127,6 +127,7 @@ def duration_ok(pt: PlanTrack, duration: float) -> bool:
     return abs((pt.bar1_s or 0.0) + pt.bars * bar - duration) <= 12 * bar
 
 
+LEAD_NO_MIN_SIM = 0.9  # 名字相似度到这么多，文件名前的编号（= 谱上的曲序）才加分
 FILE_MATCH = 0.85  # 在电脑里按文件名找曲子：名字的相似度门槛
 
 
@@ -178,12 +179,17 @@ def file_matches(plan: Plan, paths: list[str], want: list[int]) -> dict[int, str
 def match_tracks(plan: Plan, lib: list[LibTrack]) -> tuple[list[LibTrack | None], list[Note]]:
     notes: list[Note] = []
     scored: list[tuple[float, int, int]] = []
+    sims: dict[tuple[int, int], float] = {}
     for i, pt in enumerate(plan.tracks):
         want = [_norm(pt.file_name), _norm(pt.title.replace("—", " "))]
         for j, lt in enumerate(lib):
             have = [_norm(lt.path), _norm(f"{lt.artist} {lt.title}"), _norm(lt.title)]
             sim = max(difflib.SequenceMatcher(None, w, h).ratio() for w in want if w for h in have if h)
-            score = sim + (0.35 if _lead_no(lt.path) == pt.no else 0.0)
+            sims[i, j] = sim
+            # 文件名前的编号只在名字本来就对得上时帮忙（同一首歌有几份时挑编号对的那份）。
+            # 不能让编号压过名字：同一个艺人的歌名字前半截一样（charlottedewitte…），别的 set 的
+            # 「08 … Overdrive」对谱上的 #08 Kali 也有 0.7，原来加 0.35 就压过了名字完全一样的原文件
+            score = sim + (0.05 if sim >= LEAD_NO_MIN_SIM and _lead_no(lt.path) == pt.no else 0.0)
             if lt.duration and not duration_ok(pt, lt.duration):
                 score -= 0.4
             scored.append((score, i, j))
@@ -195,6 +201,10 @@ def match_tracks(plan: Plan, lib: list[LibTrack]) -> tuple[list[LibTrack | None]
             continue
         out[i] = lib[j]
         used.add(j)
+        if sims[i, j] < LEAD_NO_MIN_SIM:
+            pt = plan.tracks[i]
+            notes.append(Note("warn", f"#{pt.no:02d} {pt.title}", f"对到的是「{Path(lib[j].path).name}」，名字只像 {sims[i, j]:.2f}："
+                                                                   "看一下是不是这首"))
     for i, pt in enumerate(plan.tracks):
         if out[i] is None:
             notes.append(Note("error", f"#{pt.no:02d} {pt.title}", f"曲库里找不到这首（谱上的文件名：{pt.file_name or '—'}）"))

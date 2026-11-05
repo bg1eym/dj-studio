@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from .setfile import HotCue, SavedLoop, SetFile
@@ -62,7 +62,12 @@ CUE_KINDS: tuple[CueKind, ...] = (
     CueKind("fade", "FADE", "红", "最后一首：从这里开始淡出"),
 )
 KIND = {k.key: k for k in CUE_KINDS}
-_PRIO = {"in": 0, "out": 0, "stop": 0, "fade": 0, "jump": 0, "fx": 1, "loop": 2, "move": 2}  # 点太多放不下时先留的
+_PRIO = {"in": 0, "out": 0, "stop": 0, "fade": 0, "jump": 0, "loop": 0, "fx": 1, "move": 2}  # 点太多放不下时先留的（loop 头要按，旋钮点只是提示）
+
+
+def _prio(p: Any) -> int:
+    """换低频那一拍（BASS IN / BASS OUT）比别的旋钮点要紧，和效果同级。"""
+    return 1 if p.kind == "move" and p.name.startswith("BASS") else _PRIO[p.kind]
 
 
 def default_color(name: str) -> str:
@@ -339,8 +344,17 @@ def fill_hot_cues(s: SetFile, c: Compiled) -> SetFile:
         pts = [p for p in points[i] if not any(abs(h.bar - p.bar) < 1 / 8 or (h.name.upper() == p.name and
                                                                                 (abs(h.bar - p.bar) <= 1 or p.kind == "in"))
                                                for h in manual)]
+        # 同一个位置（差不到 1/8 小节）只占一个垫子：先留优先级高的，同级留先出现的（OUT 和跳段落点常常重合）
+        merged: list[Any] = []
+        for p in sorted(pts, key=lambda q: (_prio(q), q.bar, q.kind != "out")):
+            same = next((m for m in merged if abs(m.bar - p.bar) < 1 / 8), None)
+            if same is None:
+                merged.append(p)
+            else:
+                merged[merged.index(same)] = replace(same, note=f"{same.note}；也是 {p.name}：{p.note}")
+        pts = sorted(merged, key=lambda q: q.bar)
         if len(pts) > len(free):
-            keep = sorted(range(len(pts)), key=lambda k: (_PRIO[pts[k].kind], pts[k].bar))[:len(free)]
+            keep = sorted(range(len(pts)), key=lambda k: (_prio(pts[k]), pts[k].bar))[:len(free)]
             pts = [pts[k] for k in sorted(keep)]
         auto = [HotCue(pad=pad, name=p.name, bar=round(max(1.0, p.bar), 4), color=KIND[p.kind].color, note=p.note, auto=True)
                 for pad, p in zip(free, pts)]

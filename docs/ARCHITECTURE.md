@@ -119,7 +119,8 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
   连 Mixxx 时再写进 Mixxx 并锁定（先备份），重新切小节后再转一次。`grid_fix_plan` 不动「按谱」的网格。
   自估网格本身：`analysis.kick_onset` 在网格那一拍和半拍外比「音高往下扫」（kick 有、bass 没有），半拍外明显更像 kick 才换。
 - 跳段与 loop（打碟谱规范 v4）：独奏时的 `tracks[].moves` → 编译成每首的 plan（`Compiled.plans`，拍），conductor 每装好一首发
-  `{"t":"plan"}`，DJStudio.js（0.4.5）的 `runPlans` 到那一拍 `beatjump` / `beatloop_activate`，数跳回 loop 头的次数，转满就 `reloop_toggle`。
+  `{"t":"plan"}`，DJStudio.js（0.4.5）的 `runPlans` 到那一拍 `beatjump` / `beatloop_activate`，数跳回 loop 头的次数，转满就 `reloop_toggle`；
+  0.4.6 起 loop 没转完时这一 deck 后面的动作和下一段过渡都等着（同一小节只能写一个动作，编译时就报错）。
   过渡里的 loop 是事件；程序开始后每一边的时间线按整拍补上 loop 跳回去的距离（`sideTl`），旋钮、B 起播、相位检查都照常按时间走。
   编译用 `loop_spans` / `own_offset` 把时间线换成两首自己的小节（B 过渡后的位置、A 的结尾、hot cue、点波形跳过去）；
   独奏多放 / 少放的小节进时间表。点波形 / 停下后继续落在打了 loop 的过渡里 = 从这段过渡开头重来。

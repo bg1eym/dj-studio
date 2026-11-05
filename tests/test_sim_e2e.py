@@ -266,3 +266,50 @@ def test_jumps_and_loops(rig):
     first_done = next(st for st in sts if (st.get("pg") or {}).get("id") == "tr1" and st["pg"]["st"] == "done")
     b_bar = LIB["b"].grid.beat_bar(LIB["b"].grid.time_beat(first_done["d"][1][2] / 1000))
     assert abs(b_bar - 16) < 0.3, b_bar
+
+
+def test_loop_twice_then_jump_at_the_loop_end(rig):
+    """「放两遍再往后跳」：第 5 小节 4 小节 loop 转 2 遍，第 9 小节（loop 结束那一小节）跳到 17。
+    第一遍到 loop 尾时不能先跳（那时还在 loop 里，跳段会把 loop 挪走）；出了 loop、第二遍放到第 9 小节才跳。"""
+    link, client = rig
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": "loopjump",
+        "tracks": [{"id": "a", "title": "A", "moves": [{"bar": 5, "loop": 4, "times": 2}, {"bar": 9, "to": 17}]},
+                   {"id": "b", "title": "B"}],
+        "transitions": [{"technique": "instant", "start": 33, "b_in": 17}],
+        "ending": {"mode": "fade", "bar": 40, "bars": 8},
+    })
+    c = compile_set(s, lambda t: LIB.get(t.id))
+    assert c.ok, [str(i) for i in c.issues]
+    solos = [seg for seg in c.schedule if seg.kind == "solo"]
+    assert abs(solos[0].t1 - solos[0].t0 - (32 + 4 - 8) * 4 * 60 / 128) < 1e-6
+    cond = Conductor(client, c)
+    run(cond, 120)
+    log = "\n".join(cond.progress.log)
+    assert cond.progress.stage == "done", log + f"\n{cond.progress.error}"
+    assert "小节错位" not in log, log
+    h = link.sim({"cmd": "history", "keys": ["beatjump", "beatloop_activate", "reloop_toggle"]})["h"]
+    acts = [(k, v) for _, g, k, v in h if v and g == "[Channel1]"]
+    assert [k for k, _ in acts] == ["beatloop_activate", "reloop_toggle", "beatjump"], acts
+    assert acts[-1] == ("beatjump", 32)
+
+
+def test_loop_ending_where_the_transition_starts(rig):
+    """独奏 loop 正好转到下一段过渡的第一小节（60 分钟 set 的 Soma：169 起 24 小节 × 2，193 出曲）：过渡要等 loop 转完第二遍才开始。"""
+    link, client = rig
+    s = SetFile.model_validate({
+        "schema": "djset/2", "id": "loopout",
+        "tracks": [{"id": "a", "title": "A", "moves": [{"bar": 25, "loop": 8, "times": 2}]}, {"id": "b", "title": "B"}],
+        "transitions": [{"technique": "instant", "start": 33, "b_in": 17}],
+        "ending": {"mode": "fade", "bar": 40, "bars": 8},
+    })
+    c = compile_set(s, lambda t: LIB.get(t.id))
+    assert c.ok, [str(i) for i in c.issues]
+    evs = []
+    client.add_listener(lambda m: evs.append(m) if m.get("t") == "ev" else None)
+    cond = Conductor(client, c)
+    run(cond, 120)
+    log = "\n".join(cond.progress.log)
+    assert cond.progress.stage == "done", log + f"\n{cond.progress.error}"
+    order = [e["e"] for e in evs if e.get("e") in ("loop_in", "loop_out", "started")]
+    assert order[:3] == ["loop_in", "loop_out", "started"], order

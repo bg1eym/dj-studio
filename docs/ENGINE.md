@@ -27,7 +27,7 @@
 | `bpm` | `deck`, `v` | 设 BPM（Mixxx `bpm` 控件） |
 | `vol` | `deck`, `v` | 通道推子 |
 | `neutral` | `deck` | EQ 归 1、滤波归中、关效果路由、关 loop |
-| `plan` | `deck`, `grid`, `acts` | 0.4.5：这个 deck 上刚装好的这首独奏时的跳段 / loop。`acts`：`{"at": 拍, "jump": 拍数}`（到那一拍 `beatjump`）或 `{"at": 拍, "loop": 拍数, "times": 遍数}`（`beatloop_activate`，跳回 loop 头 times-1 次后 `reloop_toggle`）。只认这一次装载；起播时已经过了 1 小节以上的不做。conductor 每装好一首就发（没有的发空的） |
+| `plan` | `deck`, `grid`, `acts` | 0.4.5：这个 deck 上刚装好的这首独奏时的跳段 / loop。`acts`：`{"at": 拍, "jump": 拍数}`（到那一拍 `beatjump`）或 `{"at": 拍, "loop": 拍数, "times": 遍数}`（`beatloop_activate`，跳回 loop 头 times-1 次后 `reloop_toggle`）。只认这一次装载；起播时已经过了 1 小节以上的不做。0.4.6 起：loop 没转完最后一遍以前，这一 deck 后面的动作和以它为 A 的下一段过渡都等着（跳回 loop 头那一刻拍号会多算一点，见 MIXXX_NOTES.md 的 `beat_distance` 一条）。conductor 每装好一首就发（没有的发空的） |
 | `eject` | `deck` | 弹出（在播时拒绝） |
 | `set` / `get` | `g`,`k`,`v` / `keys:[[g,k],…]` | 调试与探测用 |
 

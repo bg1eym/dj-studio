@@ -77,5 +77,6 @@ Mixxx 的行为已经按 2.5.6 源码逐条核对过（见 [MIXXX_NOTES.md](MIXX
 | 引擎按 44100 Hz 输出、MacBook 扬声器设备是 48000 Hz 时，系统（AUHAL）负责转换，不变调、不变速 | PortAudio 的 Mac 输出不改设备采样率，由 AUHAL 转换。CI（Apple 芯片构建机，虚拟声卡 48000 Hz）实测声卡取数据的速度 = 墙钟的 1.012 倍；不转换的话会是 1.088 倍 | 网页上的播放头和听到的 kick 对齐；`~/DJStudio/logs/` 里的引擎声音信息（device_rate、underruns） |
 | 换输出设备：演出中插耳机 / 连 AirPods / 在菜单栏换输出，声音跟过去 | 引擎每 0.5 秒问 CoreAudio 的默认输出，换了就重开到新设备（Pa_Terminate + Pa_Initialize 刷新设备列表）；命令行程序没有 CFRunLoop，所以先把 kAudioHardwarePropertyRunLoop 设成 NULL，让 HAL 用自己的线程更新默认设备。CI 只测了「重开以后接着出声」，没法真的插耳机 | 演出中插 / 拔耳机、连 / 断 AirPods：1 秒内声音换过去，网页右上角「声音：…」跟着变，两首不错拍；`~/DJStudio/logs/` 里有「声音输出跟着系统换了」 |
 | 网页播放头和声音对齐 | 状态帧带「听到的时刻」= 收到时刻 + 声卡报的输出延迟（PortAudio outputLatency + 一个 512 帧缓冲）；蓝牙耳机的实际延迟常比报的大 | 用 MacBook 扬声器看 kick 是否正好在播放头过拍线时响 |
+| 真引擎里独奏 loop 跳回 loop 头那一刻，拍号也会多算一点（和模拟器一样），0.4.6 的「loop 没转完不做后面的动作」挡得住 | 模拟器按 `playposition` 每秒更新 15 次复现了（两种时钟），改完通过；没有在声音引擎 / Mixxx 上跑过 | `DJSTUDIO_ENGINE_BIN=… pytest tests/test_mixxx_engine.py`（在跳段测试里加「loop × 2 再在 loop 尾跳」「loop 尾正好开始过渡」两例）；60 分钟 set v2 录音里 Astrix 113–152 放两遍再到 240，Soma 169–192 放两遍以后 17:00 前后才进 Fourth Dimension |
 | 谱上「第 1 小节第 1 拍」秒数和 Mac 上 Mixxx（CoreAudio 解码 MP3）一致 | 谱按文件时间写；解码器的编码延迟处理可能差几十毫秒，只影响吸附到哪一拍（容差 ±0.2 拍） | 生成 set 时的提示里没有「可能对到了别的拍」 |
 
