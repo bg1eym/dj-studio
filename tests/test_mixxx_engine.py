@@ -530,7 +530,9 @@ def test_record_whole_set_to_mp3(tmp_path, monkeypatch):
     assert rec["cache_misses"] == 0 and rec["speed"] == 20.0
     f = Path(rec["file"])
     assert f.parent == studio.recordings_dir and f.name.startswith("录音测试 set ") and f.suffix == ".mp3"
-    assert wall < c.duration / 5, f"{c.duration:.0f} 秒的 set 录了 {wall:.1f} 秒"
+    # 不能是原速录（那样至少要 set 时长）。墙钟里还有启动引擎、装歌、编完 MP3、关引擎的固定开销，
+    # 机器之间差很多：原来按 1/5 定的门槛，在 MacBook Air 上 56 秒的 set 录了 12.0、20.8 秒（放音乐本身 20 倍速只要 2.8 秒）
+    assert wall < c.duration * 0.75, f"{c.duration:.0f} 秒的 set 录了 {wall:.1f} 秒：像是按原速录的"
     # 标签：ID3v2.3，标题是 set 名（UTF-16）
     head = f.read_bytes()[:200]
     assert head[:3] == b"ID3" and "录音测试 set".encode("utf-16-le") in head
