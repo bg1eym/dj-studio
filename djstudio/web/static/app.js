@@ -713,6 +713,9 @@ function renderHomeJob() {
       }); } }, "先在模拟器里预演（不碰 Mixxx，没有声音）"),
       h("a", { href: `/api/sets/${r.set}/cuesheet.md`, target: "_blank", title: "按播放规范（docs/SET_SPEC.md）生成的 hot cue：打击垫 1–8、名字、颜色、位置" }, "Hot Cue 表（Prime 4+）"),
       h("a", { href: `/api/sets/${r.set}/cuesheet.md?download=1` }, "下载 .md"),
+      // 旧谱也能看成四 Deck 的图、另存成 v5 的谱（原来的谱和 set 都不动）
+      h("a", { href: `/static/handover.html?set=${encodeURIComponent(r.set)}`, target: "_blank", title: "这套 set 画成四 Deck 同轴的操作图（A / B 交替在 D1 / D2 上），可以打印 / 存成 PDF" }, "交接说明"),
+      h("a", { href: `/api/sets/${r.set}/v5.md?download=1`, title: "把这套 set 写成曲谱 v5（每个旋钮动作都写明），存成一份新文件" }, "另存为 v5 的谱"),
       h("span", { class: "grow" }),
       h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeNew = true; renderHome(true); } }, "＋ 新 set")));
   }

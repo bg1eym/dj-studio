@@ -232,7 +232,18 @@ async function main() {
   } catch (e) {
     return fail(`读不到项目「${pid}」：${e.message}`);
   }
-  if (!data.v5 || !data.chart) return fail("这个 set 不是曲谱 v5 的项目：交接说明只有 v5（四 Deck）的谱有。");
+  if (!data.v5 || !data.chart) {
+    // 旧谱（v1–v4）的 set：按四 Deck 的编译器转一遍（只读，原来的 set 不动），A / B 两台交替落在 D1 / D2 上，画同样的图
+    try {
+      const r = await fetch(`/api/sets/${encodeURIComponent(pid)}/v5check`);
+      const legacy = await r.json();
+      if (!r.ok) throw new Error((legacy && (legacy.detail || legacy.error)) || r.statusText);
+      if (!legacy.chart) throw new Error((legacy.diffs || []).slice(0, 3).join("；") || "转不过来");
+      data = { v5: true, chart: legacy.chart, legacyDiffs: legacy.n_diffs || 0 };
+    } catch (e) {
+      return fail(`这个 set 转不成四 Deck 的图：${e.message}`);
+    }
+  }
   const chart = data.chart;
   if (!chart.clips || chart.ok === false) {
     const errs = (chart.issues || []).filter((i) => i.level === "error");
