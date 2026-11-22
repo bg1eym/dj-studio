@@ -10,7 +10,6 @@ import subprocess
 from pathlib import Path
 
 from ..config import Config
-from ..mixxx import fakedb
 from ..studio import Studio
 from ..synth import techno, write_wav
 from . import score
@@ -62,12 +61,11 @@ def make_folder(folder: Path, example: Path | None = None) -> Path:
 
 
 def setup_demo5(root: Path) -> Studio:
+    """内置引擎不读 Mixxx 的曲库，所以这里不建假的 Mixxx 曲库（v4 的 `djstudio demo` 才要：它的那份 schema 只在源码里，
+    没有打进应用包——0.4.0 的 demo5 多建了这一步，在打包好的应用里一运行就找不到文件）。"""
     root = root.resolve()
-    (root / "mixxx").mkdir(parents=True, exist_ok=True)
     cfg = Config(home=root / "home", library=root / "Music" / "DJStudio", mixxx_dir=root / "mixxx",
                  browse_roots=[root, Path.home()], engine="builtin")
-    if not cfg.mixxx_db.exists():
-        fakedb.create(cfg.mixxx_db)
     studio = Studio(cfg)
     folder = root / "四 Deck 场景示例"
     make_folder(folder)
