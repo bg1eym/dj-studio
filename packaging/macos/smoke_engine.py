@@ -109,11 +109,23 @@ if a and a.get("on"):
     # 跟着系统换输出（插耳机 / 连 AirPods）：重开声音输出以后接着出声，引擎还在
     r = cmd(5, {"cmd": "audio", "reopen": True})
     check(r and r.get("on") and r.get("switches") == 1, f"声音输出重开一次（换设备的那条路）：{r}")
+    # 重开的回复一到，新的流还没开始取数据（声卡启动要几十到一百多毫秒）。先等它取走第一块、记下空了多久，
+    # 取数据的速度从那以后量：以前从回复那一刻起量 2 秒，启动的空档也算了进去——100 ms 就是 5%，正好压在线上（CI 上出过 0.950）
     t1, p1 = time.time(), r["played_ms"]
+    first, n = None, 100
+    while time.time() - t1 < 3.0:
+        first = cmd(n, {"cmd": "audio"})  # 每次用新的编号：回复按编号存，重复的编号会读到上一次的
+        n += 1
+        if first and first["played_ms"] > p1:
+            break
+    gap = (time.time() - t1) * 1000
+    check(bool(first) and first["played_ms"] > p1 and gap < 1000,
+          f"重开以后 {gap:.0f} ms 内声卡又开始取数据（要求 1 秒以内；每 50 ms 问一次，所以这是上限）")
+    t2, p2 = time.time(), first["played_ms"]
     time.sleep(2)
     c2 = cmd(6, {"cmd": "audio"})
-    ratio2 = (c2["played_ms"] - p1) / ((time.time() - t1) * 1000)
-    check(abs(ratio2 - 1) < 0.05, f"重开以后声卡照样取数据：{ratio2:.3f} 倍墙钟（设备 {c2.get('device')}）")
+    ratio2 = (c2["played_ms"] - p2) / ((time.time() - t2) * 1000)
+    check(abs(ratio2 - 1) < 0.03, f"重开以后声卡照样取数据：{ratio2:.3f} 倍墙钟（设备 {c2.get('device')}，断音 {c2.get('underruns')} 次）")
     st = cmd(7, {"cmd": "state"})
     check(st is not None and st.get("audio", {}).get("on"), "重开以后引擎照常回状态")
 cmd(3, {"cmd": "quit"})

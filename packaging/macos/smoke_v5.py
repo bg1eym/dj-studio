@@ -132,7 +132,9 @@ srcs = {aid: compress(w) for aid, w in wavs.items()}
 kind = next(iter(srcs.values())).suffix
 bars = max(40, int(LONG * 132 / 60 / 4) + 3)
 stop = f"{bars}.1"
-clips = [{"id": f"C{d}", "asset": f"A{d}", "deck": d, "start": "1.1", "stop": stop, "init": {"vol": 0.6}} for d in range(1, 5)]
+# 推子 4：四台的小节第 1 拍（各 0.8 的脉冲）正好叠在一起，推子 6 时叠出来是 4 × 0.8 × 0.331 = 1.06，本身就超过满幅——
+# 过载灯亮是对的，不是引擎的毛病（Mac 的 CI 上就是这样没过；Linux 上 MP3 把脉冲的尖削掉了一点才没碰到）。推子 4 是 0.54，留出余量
+clips = [{"id": f"C{d}", "asset": f"A{d}", "deck": d, "start": "1.1", "stop": stop, "init": {"vol": 0.4}} for d in range(1, 5)]
 effects = []
 for d in range(1, 5):
     effects += [
@@ -166,7 +168,7 @@ with Run(c2, speed=1, sim=False) as r:
           f"负载（四路 {kind} 原速 {time.time() - t0:.0f} 秒，{n} 块）：每块平均 {perf['avg_us']:.0f} µs = 预算 {budget:.0f} µs 的 "
           f"{perf['avg_us'] / budget * 100:.1f}%；最大 {perf['max_us']:.0f} µs；超过一半预算 {perf['over_half']} 块，超过预算 {perf['over']} 块")
     check(perf["late"] == 0 and perf.get("underruns", 0) == 0, f"没有晚到的控制步、没有欠载（late {perf['late']}，underruns {perf.get('underruns', 0)}）")
-    check(st["master"]["over"] == 0, f"主输出没有过载（峰值 {st['master']['peak']:.1f} dBFS）")
+    check(st["master"]["over"] == 0, f"主输出没有过载（过载的采样 {st['master']['over']} 个，现在的峰值 {st['master']['peak']:.1f} dBFS）")
     check(worst < 1.0, f"这一段里四台 Deck 的位置和全场拍的差最大 {worst:.3f} ms（不漂）")
     dup = [m["id"] for m in r.rc()]
     check(len(dup) == len(set(dup)), "没有重复执行的动作（回执编号不重复）")
