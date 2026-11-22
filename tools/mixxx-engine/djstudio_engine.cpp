@@ -107,6 +107,7 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr int kBufferSamples = 1024; // 每次处理 512 帧（立体声），和 Mixxx 自己的测试一样
 constexpr int kBufferFrames = kBufferSamples / 2;
 constexpr int kNumDecks = 4; // v4 的谱只用 deck 1、2（AutoDJ 装载）；v5 的四 Deck 调度用全部四个
+constexpr int kV4Decks = 2;  // v4 的命令 / 状态里报几台
 
 std::FILE* gOut = stdout;
 QMutex gOutLock;
@@ -1503,7 +1504,9 @@ class Engine : public djs5::Backend {
         o["xFaderMode"] = ControlObject::get(ConfigKey("[Mixer Profile]", "xFaderMode"));
         o["audio"] = audioInfo();
         QJsonArray decks;
-        for (int n = 1; n <= kNumDecks; ++n) {
+        // 这个命令是 v4 那条路的（DJStudio.js + AutoDJ，两台 Deck）：调用方按两台来读，所以只报 deck 1、2。
+        // 四 Deck 的状态走 v5.state（按名字的 Deck 列表）
+        for (int n = 1; n <= kV4Decks; ++n) {
             QJsonObject d;
             d["n"] = n;
             QString id = loadedId(n);
