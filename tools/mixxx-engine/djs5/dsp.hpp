@@ -699,9 +699,11 @@ class Roll {
 
 // 状态变量滤波（TPT / 梯形积分的 SVF）：LPF / HPF / BPF，12 dB / 倍频程。
 // 选 TPT：截止频率随便扫（每个采样都在变）也稳定，频率一直准到 0.45 × 采样率，低频下 float 输入也不丢精度。
-// 系数（g = tan(π·fc / fs)、k = 1 / Q、三种模式的混合比例）每个采样做一阶平滑（kSvfSmoothMs）：
-// 外面一块才给一次截止，里面抹平，扫频 / 换模式都不出爆音。q = 品质因数（0.7071 = 没有峰的 Butterworth）。
-// BPF 取峰值增益 1 的那种（中心频率上不增不减）。
+// 系数每个采样做一阶平滑（kSvfSmoothMs）：外面一块才给一次截止，里面抹平，扫频 / 换模式都不出爆音。
+// 截止是在对数频率上平滑的（平滑 ln g，g = tan(π·fc / fs)）：按音程匀着走。直接平滑 g 的话，从低往高跳时
+// 头几个采样就窜上去好几个倍频程，低通的相位滞后一下子放掉，等于一声轻的爆音（实测每采样的跳变是输入的 4 倍）。
+// 共振（k = 1 / Q）和三种模式的混合比例是线性平滑。q = 品质因数（0.7071 = 没有峰的 Butterworth）。
+// BPF 取峰值增益 1 的那种（中心频率上不增不减），所以 LPF + HPF + BPF 三种输出加起来正好是输入。
 class SvfFilter {
   public:
     enum Mode { LPF = 0, HPF = 1, BPF = 2 };
@@ -729,12 +731,14 @@ class SvfFilter {
     void setCutoff(double hz) {
         hz = std::min(std::max(hz, kSvfMinHz), kSvfMaxRatio * m_sr);
         m_gT = std::tan(dspd::kPi * hz / m_sr);
+        m_lgT = std::log(m_gT);
     }
     void setQ(double q) { m_kT = 1.0 / std::min(std::max(q, kSvfMinQ), kSvfMaxQ); }
 
     // 一帧（原地）
     void tick(float& l, float& r) {
         if (m_fresh) {
+            m_lg = m_lgT;
             m_g = m_gT;
             m_k = m_kT;
             m_w[0] = m_wT[0];
@@ -742,7 +746,15 @@ class SvfFilter {
             m_w[2] = m_wT[2];
             m_fresh = false;
         } else {
-            m_g += m_a * (m_gT - m_g);
+            // 截止在动的时候才算 exp；差到 1e-7（听不出的频率差）以内就直接落到目标，之后不用再算
+            const double d = m_lgT - m_lg;
+            if (d > 1e-7 || d < -1e-7) {
+                m_lg += m_a * d;
+                m_g = std::exp(m_lg);
+            } else if (d != 0.0) {
+                m_lg = m_lgT;
+                m_g = m_gT;
+            }
             m_k += m_a * (m_kT - m_k);
             m_w[0] += m_a * (m_wT[0] - m_w[0]);
             m_w[1] += m_a * (m_wT[1] - m_w[1]);
@@ -776,8 +788,8 @@ class SvfFilter {
 
     int m_sr = 44100;
     double m_a = 0.01;
-    double m_gT = 0.07, m_kT = 1.414, m_wT[3] = {1.0, 0.0, 0.0};
-    double m_g = 0.07, m_k = 1.414, m_w[3] = {1.0, 0.0, 0.0};
+    double m_gT = 0.07, m_lgT = -2.66, m_kT = 1.414, m_wT[3] = {1.0, 0.0, 0.0}; // 目标
+    double m_g = 0.07, m_lg = -2.66, m_k = 1.414, m_w[3] = {1.0, 0.0, 0.0};     // 现在（平滑后）
     double m_s[4] = {0.0, 0.0, 0.0, 0.0};
     bool m_fresh = true;
 };

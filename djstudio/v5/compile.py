@@ -746,20 +746,23 @@ def actions(c: Compiled5) -> list[dict[str, Any]]:
     for cc in c.clips:
         k = cc.clip
         name = p.asset(k.asset).title or k.asset
-        add(cc.load, "load", f"D{k.deck} 装载 {k.id}「{name}」，摆好旋钮", k.line, k.id, k.deck, f"{k.id}.load", cc.start)
+        add(float(math.floor(cc.load)), "load", f"D{k.deck} 装载 {k.id}「{name}」，摆好旋钮", k.line, k.id, k.deck,
+            f"{k.id}.load", cc.start)
         add(cc.start, "start", f"D{k.deck} 起播 {k.id}「{name}」，从原曲 {_zh_pos(k.src)}", k.line, k.id, k.deck,
             f"{k.id}.start")
         add(cc.stop, "stop", f"D{k.deck} 停 {k.id}", k.line, k.id, k.deck, f"{k.id}.stop")
+        notes = {x.id: x.note for x in p.loops + p.jumps if x.clip == k.id and x.note}
         for s in cc.segs[1:] if cc.segs[0].kind == "start" else cc.segs:
+            note = f"——{notes[s.id]}" if s.id in notes else ""
             if s.kind == "loop":
                 nxt = next((x for x in cc.segs if x.id == s.id + ".out"), None)
                 add(float(s.g), "loop", f"{k.id} 打 {fmt_dur(s.loop)} loop（原曲 {_zh_pos(s.lsrc)} 起）"
-                    + (f"，到 {_zh_pos(nxt.g)} 出" if nxt else ""), s.line, k.id, k.deck, s.id,
+                    + (f"，到 {_zh_pos(nxt.g)} 出" if nxt else "") + note, s.line, k.id, k.deck, s.id,
                     float(nxt.g) if nxt else None)
             elif s.kind == "exit":
                 add(float(s.g), "loop_out", f"{k.id} 出 loop，从原曲 {_zh_pos(s.src)} 接着放", s.line, k.id, k.deck, s.id)
             elif s.kind == "jump":
-                add(float(s.g), "jump", f"{k.id} 跳到原曲 {_zh_pos(s.src)}", s.line, k.id, k.deck, s.id)
+                add(float(s.g), "jump", f"{k.id} 跳到原曲 {_zh_pos(s.src)}{note}", s.line, k.id, k.deck, s.id)
         for param, pts in cc.lanes.items():
             zh = PARAM_ZH[param]
             lines = {float(pt.at): pt.line for ln in p.lanes if ln.clip == k.id and ln.param == param for pt in ln.points}
@@ -775,7 +778,9 @@ def actions(c: Compiled5) -> list[dict[str, Any]]:
     for f in c.fx:
         zh = FX_ZH[f["kind"]]
         d = f"拍长 {fmt_dur(Fraction(f['p']['beats']).limit_denominator(96))}" if "beats" in f["p"] else f"衰减 {f['p']['decay']:g}"
-        add(f["start"], "fx", f"{f['id']} {zh} 开（{f['clip']}，发送，{d}）", f["line"], f["clip"], f["deck"], until=f["end"])
+        note = next((f"——{x.note}" for x in p.fx if x.id == f["id"] and x.note), "")
+        add(f["start"], "fx", f"{f['id']} {zh} 开（{f['clip']}，发送，{d}）{note}", f["line"], f["clip"], f["deck"],
+            until=f["end"])
         add(f["end"], "fx_off", f"{f['id']} {zh} 关送出，尾音留 {fmt_dur(Fraction(f['tail']).limit_denominator(4))}", f["line"],
             f["clip"], f["deck"], until=f["end"] + f["tail"])
     for i in range(1, len(p.tempo)):
