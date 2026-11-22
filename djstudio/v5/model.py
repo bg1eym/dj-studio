@@ -277,7 +277,7 @@ class Project(_M):
                 if x.clip not in clips:
                     raise ValueError(f"{kind}写的片段 {x.clip} 不在片段表里")
         for f in self.fx:
-            for t in f.targets:
+            for t in f.targets if f.kind != "sample" else []:  # 采样的「目标」是音源的名字，不是片段
                 if t not in clips:
                     raise ValueError(f"效果 {f.id} 的目标 {t} 不在片段表里")
         seen: set[tuple[str, str]] = set()

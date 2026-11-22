@@ -15,6 +15,9 @@ namespace djs5 {
 
 constexpr int kMaxDecks = 4;
 constexpr const char* kPlanSchema = "djplan/1";
+// 门（片段的起 / 停、效果送出的开 / 关）：落在采样上
+constexpr double kGateInMs = 1.0;    // 门在起播点前这么久开始打开，到起播点全开
+constexpr double kGateOutMs = 3.0;   // 门在停止点前这么久开始关，到停止点关完（停止那一拍上的 kick 不会漏出来）
 
 enum Param { P_LO = 0, P_MID, P_HI, P_FILTER, P_VOL, P_COUNT };
 inline const char* paramName(int p) {
@@ -210,11 +213,92 @@ struct FxSpec {
     }
 };
 
+// ---------------------------------------------------------------- 处理组（插入效果）和采样
+// 说明见 bus.hpp。这里只有计划里的数据。
+constexpr int kBuses = 8;        // 一份计划最多几个处理组
+constexpr int kUnitsPerBus = 32; // 一个组里最多几件
+constexpr int kSampleSlots = 8;  // 采样位（同 dsp.hpp 的 Sampler::kSlots）
+
+enum Route { R_INSERT = 0, R_GROUP = 1, R_MASTER = 2 };
+enum UnitKind { U_TRANS = 0, U_ROLL, U_FILTER, U_FLANGER, U_PHASER, U_SPIRAL, U_ECHO, U_NOISE, U_REL_ECHO, U_BRAKE, U_SPIN, U_COUNT };
+
+inline const char* routeName(int r) {
+    return r == R_INSERT ? "insert" : (r == R_GROUP ? "group" : "master");
+}
+inline int routeIndex(const std::string& s) {
+    return s == "insert" ? R_INSERT : (s == "group" ? R_GROUP : (s == "master" ? R_MASTER : -1));
+}
+inline const char* unitKindName(int k) {
+    static const char* names[U_COUNT] = {"trans", "roll", "filter", "flanger", "phaser", "spiral", "echo", "noise",
+            "rel_echo", "brake", "spin"};
+    return k >= 0 && k < U_COUNT ? names[k] : "?";
+}
+inline int unitKindIndex(const std::string& s) {
+    for (int k = 0; k < U_COUNT; ++k) {
+        if (s == unitKindName(k)) {
+            return k;
+        }
+    }
+    return -1;
+}
+inline bool isRelease(int k) {
+    return k == U_REL_ECHO || k == U_BRAKE || k == U_SPIN;
+}
+
+// 组里的一件效果。start / end：全场拍；tail：关了以后尾音留多少拍（Release 没有 tail：它的时长就是 end - start）。
+struct UnitSpec {
+    std::string id;
+    int kind = U_TRANS;
+    double start = 0.0, end = 0.0, tail = 0.0;
+    bool band[3] = {true, true, true}; // LOW / MID / HIGH 里处理哪几段（Trans / Roll）
+    bool allBands = true;
+    std::map<std::string, double> p;                 // 固定参数
+    std::map<std::string, Curve> c;                  // 随拍变的参数（Filter 的截止 = log2(Hz)，Noise 的音量，Echo 的送出）
+    std::vector<std::pair<double, double>> ev;       // Roll：从第几拍起改成多长
+    bool back = true;      // Release：true = 回原声，false = 退场（静音到 until）
+    double until = 1e300;  // Release 退场：这一组下一次显式启用的那一拍
+
+    double param(const std::string& k, double def) const {
+        auto it = p.find(k);
+        return it == p.end() ? def : it->second;
+    }
+    double curve(const std::string& k, double g, double def) const {
+        auto it = c.find(k);
+        return it == c.end() || it->second.empty() ? def : it->second.at(g);
+    }
+};
+
+struct BusSpec {
+    std::string id;
+    int route = R_INSERT;
+    std::vector<std::string> clips; // 目标片段（总输出 = 空）
+    std::vector<int> clipIdx;
+    std::vector<UnitSpec> units;
+    bool split = false; // 有没有选了频段的 Trans / Roll（要过分频器）
+};
+
+// 采样：path = 引擎采样率的 float32 立体声裸数据（Python 那边解码好）。hits：到点触发；stop = 到点全部收掉。
+struct SampleSpec {
+    std::string id, path;
+    int frames = 0;
+};
+struct HitSpec {
+    std::string id; // 回执编号（每组 fill 的第一下才有）
+    int slot = 0;
+    double beat = 0.0;
+    double gain = 1.0;
+    bool stop = false;
+};
+
 struct Plan {
     std::string exec; // 执行编号（谱哈希 + 编译器版本 + 能力签名算出来的）
     TempoMap tempo;
     std::vector<Clip> clips;
     std::vector<FxSpec> fx;
+    std::vector<BusSpec> buses;
+    std::vector<SampleSpec> samples;
+    std::vector<HitSpec> hits;
+    bool splitA = false, splitM = false; // 有没有处理组用到分频（片段 / 组这一级、总输出这一级）
     std::vector<int> byDeck[kMaxDecks + 1]; // 每个 deck 上的片段（按起播排）
     std::map<std::string, int> clipIndex;
     double len = 0.0;
@@ -319,6 +403,98 @@ struct Plan {
             pl.fx.push_back(std::move(x));
         }
         std::sort(pl.fx.begin(), pl.fx.end(), [](const FxSpec& a, const FxSpec& b2) { return a.start < b2.start; });
+        for (const Json& b : j["buses"].arr()) {
+            BusSpec bs;
+            bs.id = b["id"].str("");
+            bs.route = routeIndex(b["route"].str(""));
+            if (bs.route < 0) {
+                throw std::runtime_error("处理组 " + bs.id + "：这个引擎没有「" + b["route"].str("") + "」这种路由");
+            }
+            for (const Json& c : b["clips"].arr()) {
+                const std::string cid = c.str("");
+                if (!pl.clipIndex.count(cid)) {
+                    throw std::runtime_error("处理组 " + bs.id + " 的目标片段 " + cid + " 不存在");
+                }
+                bs.clips.push_back(cid);
+                bs.clipIdx.push_back(pl.clipIndex[cid]);
+            }
+            if ((bs.route == R_INSERT && bs.clips.size() != 1) || (bs.route == R_GROUP && bs.clips.size() < 2) ||
+                    (bs.route == R_MASTER && !bs.clips.empty())) {
+                throw std::runtime_error("处理组 " + bs.id + "：插入要一个片段，组插入要两个以上，总输出不写片段");
+            }
+            for (const Json& u : b["units"].arr()) {
+                UnitSpec us;
+                us.id = u["id"].str("");
+                us.kind = unitKindIndex(u["kind"].str(""));
+                if (us.kind < 0) {
+                    throw std::runtime_error("效果 " + us.id + "：这个引擎不会「" + u["kind"].str("") + "」");
+                }
+                us.start = u["start"].num();
+                us.end = u["end"].num();
+                us.tail = u.has("tail") ? u["tail"].num() : 0.0;
+                if (!(us.end > us.start) || us.tail < 0.0) {
+                    throw std::runtime_error("效果 " + us.id + " 的时间不对");
+                }
+                if (u["bands"].isArr() && u["bands"].arr().size() == 3) {
+                    us.allBands = true;
+                    for (int k = 0; k < 3; ++k) {
+                        us.band[k] = u["bands"].at(static_cast<size_t>(k)).num() != 0.0;
+                        us.allBands = us.allBands && us.band[k];
+                    }
+                    if (!us.band[0] && !us.band[1] && !us.band[2]) {
+                        throw std::runtime_error("效果 " + us.id + " 一个频段都没选");
+                    }
+                }
+                for (const auto& kv : u["p"].obj()) {
+                    us.p[kv.first] = kv.second.num();
+                }
+                for (const auto& kv : u["c"].obj()) {
+                    us.c[kv.first] = Curve::parse(kv.second);
+                }
+                for (const Json& e : u["ev"].arr()) {
+                    us.ev.emplace_back(e.at(0).num(), e.at(1).num());
+                }
+                us.back = u.has("back") ? u["back"].boolean() : true;
+                us.until = u["until"].isNum() ? u["until"].num() : 1e300;
+                if (!us.allBands && (us.kind == U_TRANS || us.kind == U_ROLL)) {
+                    bs.split = true;
+                }
+                bs.units.push_back(std::move(us));
+            }
+            if (bs.units.empty() || bs.units.size() > static_cast<size_t>(kUnitsPerBus)) {
+                throw std::runtime_error("处理组 " + bs.id + " 里的效果数不对（1–" + std::to_string(kUnitsPerBus) + " 件）");
+            }
+            if (bs.split) {
+                (bs.route == R_MASTER ? pl.splitM : pl.splitA) = true;
+            }
+            pl.buses.push_back(std::move(bs));
+        }
+        if (pl.buses.size() > static_cast<size_t>(kBuses)) {
+            throw std::runtime_error("处理组超出引擎的能力（最多 " + std::to_string(kBuses) + " 个）");
+        }
+        for (const Json& sm : j["samples"].arr()) {
+            SampleSpec ss;
+            ss.id = sm["id"].str("");
+            ss.path = sm["path"].str("");
+            ss.frames = static_cast<int>(sm["frames"].num());
+            pl.samples.push_back(std::move(ss));
+        }
+        if (pl.samples.size() > static_cast<size_t>(kSampleSlots)) {
+            throw std::runtime_error("采样超出引擎的能力（最多 " + std::to_string(kSampleSlots) + " 个）");
+        }
+        for (const Json& h : j["hits"].arr()) {
+            HitSpec hs;
+            hs.id = h["id"].str("");
+            hs.slot = static_cast<int>(h["slot"].num());
+            hs.beat = h["beat"].num();
+            hs.gain = h.has("gain") ? h["gain"].num() : 1.0;
+            hs.stop = h["stop"].boolean();
+            if (!hs.stop && (hs.slot < 0 || hs.slot >= static_cast<int>(pl.samples.size()))) {
+                throw std::runtime_error("采样触发 " + hs.id + " 指的采样不存在");
+            }
+            pl.hits.push_back(std::move(hs));
+        }
+        std::stable_sort(pl.hits.begin(), pl.hits.end(), [](const HitSpec& a, const HitSpec& b2) { return a.beat < b2.beat; });
         return pl;
     }
 };

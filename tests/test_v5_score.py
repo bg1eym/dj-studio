@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from djstudio.grid import Grid
-from djstudio.v5.caps import BUILTIN, MIXXX, Caps
+from djstudio.v5.caps import BASIC, BUILTIN, MIXXX, Caps
 from djstudio.v5.compile import AssetInfo, actions, chart, compile_project
 from djstudio.v5.model import Project
 from djstudio.v5.pos import PosError, fmt_dur, fmt_pos, parse_dur, parse_pos
@@ -259,15 +259,17 @@ def test_send_effects_and_their_parameters():
 
 
 def test_p1_effects_are_rejected_with_the_line_not_skipped():
-    """A22：P0 的引擎打开带 Roll / Release 的谱：指出缺的能力和行号，不会略过了照放。"""
+    """A22：只有四 Deck 基础的引擎打开带 Roll / Release 的谱：指出缺的能力和行号，不会略过了照放。现在的引擎会，照常编过。"""
     text = SMALL + FX.replace("| F1 | Delay | 发送 | C1 | 57.1 | 65.1 | 拍长 3/4拍；送出 1/2；反馈 0.4；尾音 2小节 | |",
-                              "| F1 | Roll | 插入 | C1 | 57.1 | 65.1 | 频段 HIGH；拍长 1/2拍 | |\n"
-                              "| F2 | Release | 插入 | C1 | 64.1 | 65.1 | 类型 Echo | |")
-    c = issues(text)
+                              "| F1 | Roll | 插入 | C1 | 57.1 | 64.1 | 频段 HIGH；拍长 1/2拍 | |\n"
+                              "| F2 | Release | 插入 | C1 | 64.1 | 65.1 | 方式 Echo；退场 | |")
+    c = issues(text, caps=BASIC)
     e = [i for i in c.errors if i.code == "caps_fx"]
     assert not c.ok and c.plan is None and len(e) == 2
     assert e[0].line == line_of(text, "| F1 | Roll") and "Roll" in e[0].msg and "场景 1" in e[0].where
     assert e[1].line == line_of(text, "| F2 | Release")
+    ok = issues(text)
+    assert ok.ok and [u["kind"] for b_ in ok.plan["buses"] for u in b_["units"]] == ["roll", "rel_echo"]
 
 
 def test_capability_table_limits_decks_and_score_version():

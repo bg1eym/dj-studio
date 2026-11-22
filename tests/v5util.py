@@ -70,7 +70,7 @@ class Run:
         self.sim = self.e.name == "sim5"
         self.record = record
         self.rec_frame0 = 0
-        self.e.call({"cmd": "v5.plan", "plan": c.plan})
+        self.latency = int(self.e.call({"cmd": "v5.plan", "plan": c.plan}).get("latency", 0))  # 用到分频的计划：输出晚这么多帧
         if record is not None:
             if self.sim:
                 self.rec_frame0 = self.e.call({"cmd": "sim.record", "path": str(record)})["frame"]
@@ -129,7 +129,7 @@ class Run:
         """全场第 beat 拍的声音落在录音的第几帧（模拟器：走带起点从「running」事件里取）。"""
         ev = next(r for r in self.e.receipts() if r.get("t") == "ev5" and r.get("e") in ("running", "prerun"))
         sec = self.c.tempo.sec_at(beat) - self.c.tempo.sec_at(ev["beat"])
-        return ev["frame"] + sec * SR + EQ_DELAY - self.rec_frame0
+        return ev["frame"] + sec * SR + EQ_DELAY + self.latency - self.rec_frame0
 
 
 def onsets(x: np.ndarray, thr: float = 0.05, gap: int = 1500) -> np.ndarray:

@@ -9,6 +9,7 @@
 // 起播那一块从 0 渐入（EnginePregain）、loop 到尾回绕落在采样上、通道音频比位置晚一个固定的延迟（EQ 群延迟）。
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -31,6 +32,7 @@ struct Asset {
     std::string id;
     double dur = 0.0, bpm = 120.0, first = 0.0;
     bool fail = false;
+    int wave = 0; // 0 = 每拍一个脉冲；1 = 白噪声；2 = 对数扫频（40 Hz → 16 kHz，2 秒一遍）。后两种是 −12 dBFS RMS 的宽带夹具
 };
 
 struct FakeDeck {
@@ -112,6 +114,24 @@ class FakeBackend : public Backend {
 
     // 一个脉冲：拍上起音的 4 ms 衰减正弦；小节第 1 拍（网格拍号 % 4 == 0）幅度 0.8，其余 0.4
     static float click(const Asset& a, double pos) {
+        if (a.wave == 1) { // 白噪声：位置的函数（同一个位置永远是同一个值，定位、重放都一样）
+            if (pos < 0.0 || pos >= a.dur) {
+                return 0.0f;
+            }
+            std::uint64_t h = static_cast<std::uint64_t>(std::llround(pos * kSampleRate)) * 0x9E3779B97F4A7C15ull;
+            h ^= h >> 29;
+            h *= 0xBF58476D1CE4E5B9ull;
+            h ^= h >> 32;
+            return static_cast<float>(0.435 * (static_cast<double>(h & 0xFFFFFF) / 8388607.5 - 1.0));
+        }
+        if (a.wave == 2) { // 扫频
+            if (pos < 0.0 || pos >= a.dur) {
+                return 0.0f;
+            }
+            const double T = 2.0, f0 = 40.0, k = std::log(16000.0 / f0) / T;
+            const double t = pos - T * std::floor(pos / T);
+            return static_cast<float>(0.355 * std::sin(2.0 * 3.14159265358979 * f0 * (std::exp(k * t) - 1.0) / k));
+        }
         const double beat = (pos - a.first) * a.bpm / 60.0;
         const double k = std::floor(beat);
         const double dt = (beat - k) * 60.0 / a.bpm;
@@ -285,6 +305,13 @@ int main() {
                     speed = std::max(0.01, c["speed"].num());
                     lastWall = wallSec();
                     pausedWall = lastWall - simSec / speed;
+                }
+                if (c.has("wave")) { // 换一份素材的声音：click / noise / sweep
+                    auto it = be.library.find(c["asset"].str(""));
+                    if (it != be.library.end()) {
+                        const std::string wv = c["wave"].str("click");
+                        it->second.wave = wv == "noise" ? 1 : (wv == "sweep" ? 2 : 0);
+                    }
                 }
                 if (c.has("nudge")) { // 把一个 deck 的位置人为推开（验证位置核对）
                     be.d[static_cast<int>(c["deck"].num())].pos += c["nudge"].num();

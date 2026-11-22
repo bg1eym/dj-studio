@@ -30,6 +30,7 @@ from ..plan.cdw import PlanError, clock, fader
 from ..plan.convert import eq_db, filter_val
 from ..plan.mdplan import _alias, _bullets, _clean, _dash, _key, _Line, _lines, _number, _seconds, _tables
 from .compile import FX_PARAMS, Issue5
+from .livefx import LIVE_KINDS
 from .model import MAX_DECKS, SCORE_VERSION, Project
 from .pos import PosError, fmt_pos, parse_dur, parse_pos
 
@@ -57,7 +58,8 @@ FX_KIND = {"delay": "delay", "延迟": "delay", "echo": "echo", "回声": "echo"
            "sample": "sample", "release": "release"}
 FX_ROUTE = {"发送": "send", "send": "send", "辅助发送": "send", "插入": "insert", "insert": "insert",
             "组插入": "group-insert", "group-insert": "group-insert", "组": "group-insert",
-            "总输出": "master-insert", "master-insert": "master-insert", "总输出插入": "master-insert"}
+            "总输出": "master-insert", "master-insert": "master-insert", "总输出插入": "master-insert",
+            "采样": "master-insert", "主输出": "master-insert"}
 # 效果参数的中文名 → 计划里的名字
 FX_KEYS = {"拍长": "beats", "反馈": "feedback", "乒乓": "pingpong", "衰减": "decay", "带宽": "bandwidth", "阻尼": "damping"}
 STRATEGY = {"作用": "purpose", "保留": "keep", "前景": "lead", "low": "low", "mid/high": "midhigh"}
@@ -94,8 +96,12 @@ def score_version(text: str) -> str:
 
 
 def slug(name: str) -> str:
+    """谱文件名 → 项目 id。名字里有中文的，留下英文数字的部分再加一小段哈希：
+    「四 Deck 场景示例」和「四 Deck 测试」不会撞成同一个项目。"""
     out = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
-    return out or "score-" + hashlib.sha1(name.encode()).hexdigest()[:8]
+    if re.fullmatch(r"[A-Za-z0-9 _.\-]*", name) and out:
+        return out
+    return (out or "score") + "-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
 
 
 def parse(path: Path) -> ScoreResult:
@@ -641,7 +647,9 @@ class _Parser:
             self.err(no, "fx", f"路由「{r['路由']}」：写 发送 / 插入 / 组插入 / 总输出", what)
             return
         targets = [] if _key(r["目标"]) in ("总输出", "master", "") else [x.strip() for x in re.split(r"[+＋,，、]\s*", r["目标"]) if x.strip()]
-        for tg in targets:
+        if kind == "sample":
+            route = "master-insert"  # 采样直接进主输出；「目标」写的是音源（内置的名字或文件名），不是片段
+        for tg in targets if kind != "sample" else []:
             if tg not in self.clip_ids:
                 self.err(no, "fx", f"目标「{tg}」不在片段表里", what, "目标写片段的 ID（C3），几个片段写「C1+C3」")
                 return
@@ -658,12 +666,18 @@ class _Parser:
             part = part.strip()
             if not part or _dash(part):
                 continue
+            if part in ("回原声", "退场"):  # Release 的收尾可以只写这两个字
+                part = "收尾 " + part
             mp = re.match(r"^(\S+?)\s*[:：]?\s+(.+)$", part) or re.match(r"^([^\d\s]+)\s*(.+)$", part)
             if not mp:
                 self.err(no, "fx", f"参数「{part}」看不懂", what, "写「拍长 1/2拍；送出 1/3；反馈 0.7」，用分号隔开")
                 return
             name, val = mp.group(1).strip(), mp.group(2).strip()
             try:
+                if kind in LIVE_KINDS and name != "尾音":
+                    # 现场效果：参数原样留着（中文名 + 写法），编译时按那种效果的表检查、换算（livefx.py）
+                    params[name] = val
+                    continue
                 if name in ("送出", "返回"):
                     pts = send if name == "送出" else wet
                     ends = re.split(r"\s*(?:→|->)\s*", val)

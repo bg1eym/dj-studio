@@ -33,6 +33,8 @@ class DelayLine {
         m_prevFeedback = 0.0f;
         m_pingPong = 0;
     }
+    // 反馈一下换成 fb（不从上一块的值爬过去）：Release Echo 在开始那一帧起就要满反馈，那一帧上的鼓头才留得住
+    void snapFeedback(float fb) { m_prevFeedback = fb; }
     // in / out：交错立体声 frames 帧。delayFrames：这一块的延迟长度（帧）
     void process(const float* in, float* out, int frames, int delayFrames, float send, float feedback, float pingpong) {
         const int size = static_cast<int>(m_buf.size());

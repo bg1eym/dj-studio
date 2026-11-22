@@ -55,6 +55,13 @@ def create_app(studio: Studio) -> FastAPI:
     async def _perm_err(_: Request, e: PermissionError) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=403)
 
+    from ..v5.link import Engine5Error
+
+    @app.exception_handler(Engine5Error)
+    async def _engine5_err(_: Request, e: Engine5Error) -> JSONResponse:
+        # v5 调度器拒绝的操作（没在演出、起点不能恢复……）：原话告诉界面
+        return JSONResponse({"error": str(e)}, status_code=400)
+
     # ------------------------------------------------------------ 状态 / 事件
 
     def state() -> dict[str, Any]:

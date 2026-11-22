@@ -26,6 +26,7 @@ from ..compiler import _lane_native, to_native
 from ..grid import BAR1_TOL, Grid
 from ..setspec import knob_text
 from .caps import BUILTIN, Caps
+from .livefx import LIVE_KINDS, compile_live, restore_need
 from .model import FX_SEND, PARAMS, Clip, Fx, Jump, Loop, Project, Scene
 from .pos import BEATS_PER_BAR, fmt_dur, fmt_pos
 
@@ -226,6 +227,10 @@ class Compiled5:
     tempo: TempoMap | None = None
     clips: list[ClipC] = field(default_factory=list)
     fx: list[dict[str, Any]] = field(default_factory=list)  # 计划里的效果（含 slot、tail、line）
+    buses: list[dict[str, Any]] = field(default_factory=list)  # 处理组（插入 / 组插入 / 总输出）和里面的件
+    samples: list[dict[str, Any]] = field(default_factory=list)  # 采样（裸数据的路径、帧数）
+    hits: list[dict[str, Any]] = field(default_factory=list)  # 采样触发
+    live: list[dict[str, Any]] = field(default_factory=list)  # 现场效果，一条谱上的效果一项（图、提示、定位用）
     plan: dict[str, Any] | None = None
     length: float = 0.0  # 全场拍
 
@@ -267,13 +272,29 @@ class Compiled5:
     # ------------------------------------------------------------ 任意一拍的状态（练习起点、界面）
 
     def prerun_from(self, beat: float) -> float:
-        """从全场第 beat 拍开始练习时，要从哪一拍起静音预运行，才能把还在响的效果尾音补出来。
-        只看发送效果：送出在 beat 之前开过、尾音到 beat 还没完的；往回最多 caps.restore_max_beats 拍。"""
+        """从全场第 beat 拍开始练习时，要从哪一拍起静音预运行，才能和从头连续放到这里一样：
+        发送效果还在响的尾音（往回算到 −80 dB 为止）；现场效果里要历史的（Roll 的抓取点、Release 开始之前、
+        Echo / Spiral 的尾音、Noise 的起点）。往回最多 caps.restore_max_beats 拍——抓取型的超了这个数见 restore_problem。"""
         start = beat
+        floor = beat - self.caps.restore_max_beats
         for f in self.fx:
             if f["start"] < beat < f["end"] + f["tail"]:
-                start = min(start, max(f["start"], beat - f["t80"], beat - self.caps.restore_max_beats))
-        return start
+                start = min(start, max(f["start"], beat - f["t80"], floor))
+        for lv in self.live:
+            need = restore_need(lv, beat)
+            if need is not None:
+                start = min(start, max(need[0], floor))
+        return max(0.0, start) if beat >= 0 else start
+
+    def restore_problem(self, beat: float) -> str | None:
+        """从 beat 开始会不会「装成恢复了」：抓取型的效果（Roll、Release）要从它开始之前跑过来，
+        往回超过引擎的上限就不能从这里开始——说清楚该从哪之前开始。"""
+        for lv in self.live:
+            need = restore_need(lv, beat)
+            if need is not None and need[1] and beat - need[0] > self.caps.restore_max_beats:
+                return (f"{_zh_pos(beat)} 正在 {lv['id']}（{lv['name']}）中间，要从它开始的地方（{_zh_pos(lv['start'])}）之前放过来才对，"
+                        f"离得太远（超过 {self.caps.restore_max_beats} 拍）。请从 {_zh_pos(lv['start'])} 之前开始")
+        return None
 
     def state_at(self, beat: float) -> dict[str, Any]:
         """全场第 beat 拍时四台 Deck 应该在哪：片段、原曲位置（loop 里是第几遍）、每个旋钮的谱值、还在响的效果。"""
@@ -297,6 +318,8 @@ class Compiled5:
             decks.append(o)
         fx = [{"id": f["id"], "kind": f["kind"], "clip": f["clip"], "tail": beat >= f["end"]}
               for f in self.fx if f["start"] <= beat < f["end"] + f["tail"]]
+        fx += [{"id": lv["id"], "kind": lv["kind"], "clips": lv["clips"], "route": lv["route"], "tail": beat >= lv["end"]}
+               for lv in self.live if lv["start"] <= beat < lv["end"] + lv["tail"]]
         return {"beat": beat, "pos": fmt_pos(Fraction(beat).limit_denominator(96)), "bpm": self.tempo.bpm_at(beat),
                 "decks": decks, "fx": fx, "prerun_from": self.prerun_from(beat)}
 
@@ -313,8 +336,14 @@ def scene_of(p: Project, at: Fraction | float) -> Scene | None:
     return next((s for s in p.scenes if s.start <= at < s.end), None)
 
 
-def compile_project(p: Project, resolve: Callable[[Any], AssetInfo | None], caps: Caps = BUILTIN) -> Compiled5:
+def compile_project(p: Project, resolve: Callable[[Any], AssetInfo | None], caps: Caps = BUILTIN,
+                    samples: Callable[[str], Any] | None = None) -> Compiled5:
+    """samples：采样的名字 → SampleInfo（不给 = 只有内置的那几种，见 samples.py）。"""
     c = Compiled5(project=p, caps=caps)
+    if samples is None:
+        from .samples import resolver
+
+        samples = resolver(sr=caps.sample_rate)
 
     def where(at: Fraction | float | None = None, what: str = "") -> str:
         sc = scene_of(p, at) if at is not None else None
@@ -474,6 +503,7 @@ def compile_project(p: Project, resolve: Callable[[Any], AssetInfo | None], caps
 
     # ---- 效果
     _effects(c, p, err, hint, where)
+    compile_live(c, p, err, hint, where, samples)
 
     # ---- 场景
     prev_s: Scene | None = None
@@ -492,7 +522,8 @@ def compile_project(p: Project, resolve: Callable[[Any], AssetInfo | None], caps
         prev_s = s
     _crowd_hints(c, p, hint)
 
-    c.length = max([cc.stop for cc in c.clips] + [f["end"] + f["tail"] for f in c.fx] + [0.0])
+    c.length = max([cc.stop for cc in c.clips] + [f["end"] + f["tail"] for f in c.fx]
+                   + [lv["end"] + lv["tail"] for lv in c.live] + [0.0])
     if not c.clips and not c.errors:
         err("empty", "全场", "没有片段")
     if c.ok:
@@ -586,6 +617,8 @@ def _effects(c: Compiled5, p: Project, err: Callable[..., None], hint: Callable[
              where: Callable[..., str]) -> None:
     busy: list[float] = []  # 每个实例占到哪一拍
     for f in sorted(p.fx, key=lambda f: (f.start, f.id)):
+        if f.kind in LIVE_KINDS:
+            continue  # 现场效果：livefx.compile_live
         zh = FX_ZH.get(f.kind, f.kind)
         w = where(f.start, f"效果 {f.id}（{zh}）")
         if f.kind not in c.caps.fx:
@@ -732,8 +765,16 @@ def _plan(c: Compiled5) -> dict[str, Any]:
           for f in c.fx]
     body = {"t": c.caps.plan, "tempo": [[b, v] for b, v in zip(c.tempo.b, c.tempo.v)], "clips": clips, "fx": fx,
             "len": round(c.length, 6)}
+    if c.buses:
+        body["buses"] = c.buses
+    if c.hits:
+        # 路径不进执行编号（缓存目录每台电脑不一样）：编号按采样的名字和长度算
+        body["samples"] = [{"id": s["id"], "frames": s["frames"]} for s in c.samples]
+        body["hits"] = c.hits
     # 执行编号：计划本身 + 编译器版本 + 能力签名（换了引擎 / 设备要重新编）
     h = hashlib.sha256(json.dumps([body, COMPILER_VERSION, c.caps.signature(), p.id], sort_keys=True).encode())
+    if c.hits:
+        body["samples"] = c.samples
     return {**body, "exec": h.hexdigest()[:12], "compiler": COMPILER_VERSION, "caps": c.caps.signature()}
 
 
@@ -790,6 +831,23 @@ def actions(c: Compiled5) -> list[dict[str, Any]]:
             until=f["end"])
         add(f["end"], "fx_off", f"{f['id']} {zh} 关送出，尾音留 {fmt_dur(Fraction(f['tail']).limit_denominator(4))}", f["line"],
             f["clip"], f["deck"], until=f["end"] + f["tail"])
+    for lv in c.live:
+        scope = lv.get("scope") or fx_scope(c, lv["route"], lv["clips"])
+        deck = c.clip(lv["clips"][0]).clip.deck if len(lv["clips"]) == 1 and c.clip(lv["clips"][0]) else 0
+        clip = lv["clips"][0] if len(lv["clips"]) == 1 else ""
+        note = f"——{lv['note']}" if lv.get("note") else ""
+        if lv["kind"] == "sample":
+            add(lv["start"], "fx", f"{lv['id']} 采样：{lv['text']}{note}", lv["line"], rc=lv["rc"], until=lv["end"])
+        elif lv["kind"] == "release":
+            add(lv["start"], "fx", f"{lv['id']} {lv['name']}（{scope}）：{lv['text']}{note}", lv["line"], clip, deck, lv["rc"],
+                lv["end"])
+        else:
+            add(lv["start"], "fx", f"{lv['id']} {lv['name']} 开（{scope}，{ROUTE_ZH[lv['route']]}）：{lv['text']}{note}",
+                lv["line"], clip, deck, lv["rc"], lv["end"])
+            if not lv.get("cut_by"):
+                add(lv["end"], "fx_off", f"{lv['id']} {lv['name']} 关" +
+                    (f"，尾音留 {fmt_dur(Fraction(lv['tail']).limit_denominator(4))}" if lv["tail"] > 0 else ""), lv["line"],
+                    clip, deck, until=lv["end"] + lv["tail"])
     for i in range(1, len(p.tempo)):
         a, b = p.tempo[i - 1], p.tempo[i]
         if abs(a.bpm - b.bpm) > 1e-9:
@@ -805,6 +863,90 @@ def actions(c: Compiled5) -> list[dict[str, Any]]:
     out.sort(key=lambda a: (a["at"], order.get(a["kind"], 99), a["deck"]))
     for n, a in enumerate(out, 1):
         a["n"] = n
+    return out
+
+
+def from_native(param: str, v: float) -> float:
+    """引擎报的原生值 → 谱上的单位（compiler.to_native 的反函数）：EQ dB（切到底 = KILL_DB）、Filter -1..1、推子 0..1。"""
+    from ..compiler import KILL_DB, VOL_MIN_DB
+
+    if param in ("lo", "mid", "hi"):
+        return KILL_DB if v <= 10 ** (KILL_DB / 20.0) else round(20.0 * math.log10(v), 3)
+    if param == "filter":
+        return round(max(-1.0, min(1.0, (v - 0.5) * 2.0)), 4)
+    if param == "vol":
+        if v <= 0:
+            return 0.0
+        if v >= 1:
+            return 1.0
+        off = 10 ** (VOL_MIN_DB / 20.0)
+        return round((20.0 * math.log10(v * (1 - off) + off) - VOL_MIN_DB) / -VOL_MIN_DB, 4)
+    return v
+
+
+def controls_human(controls: dict[str, float]) -> dict[str, dict[str, Any]]:
+    """一台 Deck 实际的旋钮位置，换成谱上的单位和面板上的说法（界面显示「现在」的值用）。"""
+    out = {}
+    for param, v in controls.items():
+        if param in PARAM_ZH:
+            h = from_native(param, float(v))
+            out[param] = {"v": h, "text": knob_text(param, h)}
+    return out
+
+
+ROUTE_ZH = {"send": "发送", "insert": "插入", "group": "组插入", "master": "总输出"}
+
+
+def fx_scope(c: Compiled5, route: str, clips: list[str]) -> str:
+    """作用范围，写给人看：「仅 C3 节奏层」「C1 与 C3 一起」「总输出」。"""
+    if route == "master":
+        return "总输出"
+    names = []
+    for cid in clips:
+        cc = c.clip(cid)
+        names.append(f"{cid} {cc.clip.role}".strip() if cc else cid)
+    return ("仅 " + names[0]) if len(names) == 1 else " 与 ".join(names) + " 一起"
+
+
+def fx_text(f: dict[str, Any]) -> str:
+    """参数摘要（图上、动作提示、交接说明用同一句）。"""
+    p = f["p"]
+    bits = []
+    if "beats" in p:
+        bits.append(f"拍长 {fmt_dur(Fraction(p['beats']).limit_denominator(96))}")
+    if "decay" in p:
+        bits.append(f"衰减 {p['decay']:g}")
+    if "feedback" in p and p["feedback"] > 0:
+        bits.append(f"反馈 {p['feedback']:g}")
+    send = f.get("send") or []
+    if send and (len(send) > 1 or abs(send[0][1] - 1.0) > 1e-9):
+        a, b = send[0][1], send[-1][1]
+        bits.append(f"送出 {a:g}" + (f" → {b:g}" if abs(a - b) > 1e-9 else ""))
+    return " · ".join(bits)
+
+
+def fx_chart(c: Compiled5, f: dict[str, Any]) -> dict[str, Any]:
+    clips = list(f.get("clips") or ([f["clip"]] if f.get("clip") else []))
+    decks = sorted({c.clip(k).clip.deck for k in clips if c.clip(k)})
+    route = f.get("route", "send")
+    return {"id": f["id"], "kind": f["kind"], "name": FX_ZH.get(f["kind"], f["kind"]), "route": route,
+            "route_zh": ROUTE_ZH.get(route, route), "clips": clips, "decks": decks, "scope": fx_scope(c, route, clips),
+            "start": f["start"], "end": f["end"], "tail": f.get("tail", 0.0), "text": f.get("text") or fx_text(f),
+            "line": f["line"], "p": f["p"], "send": f.get("send"), "wet": f.get("wet")}
+
+
+def live_chart(c: Compiled5, lv: dict[str, Any]) -> dict[str, Any]:
+    """现场效果在图上的一项（和发送效果同样的字段；多出来的：bus = 处理组，back / muted_until = Release 怎么收）。"""
+    decks = sorted({c.clip(k).clip.deck for k in lv["clips"] if c.clip(k)})
+    out = {"id": lv["id"], "kind": lv["kind"], "name": lv["name"], "route": lv["route"],
+           "route_zh": "采样" if lv["kind"] == "sample" else ROUTE_ZH[lv["route"]], "clips": lv["clips"], "decks": decks,
+           "scope": lv.get("scope") or fx_scope(c, lv["route"], lv["clips"]), "start": lv["start"], "end": lv["end"],
+           "tail": lv["tail"], "text": lv["text"], "line": lv["line"], "bus": lv.get("bus") or ""}
+    if lv["kind"] == "release":
+        out["back"] = lv.get("back")
+        out["muted_until"] = lv.get("muted_until")
+    if lv.get("cut_by"):
+        out["cut_by"] = lv["cut_by"]
     return out
 
 
@@ -834,6 +976,7 @@ def chart(c: Compiled5) -> dict[str, Any]:
                "missing": s.missing(), "roles": s.roles, "intent": s.intent, "line": s.line} for s in p.scenes]
     return {"id": p.id, "name": p.name, "exec": (c.plan or {}).get("exec"), "length": c.length, "duration": c.duration,
             "bars": c.length / BEATS_PER_BAR, "tempo": [{"at": b, "bpm": v} for b, v in zip(c.tempo.b, c.tempo.v)],
-            "decks": c.caps.max_decks, "clips": clips, "fx": [{k: v for k, v in f.items() if k != "t80"} for f in c.fx],
+            "decks": c.caps.max_decks, "clips": clips,
+            "fx": [fx_chart(c, f) for f in c.fx] + [live_chart(c, lv) for lv in c.live],
             "scenes": scenes, "actions": actions(c), "issues": [i.to_dict() for i in c.issues],
             "legacy": p.legacy, "caps": c.caps.to_dict()}

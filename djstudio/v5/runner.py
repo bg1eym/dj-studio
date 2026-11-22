@@ -106,7 +106,11 @@ class Runner5:
 
     def seek(self, beat: float) -> None:
         """跳到全场第 beat 拍重新开始（同一个引擎，不重开）。跳转会结束所有手动接管，旋钮回到那一拍谱上的位置。"""
-        self._seek = max(0.0, float(beat))
+        beat = max(0.0, float(beat))
+        problem = self.c.restore_problem(beat)
+        if problem:  # 抓取型的效果离得太远：不能从这里开始（不装成恢复了）
+            raise Engine5Error(problem)
+        self._seek = beat
 
     def takeover(self, deck: int, param: str, value: float) -> None:
         """手动接管一个旋钮（value = Mixxx 原生值）：只有它不再跟谱，别的照常。"""

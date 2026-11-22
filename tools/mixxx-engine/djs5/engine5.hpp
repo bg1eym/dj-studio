@@ -20,16 +20,16 @@
 #pragma once
 
 #include <cstdint>
+#include <fstream>
 #include <mutex>
 
 #include "core.hpp"
+#include "bus.hpp"
 #include "fx.hpp"
 
 namespace djs5 {
 
 // 版本化的固定参数（改了要加 kFxVersion / 协议版本，并同步 docs/ENGINE5.md）
-constexpr double kGateInMs = 1.0;    // 门在起播点前这么久开始打开，到起播点全开
-constexpr double kGateOutMs = 3.0;   // 门在停止点前这么久开始关，到停止点关完（停止那一拍上的 kick 不会漏出来）
 constexpr double kVolSmoothMs = 2.0; // 推子一下跳变时的平滑（去掉爆音）
 constexpr double kMasterFadeMs = 10.0; // 全场暂停 / 继续的淡出淡入
 constexpr int kPrerollBuffers = 4;
@@ -38,7 +38,7 @@ constexpr int kHints = 8;              // 每个 deck 预读几个跳段目标
 constexpr double kPhaseHardMs = 25.0;  // 位置差超过这么多：重新定位
 constexpr double kPhaseCorrSec = 0.25; // 小的位置差在这么久里拉回来
 constexpr double kPhaseMaxNudge = 0.004;
-constexpr int kProtocol = 1;
+constexpr int kProtocol = 2;
 
 // deck 后端：声音引擎里 = Mixxx 的 deck + EQ + 滤波；模拟器里 = 假 deck。
 // 除 channel() 外都在控制步里调（和「处理一块音频」互斥）。位置单位 = 原曲的秒。
@@ -78,6 +78,17 @@ class Engine5 {
         for (auto& s : m_slots) {
             s.delay.init(m_sr);
         }
+        const size_t sz = static_cast<size_t>(m_n) * 2;
+        m_u.assign(static_cast<size_t>(kMaxDecks + 1), std::vector<float>(sz, 0.0f));
+        m_v.assign(static_cast<size_t>(kMaxDecks + 1), std::vector<float>(sz, 0.0f));
+        m_vd.assign(static_cast<size_t>(kMaxDecks + 1), std::vector<float>(static_cast<size_t>(m_n), 0.0f));
+        m_busIn.assign(sz, 0.0f);
+        m_busOut.assign(sz, 0.0f);
+        m_zero.assign(sz, 0.0f);
+        m_sampler.init(m_sr);
+        BandSplit3 probe;
+        probe.init(m_sr);
+        m_splitLatency = probe.latency();
     }
 
     std::recursive_mutex& gate() { return m_gate; }
@@ -105,6 +116,7 @@ class Engine5 {
             } else if (cmd == "v5.plan") {
                 loadPlan(c["plan"]);
                 r.set("exec", m_plan->exec);
+                r.set("latency", m_latA + m_latM); // 这份计划的输出比 deck 晚多少帧（用到分频才有）
             } else if (cmd == "v5.start") {
                 start(c["beat"].num(), c.has("prerun") ? c["prerun"].num() : c["beat"].num());
             } else if (cmd == "v5.pause") {
@@ -151,9 +163,19 @@ class Engine5 {
         r.set("buffer_frames", m_n);
         Json fx = Json::object();
         fx.set("delay", kFxVersion).set("echo", kFxVersion).set("reverb", kFxVersion);
+        // 现场效果（处理组里的件）：版本 = DSP 的版本 + 组里的顺序 / 时间常数的版本
+        const int live = kDspVersion * 100 + kBusVersion;
+        for (int k = 0; k < U_COUNT; ++k) {
+            fx.set(k == U_ECHO ? "insert_echo" : unitKindName(k), live);
+        }
+        fx.set("sample", live);
         r.set("fx", fx);
         r.set("fx_slots", kFxSlots);
-        r.set("routes", Json::array().push("send"));
+        r.set("routes", Json::array().push("send").push("insert").push("group").push("master"));
+        r.set("buses", kBuses);
+        Json split = Json::object();
+        split.set("low_hz", 250.0).set("high_hz", 2500.0).set("latency_frames", m_splitLatency);
+        r.set("split", split);
         Json timing = Json::object();
         timing.set("gate", "sample").set("deck_control", "buffer").set("preroll_buffers", kPrerollBuffers);
         timing.set("gate_in_ms", kGateInMs).set("gate_out_ms", kGateOutMs);
@@ -163,7 +185,8 @@ class Engine5 {
         r.set("restore", restore);
         r.set("slip_loop", false);
         r.set("keylock_compensated", false);
-        r.set("sampler", 0);
+        r.set("sampler", static_cast<int>(Sampler::kSlots));       // 一份计划最多几个采样
+        r.set("sampler_voices", static_cast<int>(Sampler::kVoices)); // 同时最多几个在响
         r.set("protect", false);
         return r;
     }
@@ -242,7 +265,17 @@ class Engine5 {
             o.set("level", dbfs(sl.ms));
             fx.push(o);
         }
+        if (timed) {
+            const double lat = m_be.delayFrames();
+            const double gU = beatAtFrame(static_cast<double>(m_frame) - lat);
+            const double dg = beatAtFrame(static_cast<double>(m_frame) - lat + 1.0) - gU;
+            for (const auto& b : m_buses) {
+                const bool isM = b->spec().route == R_MASTER;
+                b->report(gU - (m_latA + (isM ? m_latM : 0)) * dg, fx);
+            }
+        }
         s.set("fx", fx);
+        s.set("latency", m_latA + m_latM);
         Json master = Json::object();
         master.set("level", dbfs(m_masterMs)).set("peak", m_masterPeak > 1e-5 ? 20.0 * std::log10(m_masterPeak) : -100.0);
         master.set("over", m_over).set("over_now", m_overHold > 0);
@@ -309,16 +342,27 @@ class Engine5 {
         const float downStep = static_cast<float>(1000.0 / (kGateOutMs * m_sr));
         const float volA = static_cast<float>(1.0 - std::exp(-1000.0 / (kVolSmoothMs * m_sr)));
 
+        // 三条时间轴：deck 出来的声音（g0 起）→ 过了片段 / 组这一级（晚 m_latA 帧）→ 过了总输出这一级（再晚 m_latM 帧）。
+        // 计划里没有分频的件时两个延迟都是 0，三条轴是同一条。
+        const double gD0 = g0 - m_latA * dgs, gD1 = g1 - m_latA * dgs;
+        const double gM0 = gD0 - m_latM * dgs;
+        const size_t bytes = static_cast<size_t>(N) * 2 * sizeof(float);
+
+        // 1. 每台 deck：门、推子（落在采样上）→ u = 过了门、没过推子；v = 过了推子；vd = 晚 m_latA 帧的推子
         for (int d = 1; d <= m_decks; ++d) {
             DeckRt& rt = m_d[d];
             const Clip* c = clipOf(d);
             const float* ch = m_be.channel(d);
-            std::vector<float>& post = m_post[static_cast<size_t>(d)];
+            float* u = m_u[static_cast<size_t>(d)].data();
+            float* v = m_v[static_cast<size_t>(d)].data();
+            float* vd = m_vd[static_cast<size_t>(d)].data();
+            std::vector<float>& ring = m_volRing[d];
+            size_t& rp = m_volPos[d];
             const bool can = c && ch && rt.st == DPlaying;
             // 不用无穷大 / NaN 当「没有」：声音引擎跟着 Mixxx 用 -ffast-math 编，那样的比较会被优化掉
             const double openFrom = can ? rt.effStart - gateIn : 1e300;
             const double closeAt = can ? c->stop : -1e300;
-            double pre = 0.0, pst = 0.0;
+            double pre = 0.0;
             for (int n = 0; n < N; ++n) {
                 const double g = g0 + n * dgs;
                 const float target = (g >= openFrom && g < closeAt - gateOut) ? 1.0f : 0.0f;
@@ -333,28 +377,180 @@ class Engine5 {
                 } else {
                     rt.volSm += (vt - rt.volSm) * volA;
                 }
-                const float gain = rt.gate * rt.volSm;
                 const float l = ch ? ch[2 * n] : 0.0f, r = ch ? ch[2 * n + 1] : 0.0f;
-                const float pl_ = l * gain, pr_ = r * gain;
-                post[static_cast<size_t>(2 * n)] = pl_;
-                post[static_cast<size_t>(2 * n + 1)] = pr_;
-                out[2 * n] += pl_;
-                out[2 * n + 1] += pr_;
+                u[2 * n] = l * rt.gate;
+                u[2 * n + 1] = r * rt.gate;
+                v[2 * n] = u[2 * n] * rt.volSm;
+                v[2 * n + 1] = u[2 * n + 1] * rt.volSm;
+                if (m_latA > 0) {
+                    vd[n] = ring[rp];
+                    ring[rp] = rt.volSm;
+                    rp = rp + 1 < ring.size() ? rp + 1 : 0;
+                } else {
+                    vd[n] = rt.volSm;
+                }
                 pre += static_cast<double>(l) * l + static_cast<double>(r) * r;
-                pst += static_cast<double>(pl_) * pl_ + static_cast<double>(pr_) * pr_;
             }
             rt.preMs += ((ch && rt.st == DPlaying ? pre / (2.0 * N) : 0.0) - rt.preMs) * a300;
+        }
+
+        // 2. 片段 / 组这一级。默认的路：v 过一条等长的延迟线。插入组：u 进组，出来再乘（晚了同样多的）推子。
+        //    组插入：成员的 v 加起来进组，成员不再各自直通（它们的发送照旧取各自延迟后的推子后信号）。
+        //    组提前喂（延迟线 / 分频器里先有历史），喂热了、到了窗口边上才把这一路换过去：换的那一刻两边出的是同一个信号。
+        bool viaInsert[kMaxDecks + 1] = {}, viaGroup[kMaxDecks + 1] = {};
+        const double armB = kArmBuffers * N * dgs, liveB = kLiveBuffers * N * dgs;
+        for (auto& bp : m_buses) {
+            BusRt& bus = *bp;
+            const BusSpec& bs = bus.spec();
+            if (bs.route == R_MASTER) {
+                continue;
+            }
+            if (!bus.wants(gD0, gD1, armB)) {
+                if (bus.fed() > 0) {
+                    bus.reset();
+                }
+                continue;
+            }
+            if (bus.fed() == 0 && m_runBuffers == 0) {
+                bus.markSinceStart();
+            }
+            // 只收自己的目标片段：同一台 deck 上别的片段进不来
+            bool anyIn = false;
+            float* in = m_busIn.data();
+            std::fill(in, in + 2 * N, 0.0f);
+            for (int ci : bs.clipIdx) {
+                const Clip& c = pl.clips[static_cast<size_t>(ci)];
+                if (clipOf(c.deck) != &c || m_d[c.deck].st != DPlaying) {
+                    continue;
+                }
+                const float* src = (bs.route == R_INSERT ? m_u : m_v)[static_cast<size_t>(c.deck)].data();
+                for (int i = 0; i < 2 * N; ++i) {
+                    in[i] += src[i];
+                }
+                anyIn = true;
+            }
+            (void)anyIn;
+            bus.process(in, m_busOut.data(), gD0, dgs, bpm);
+            if (!(bus.warm() && bus.wants(gD0, gD1, liveB))) {
+                continue;
+            }
+            if (bs.route == R_INSERT) {
+                const Clip& c = pl.clips[static_cast<size_t>(bs.clipIdx[0])];
+                if (clipOf(c.deck) == &c && !viaInsert[c.deck] && !viaGroup[c.deck]) {
+                    viaInsert[c.deck] = true;
+                    float* post = m_post[static_cast<size_t>(c.deck)].data();
+                    const float* vd = m_vd[static_cast<size_t>(c.deck)].data();
+                    for (int n = 0; n < N; ++n) {
+                        post[2 * n] = m_busOut[static_cast<size_t>(2 * n)] * vd[n];
+                        post[2 * n + 1] = m_busOut[static_cast<size_t>(2 * n + 1)] * vd[n];
+                    }
+                }
+            } else {
+                for (int ci : bs.clipIdx) {
+                    const Clip& c = pl.clips[static_cast<size_t>(ci)];
+                    if (clipOf(c.deck) == &c && !viaInsert[c.deck]) {
+                        viaGroup[c.deck] = true;
+                    }
+                }
+                for (int i = 0; i < 2 * N; ++i) {
+                    out[i] += m_busOut[static_cast<size_t>(i)];
+                }
+            }
+        }
+        for (int d = 1; d <= m_decks; ++d) {
+            DeckRt& rt = m_d[d];
+            float* post = m_post[static_cast<size_t>(d)].data();
+            // 默认的那条延迟线一直走着（哪怕这一块走的是组）：换回来的时候里面的历史是对的
+            if (m_latA > 0) {
+                m_alignD[d].process(m_v[static_cast<size_t>(d)].data(), viaInsert[d] ? m_busIn.data() : post, N);
+            } else if (!viaInsert[d]) {
+                std::memcpy(post, m_v[static_cast<size_t>(d)].data(), bytes);
+            }
+            double pst = 0.0;
+            for (int i = 0; i < 2 * N; ++i) {
+                pst += static_cast<double>(post[i]) * post[i];
+            }
+            if (!viaGroup[d]) {
+                for (int i = 0; i < 2 * N; ++i) {
+                    out[i] += post[i];
+                }
+            }
             rt.postMs += (pst / (2.0 * N) - rt.postMs) * a300;
         }
 
-        renderFx(out, g0, g1, bpm, a300);  // 发送效果：送出的开 / 关也落在采样上
+        // 3. 发送效果：取这一级之后的推子后信号；送出的开 / 关也落在采样上
+        renderFx(out, gD0, gD1, bpm, a300);
+
+        // 4. 采样：到点触发（落在采样上），直接进主混音
+        while (m_hitNext < pl.hits.size() && pl.hits[m_hitNext].beat < gD1) {
+            const HitSpec& h = pl.hits[m_hitNext];
+            const int off = std::min(N - 1, std::max(0, static_cast<int>(std::ceil((h.beat - gD0) / dgs - 1e-6))));
+            if (h.stop) {
+                m_sampler.stopAll(off);
+            } else {
+                m_sampler.trigger(h.slot, off, static_cast<float>(h.gain));
+                if (!h.id.empty() && m_state != Prerun) {
+                    receipt(h.id, "ok", nullptr, h.beat, gD0 + off * dgs);
+                }
+            }
+            ++m_hitNext;
+        }
+        m_sampler.process(out, N);
+
+        // 处理组里的件到点了：回执（目标片段没在放的 = 跳过）
+        while (m_markNext < m_marks.size() && m_marks[m_markNext].beat < gD1) {
+            const Mark& mk = m_marks[m_markNext];
+            if (m_state != Prerun) {
+                const BusSpec& bs = pl.buses[static_cast<size_t>(mk.bus)];
+                bool playing = bs.route == R_MASTER;
+                for (int ci : bs.clipIdx) {
+                    const Clip& c = pl.clips[static_cast<size_t>(ci)];
+                    playing = playing || (clipOf(c.deck) == &c && m_d[c.deck].st == DPlaying);
+                }
+                receipt(mk.id, playing ? "ok" : "skipped", nullptr, mk.beat, mk.beat, playing ? "" : "目标片段没在放");
+            }
+            ++m_markNext;
+        }
+
+        // 5. 总输出这一级：整个主混音（含效果返回、采样）进总输出的处理组；没有的时候过等长的延迟线
+        {
+            bool viaMaster = false;
+            for (auto& bp : m_buses) {
+                BusRt& bus = *bp;
+                if (bus.spec().route != R_MASTER) {
+                    continue;
+                }
+                const double gM1 = gM0 + N * dgs;
+                if (!bus.wants(gM0, gM1, armB)) {
+                    if (bus.fed() > 0) {
+                        bus.reset();
+                    }
+                    continue;
+                }
+                if (bus.fed() == 0 && m_runBuffers == 0) {
+                    bus.markSinceStart();
+                }
+                bus.process(out, m_busOut.data(), gM0, dgs, bpm);
+                if (!viaMaster && bus.warm() && bus.wants(gM0, gM1, liveB)) {
+                    viaMaster = true;
+                    std::memcpy(m_busIn.data(), m_busOut.data(), bytes);
+                }
+            }
+            if (m_latM > 0) {
+                m_alignM.process(out, m_busOut.data(), N);
+                std::memcpy(out, viaMaster ? m_busIn.data() : m_busOut.data(), bytes);
+            } else if (viaMaster) {
+                std::memcpy(out, m_busIn.data(), bytes);
+            }
+        }
+        ++m_runBuffers;
 
         // 主输出：开演 / 定位后到「听得见」的那一拍才放出来；全场暂停 / 停止时淡出
         double sum = 0.0;
         float peak = 0.0f;
         int over = 0;
         for (int n = 0; n < N; ++n) {
-            const double g = g0 + n * dgs;
+            const double g = gM0 + n * dgs;
             const float target = g >= m_audibleBeat - gateIn ? m_masterTarget : 0.0f;
             if (m_master < target) {
                 m_master = std::min(target, m_master + m_masterStep);
@@ -498,6 +694,41 @@ class Engine5 {
                 s.reverb = m_reverbFactory(m_sr);
             }
         }
+        // 处理组：这里分配（不在音频线程里）。有分频的计划，这一级所有的路都延迟同样的帧数（见 bus.hpp）
+        m_buses.clear();
+        m_latA = pl->splitA ? m_splitLatency : 0;
+        m_latM = pl->splitM ? m_splitLatency : 0;
+        for (const BusSpec& bs : pl->buses) {
+            std::unique_ptr<BusRt> rt(new BusRt());
+            rt->init(bs, m_sr, m_n, bs.route == R_MASTER ? m_latM : m_latA);
+            m_buses.push_back(std::move(rt));
+        }
+        for (int d = 0; d <= kMaxDecks; ++d) {
+            m_alignD[d].init(m_latA);
+            m_volRing[d].assign(static_cast<size_t>(std::max(1, m_latA)), 0.0f);
+            m_volPos[d] = 0;
+        }
+        m_alignM.init(m_latM);
+        // 采样：Python 那边解码成引擎采样率的 float32 立体声裸数据
+        for (int k = 0; k < Sampler::kSlots; ++k) {
+            m_sampler.load(k, nullptr, 0);
+        }
+        for (size_t k = 0; k < pl->samples.size(); ++k) {
+            const SampleSpec& sm = pl->samples[k];
+            std::ifstream f(sm.path, std::ios::binary);
+            std::vector<float> data(static_cast<size_t>(std::max(0, sm.frames)) * 2, 0.0f);
+            if (!f || data.empty() || !f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size() * sizeof(float)))) {
+                throw std::runtime_error("采样 " + sm.id + " 读不了：" + sm.path);
+            }
+            m_sampler.load(static_cast<int>(k), data.data(), sm.frames);
+        }
+        m_marks.clear();
+        for (size_t i = 0; i < pl->buses.size(); ++i) {
+            for (const UnitSpec& u : pl->buses[i].units) {
+                m_marks.push_back({u.start, u.id, static_cast<int>(i)});
+            }
+        }
+        std::sort(m_marks.begin(), m_marks.end(), [](const Mark& a, const Mark& b2) { return a.beat < b2.beat; });
         m_plan = pl;
         m_state = Idle;
     }
@@ -522,6 +753,17 @@ class Engine5 {
             s.prevSend = s.prevWet = 0.0f;
             s.ms = 0.0;
         }
+        for (auto& b : m_buses) {
+            b->reset();
+        }
+        for (int d = 0; d <= kMaxDecks; ++d) {
+            m_alignD[d].reset();
+            std::fill(m_volRing[d].begin(), m_volRing[d].end(), 0.0f);
+            m_volPos[d] = 0;
+        }
+        m_alignM.reset();
+        m_sampler.reset();
+        m_runBuffers = 0;
         m_master = 0.0f;
     }
 
@@ -549,6 +791,14 @@ class Engine5 {
             m_d[d] = fresh;
         }
         m_fxNext = 0;
+        m_hitNext = 0;
+        while (m_hitNext < pl.hits.size() && pl.hits[m_hitNext].beat < m_startBeat) {
+            ++m_hitNext;
+        }
+        m_markNext = 0;
+        while (m_markNext < m_marks.size() && m_marks[m_markNext].beat < m_startBeat) {
+            ++m_markNext;
+        }
         m_master = 0.0f;
         m_masterTarget = 1.0f;
         m_masterStep = masterStep(kGateInMs);
@@ -1030,6 +1280,24 @@ class Engine5 {
     size_t m_fxNext = 0;
     std::vector<std::vector<float>> m_post;
     std::vector<float> m_wet, m_fxIn;
+    // 处理组（插入效果）、对齐延迟、采样
+    struct Mark {
+        double beat;
+        std::string id;
+        int bus;
+    };
+    std::vector<std::unique_ptr<BusRt>> m_buses;
+    int m_latA = 0, m_latM = 0, m_splitLatency = 0;
+    AlignDelay m_alignD[kMaxDecks + 1];
+    AlignDelay m_alignM;
+    std::vector<float> m_volRing[kMaxDecks + 1];
+    size_t m_volPos[kMaxDecks + 1] = {};
+    std::vector<std::vector<float>> m_u, m_v, m_vd;
+    std::vector<float> m_busIn, m_busOut, m_zero;
+    Sampler m_sampler;
+    size_t m_hitNext = 0, m_markNext = 0;
+    std::vector<Mark> m_marks;
+    long long m_runBuffers = 0;
     float m_master = 0.0f, m_masterTarget = 1.0f, m_masterStep = 1.0f;
     double m_masterMs = 0.0, m_masterPeak = 0.0;
     long long m_over = 0;

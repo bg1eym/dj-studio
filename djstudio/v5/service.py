@@ -18,13 +18,14 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Callable, TYPE_CHECKING, Any
 
 from ..grid import Grid
 from ..plan.cdw import Plan, PlanTrack
 from ..plan.convert import LibTrack, align, match_tracks
+from . import samples
 from .caps import BUILTIN, Caps
-from .compile import AssetInfo, Compiled5, Issue5, chart, compile_project
+from .compile import AssetInfo, Compiled5, Issue5, chart, compile_project, controls_human
 from .link import Engine5Error, open_engine
 from .model import Project, load_project, save_project
 from .runner import Progress5, Runner5
@@ -187,11 +188,41 @@ class Service5:
     def compile(self, p: Project, caps: Caps = BUILTIN) -> Compiled5:
         matches, m_issues = self.match(p)
         table, g_issues = self.infos(p, matches)
-        c = compile_project(p, lambda a: table.get(a.id), caps)
+        c = compile_project(p, lambda a: table.get(a.id), caps, samples=self.sample_resolver(p.id, caps.sample_rate))
         c.issues = m_issues + [i for i in g_issues if not any(x.code == "asset_missing" and x.where == i.where for x in c.issues)] + c.issues
         if not c.ok:
             c.plan = None
         return c
+
+    # ------------------------------------------------------------ 采样
+
+    def samples_dir(self, pid: str) -> Path:
+        """这个项目自带的采样文件（导入文件夹时从谱旁边拷过来的）。"""
+        return self.projects_dir / f"{pid}.samples"
+
+    def sample_file(self, pid: str, name: str) -> Path | None:
+        """谱上写的采样文件名 → 原文件：先看项目自己的，再看曲库里有没有同名的文件（拖进来的音频都在曲库里）。"""
+        f = self.samples_dir(pid) / Path(name).name
+        if f.is_file():
+            return f
+        for tr in self.s.store.all():
+            if Path(tr.path).name == Path(name).name and Path(tr.path).is_file():
+                return Path(tr.path)
+        return None
+
+    def sample_resolver(self, pid: str, sr: int) -> Callable[[str], Any]:
+        from ..library.audio import decode_mono
+
+        builtin = samples.resolver(self.s.cfg.home / "samples", sr=sr)
+
+        def find(name: str) -> Any:
+            info = builtin(name)
+            if info is not None or not name.lower().endswith(samples.AUDIO_EXTS):
+                return info
+            f = self.sample_file(pid, name)
+            return samples.resolver(self.s.cfg.home / "samples", [f.parent], sr, decode_mono)(f.name) if f else None
+
+        return find
 
     # ------------------------------------------------------------ 项目
 
@@ -327,11 +358,13 @@ class Service5:
         c = self.compiled(pid)
         if not c.ok:
             raise StudioError("曲谱没编过：" + "；".join(str(i) for i in c.errors[:5]))
+        problem = c.restore_problem(beat)
+        if problem:
+            raise StudioError(problem)
         try:
             link = open_engine(c.library_rows(), speed=speed, audio=speed == 1.0, sim=sim)
         except Engine5Error as e:
             raise StudioError(str(e)) from e
-        beat = max(0.0, min(float(beat), c.length - 1))
         log_path = s.cfg.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{pid}.log"
 
         def on_log(line: str) -> None:
@@ -395,9 +428,13 @@ class Service5:
                 pass
         audio = r["audio"]
         lat = float(audio.get("latency_ms") or 0) + float(audio.get("eq_delay_ms") or 0) if audio and audio.get("on") else 0.0
+        status = link.status
+        if status:
+            # 旋钮的实际位置换成谱上的单位（界面不用自己懂增益怎么换钟点位）
+            status = {**status, "decks": [{**d, "human": controls_human(d.get("controls") or {})} for d in status.get("decks", [])]}
         return {"connected": True, "online": link.online(), "v5": True, "version": "v5", "link": link.name,
                 "rehearsal": True, "builtin": True, "speed": r["speed"], "set": r["project"], "from": 0, "track": 0, "bar": 1,
-                "audio": audio, "status": link.status, "at": round(link.status_wall * 1000 + lat, 1) if link.status_wall else None,
+                "audio": audio, "status": status, "at": round(link.status_wall * 1000 + lat, 1) if link.status_wall else None,
                 "receipts": dict(runner.receipts), "from_beat": runner.from_beat, "stage": runner.progress.stage}
 
     # ------------------------------------------------------------ 文件夹导入 / 演出包
@@ -441,6 +478,17 @@ class Service5:
             raise StudioError("这些文件和演出包清单里记的内容不一样（被换过 / 没拷完整）：" + "、".join(changed))
         if missing:
             raise StudioError(f"「{folder.name}」里缺这些原曲（谱上写的相对路径）：" + "、".join(missing))
+        # 谱上写的采样文件（效果表里「采样」那几行的目标）：从谱旁边拷到项目里
+        wanted = sorted({f.targets[0] for f in r.project.fx if f.kind == "sample" and f.targets
+                         and f.targets[0].lower().endswith(samples.AUDIO_EXTS)})
+        lost = [n for n in wanted if not (folder / n).is_file()]
+        if lost:
+            raise StudioError(f"「{folder.name}」里缺这些采样文件：" + "、".join(lost))
+        if wanted:
+            sd = self.samples_dir(r.project.id)
+            sd.mkdir(parents=True, exist_ok=True)
+            for n in wanted:
+                shutil.copyfile(folder / n, sd / Path(n).name)
         res = self.s.library.import_paths(sorted(set(paths)), trusted=True)
         if res.failed:
             raise StudioError("这些文件导不进来：" + "、".join(f"{Path(p).name}（{why}）" for p, why in res.failed))
@@ -478,6 +526,16 @@ class Service5:
             if fname in files and files[fname][0] != src:
                 raise StudioError(f"素材 {files[fname][1][0]} 和 {a.id} 的文件都叫「{fname}」但不是同一个文件：改其中一个的文件名再导出")
             files.setdefault(fname, (src, []))[1].append(a.id)
+        extra: dict[str, Path] = {}  # 自带的采样文件：和谱、原曲放同一层
+        for f in p.fx:
+            if f.kind == "sample" and f.targets and f.targets[0].lower().endswith(samples.AUDIO_EXTS):
+                src = self.sample_file(pid, f.targets[0])
+                fname = Path(f.targets[0]).name
+                if src is None:
+                    raise StudioError(f"效果 {f.id} 的采样文件「{fname}」不在了")
+                if fname in files and files[fname][0] != src:
+                    raise StudioError(f"采样「{fname}」和一份素材的文件同名但不是同一个文件：改其中一个的文件名再导出")
+                extra[fname] = src
         parent.mkdir(parents=True, exist_ok=True)
         final = parent / name
         tmp = parent / f".{name}.{os.getpid()}.tmp"
@@ -496,6 +554,13 @@ class Service5:
                 assets.append({"file": fname, "assets": ids, "sha256": got, "size": st.st_size, "mtime": st.st_mtime,
                                "track": info.track_id, "grid": {"bpm": info.grid.bpm, "first_beat": info.grid.first_beat,
                                                                "bar1_s": round(info.beat_time(0.0), 5)}})
+            sample_rows = []
+            for fname, src in sorted(extra.items()):
+                if fname not in files:
+                    shutil.copyfile(src, tmp / fname)
+                if file_sha256(src) != file_sha256(tmp / fname):
+                    raise StudioError(f"「{fname}」拷过去内容不一样（磁盘满了？）")
+                sample_rows.append({"file": fname, "sha256": file_sha256(src), "size": src.stat().st_size})
             md_name = Path(p.source).name if p.source.lower().endswith((".md", ".markdown")) else f"{name}.md"
             src_md = self.s.plans_dir / md_name
             text = src_md.read_text(encoding="utf-8-sig") if src_md.is_file() and not p.legacy else write(p)
@@ -506,7 +571,8 @@ class Service5:
             (tmp / md_name).write_text(text, encoding="utf-8")
             manifest = {"schema": "djstudio-package/1", "project": p.id, "name": p.name, "score": md_name, "spec": p.spec,
                         "exec": c.plan["exec"], "caps": c.caps.to_dict(), "duration": round(c.duration, 1),
-                        "bars": c.length / 4, "assets": assets, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+                        "bars": c.length / 4, "assets": assets, "samples": sample_rows,
+                        "exported_at": time.strftime("%Y-%m-%d %H:%M:%S")}
             (tmp / MANIFEST).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             old = None
             if final.exists():
@@ -519,5 +585,6 @@ class Service5:
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
-        return {"path": str(final), "name": name, "score": md_name, "files": [a["file"] for a in assets],
-                "bytes": sum(a["size"] for a in assets)}
+        return {"path": str(final), "name": name, "score": md_name,
+                "files": [a["file"] for a in assets] + [s["file"] for s in sample_rows if s["file"] not in files],
+                "bytes": sum(a["size"] for a in assets) + sum(s["size"] for s in sample_rows if s["file"] not in files)}

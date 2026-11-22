@@ -38,7 +38,7 @@ def sim5_binary() -> Path | None:
         return None
     h = hashlib.sha256()
     for f in sorted(SIM_DIR.glob("*.[ch]pp")):
-        if f.name in ("sim5.cpp", "core.hpp", "engine5.hpp", "fx.hpp", "json.hpp"):
+        if f.name in ("sim5.cpp", "core.hpp", "engine5.hpp", "fx.hpp", "json.hpp", "bus.hpp", "dsp.hpp"):
             h.update(f.read_bytes())
     out = Path(tempfile.gettempdir()) / f"djstudio-sim5-{h.hexdigest()[:16]}"
     if out.is_file() and os.access(out, os.X_OK):

@@ -1,4 +1,4 @@
-"""命令行入口：`djstudio serve`（默认）/ app / selftest / demo / doctor / validate / import / prepare / play / probe。"""
+"""命令行入口：`djstudio serve`（默认）/ app / selftest / demo / demo5 / doctor / validate / import / prepare / play / probe。"""
 from __future__ import annotations
 
 import argparse
@@ -128,6 +128,10 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--speed", type=float, default=8.0, help="模拟器倍速")
     d.add_argument("--port", type=int, default=8431)
     d.add_argument("--no-browser", action="store_true")
+    d5 = sub.add_parser("demo5", help="四 Deck 演示（曲谱 v5）：按示例谱合成素材，用内置引擎，不需要自己的曲子")
+    d5.add_argument("--dir", default=None, help="演示数据目录（默认临时目录）")
+    d5.add_argument("--port", type=int, default=8432)
+    d5.add_argument("--no-browser", action="store_true")
     sub.add_parser("app", help="DJ Studio.app 用：启动网页并打开浏览器（日志写文件，已经开着就只打开网页）")
     sub.add_parser("selftest", help="自检：声音引擎、解码、声音输出")
     sub.add_parser("doctor", help="环境体检")
@@ -149,6 +153,15 @@ def main(argv: list[str] | None = None) -> int:
         root = Path(args.dir) if args.dir else Path(tempfile.mkdtemp(prefix="djstudio-demo-"))
         print(f"准备演示数据：{root}（合成曲目 + 分析，约半分钟）")
         studio = setup_demo(root, args.speed)
+        _serve(studio, "127.0.0.1", args.port, not args.no_browser)
+        return 0
+
+    if cmd == "demo5":
+        from .v5.demo import setup_demo5
+
+        root = Path(args.dir) if args.dir else Path(tempfile.mkdtemp(prefix="djstudio-demo5-"))
+        print(f"准备四 Deck 演示：{root}（合成五份素材 + 分析，约一分钟）")
+        studio = setup_demo5(root)
         _serve(studio, "127.0.0.1", args.port, not args.no_browser)
         return 0
 
