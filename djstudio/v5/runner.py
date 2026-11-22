@@ -264,8 +264,14 @@ class Runner5:
                 st = m.get("st")
                 kind = a["kind"] if a else ""
                 if st == "ok":
+                    at, planned = float(m.get("at") or 0), float(m.get("beat") or 0)
+                    cc = self.c.clip(a["clip"]) if a and a.get("clip") else None
+                    if kind == "start" and cc is not None and at - cc.start > 1e-3 and planned - cc.start > 1e-3:
+                        # 从中间开始：这个片段不是从头起播，是接着放——写它这时读到原曲哪里
+                        src = fmt_pos(Fraction(cc.src_beat_at(at)).limit_denominator(4))
+                        text = f"D{cc.clip.deck} 接着放 {cc.clip.id}（原曲 {src}）"
                     if kind != "load":
-                        self.log(f"  {self.pos_text(float(m.get('at') or 0))} {text}")
+                        self.log(f"  {self.pos_text(at)} {text}")
                 elif st == "late":
                     self.log(f"!! 晚了：{text}（计划 {self.pos_text(float(m.get('beat') or 0))}，实际 "
                              f"{self.pos_text(float(m.get('at') or 0))}）{m.get('msg', '')}")
