@@ -179,6 +179,11 @@ class Runner5:
         pre = self.c.prerun_from(beat)
         self.from_beat = beat
         self.receipts.clear()
+        # 正好落在起点这一拍上的动作（这一拍打的 loop、这一拍停的片段）：引擎是「摆成那样再开始」，不会再执行一遍、
+        # 也就没有回执。先记成 restored（起点上已经就位）；引擎真执行了的（这一拍起播的片段）会用自己的回执盖掉
+        for a in self.actions:
+            if a["rc"] and abs(a["at"] - beat) < 1e-6:
+                self.receipts[a["rc"]] = {"st": "restored", "beat": a["at"], "at": a["at"], "msg": ""}
         self._seen = self.link.n_events
         self._call({"cmd": "v5.start", "beat": beat, "prerun": pre})
         where = self.pos_text(beat)

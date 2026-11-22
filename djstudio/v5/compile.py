@@ -962,6 +962,7 @@ def chart(c: Compiled5) -> dict[str, Any]:
         for i, s in enumerate(cc.segs):
             g1 = float(cc.segs[i + 1].g) if i + 1 < len(cc.segs) else cc.stop
             segs.append({"g0": float(s.g), "g1": g1, "src": float(s.src), "src_pos": _zh_pos(s.src), "loop": float(s.loop),
+                         "lsrc": float(s.lsrc) if s.loop else float(s.src),  # 圈头在原曲哪里（在圈里起播时 src 不在圈头）
                          "kind": s.kind, "id": s.id, "line": s.line})
         lanes = {}
         for param in PARAMS:

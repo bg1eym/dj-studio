@@ -247,7 +247,18 @@ class Engine5 {
             o.set("gate", static_cast<double>(rt.gate));
             o.set("level", dbfs(rt.preMs));
             o.set("out", dbfs(rt.postMs));
-            o.set("audible", rt.postMs > 1e-6);
+            // 「出不出声」看的是这一路开没开（在放、门开着、推子没拉到底、没有被 Release 收成静音），不看这一刻信号有多大：
+            // 曲子自己安静的地方不算「没出声」
+            bool muted = false;
+            if (c && m_plan) {
+                const int ci = m_plan->clipIndex.at(c->id);
+                for (const auto& b : m_buses) {
+                    const auto& ids = b->spec().clipIdx;
+                    muted = muted || (b->muted() && std::find(ids.begin(), ids.end(), ci) != ids.end());
+                }
+            }
+            o.set("audible", c != nullptr && rt.st == DPlaying && rt.gate > 0.5f && rt.volSm > 1e-3f && !muted);
+            o.set("muted", muted);
             decks.push(o);
         }
         s.set("decks", decks);

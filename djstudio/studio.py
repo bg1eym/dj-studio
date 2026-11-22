@@ -1521,8 +1521,9 @@ class Studio:
             link.close()
             raise StudioError("内置引擎没有启动起来")
         audio = link.audio() if hasattr(link, "audio") else None
+        # track / bar 一开始就写上：_rehearsal 一挂出去，状态推送（另一个线程）就会来读
         r = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
-             "audio": audio, "closing": threading.Event()}
+             "audio": audio, "closing": threading.Event(), "track": track0, "bar": bar0}
         self._rehearsal = r
         return self._start_run(r, s, c, from_transition, track0, bar0, resume=start is not None)
 

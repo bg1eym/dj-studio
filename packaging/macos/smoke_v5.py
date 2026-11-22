@@ -144,15 +144,19 @@ for d in range(1, 5):
          "params": {"频段": "HIGH", "周期": "1/2拍"}},
         {"id": f"H{d}", "kind": "phaser", "route": "insert", "targets": [f"C{d}"], "start": "2.1", "end": stop, "params": {}},
     ]
-c2 = compiled(project(clips, fx=effects), 200.0, srcs)
+# 素材只有 200 秒：放得比它长时，每台在 64 小节（两分钟）里循环——圈比读盘的缓存长得多，解码一直在干活
+loops = [{"id": f"L{d}", "clip": f"C{d}", "at": "3.1", "length": "64小节", "until": stop} for d in range(1, 5)] if bars > 80 else []
+c2 = compiled(project(clips, fx=effects, loops=loops), 200.0, srcs)
 check(c2.ok, "负载计划编得过（四路 + 四个 Echo + 四个 Reverb + 四个带分频的处理组）" + ("" if c2.ok else "：" + "；".join(str(i) for i in c2.errors[:3])))
 with Run(c2, speed=1, sim=False) as r:
     r.start()
     r.wait_beat(8.0, 60)
     r.e.call({"cmd": "v5.perf"})  # 清掉装载那一段
     t0 = time.time()
+    worst = 0.0
     while time.time() - t0 < LONG and r.state() == "running":
         time.sleep(0.5)
+        worst = max(worst, max(abs(d["phase_ms"]) for d in r.e.status["decks"]))
     perf = r.e.call({"cmd": "v5.perf"})
     st = r.e.status
     budget = perf["budget_us"]
@@ -163,6 +167,7 @@ with Run(c2, speed=1, sim=False) as r:
           f"{perf['avg_us'] / budget * 100:.1f}%；最大 {perf['max_us']:.0f} µs；超过一半预算 {perf['over_half']} 块，超过预算 {perf['over']} 块")
     check(perf["late"] == 0 and perf.get("underruns", 0) == 0, f"没有晚到的控制步、没有欠载（late {perf['late']}，underruns {perf.get('underruns', 0)}）")
     check(st["master"]["over"] == 0, f"主输出没有过载（峰值 {st['master']['peak']:.1f} dBFS）")
+    check(worst < 1.0, f"这一段里四台 Deck 的位置和全场拍的差最大 {worst:.3f} ms（不漂）")
     dup = [m["id"] for m in r.rc()]
     check(len(dup) == len(set(dup)), "没有重复执行的动作（回执编号不重复）")
 
