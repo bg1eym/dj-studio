@@ -163,6 +163,10 @@ jobs:
           set -o pipefail
           brew install lame || true  # 生成 320k、带封面的测试 mp3（Mac 上没有 mp3 编码器）
           python packaging/macos/timing_check.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee timing.log
+      - name: 四 Deck 调度器（v5）冒烟 + 基准（四路对齐、分频、满负载每块的耗时；数字进 ci-logs）
+        run: |
+          set -o pipefail
+          python packaging/macos/smoke_v5.py tools/mixxx-engine/dist/djstudio-engine 2>&1 | tee v5-smoke.log
       - name: 打包 DJ Studio.app
         run: |
           set -o pipefail
@@ -278,5 +282,5 @@ jobs:
         run: |
           set +e
           gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）" 2>/dev/null || true
-          { echo "== $GITHUB_SHA app-${{ matrix.arch }} ${{ job.status }}"; cat engine-smoke.log timing.log minos.log selftest-${{ matrix.arch }}.txt 2>/dev/null || true; tail -n 400 app-build.log 2>/dev/null || true; } > app-${{ matrix.arch }}.log
+          { echo "== $GITHUB_SHA app-${{ matrix.arch }} ${{ job.status }}"; cat engine-smoke.log timing.log v5-smoke.log minos.log selftest-${{ matrix.arch }}.txt 2>/dev/null || true; tail -n 400 app-build.log 2>/dev/null || true; } > app-${{ matrix.arch }}.log
           for i in 1 2 3 4 5 6; do gh release upload ci-logs app-${{ matrix.arch }}.log --clobber && break; sleep 10; done

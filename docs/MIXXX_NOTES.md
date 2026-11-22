@@ -102,6 +102,25 @@
 | ⚠️ | 测「两个 kick 差多少」不能用低频包络相加或低频波形互相关：两个 45–50Hz 的 kick 会相位干涉，结果每 16–20ms 跳一次。能测的是网格相对位置（互相关，两首在窗口里都要够响），以及每首自己的起音点（单曲分析）。 | 同上 |
 | ❌ | **keylock 开着、deck 不在原速时，听到的声音比引擎报告的位置晚 17–29ms**（SoundTouch、RubberBand Faster、RubberBand Finer 都一样；keylock 关时完全对齐）。两个 kick 叠在一起会听出「双击」。引擎现在默认关 keylock（0.3.0 起），set 可以用 `"keylock": true` 打开，校验会提示。 | 两首合成曲，B 以非原速起播，录主输出后检测 kick 起音间隔：keylock 开时成对起音相隔 17–29ms，关时 0 |
 
+## v5 调度器（四 Deck）用到的 Mixxx 行为
+
+v5 不用控制器脚本和 AutoDJ，引擎里的调度器（`tools/mixxx-engine/djs5/`，见 [ENGINE5.md](ENGINE5.md)）直接动 Mixxx 核心的控件和缓冲。
+下面每一条都是读 2.5.6 的源码定的，并且在 Linux 上编出来的声音引擎里实测过（`tests/test_v5_engine.py` 里带「真引擎」的那几项；数字见 [V5_G0.md](V5_G0.md)）。
+Mac 上还没有实测（见 DEVICE_TEST.md 的假设表）。
+
+| | 结论 | 依据 |
+|---|---|---|
+| ✅ | **四台 Deck 可以同时放，各自独立**：`kNumStandardEffectUnits` = 4、`kNumEffectsPerUnit` = 4（`effects/defs.h:40-41`），Deck 数由建多少个 `Deck` 对象决定；一台 Deck 只要装着曲子就算活动通道（`enginedeck.cpp:102-120`）。引擎建 4 台，每台自己的 EQ 机架。 | 源码；四台不同速度的 Deck 同时放，各自的旋钮互不影响（A01） |
+| ⚠️ | **从控件的「主人」那个 `ControlObject*` 上 `set()`，不会触发 `valueChanged`**（`privateValueChanged` 里 `pSender == this` 就不发，`controlobject.cpp`）。引擎自己建的控件再自己去设，loop 开关、EQ 这些靠 `valueChanged` 生效的就都不动。→ 一律用 `ControlDoublePrivate::getControl(key)->set(v, nullptr)`。 | 实测：改之前 loop 永远不进、EQ 不生效 |
+| ✅ | **`main_mix` = 0 时，通道缓冲里是推子之前的声音**：只有总线上的通道才在原地乘推子（`channelmixer.cpp:56-96`）。调度器把四台 Deck 都设成不进 Mixxx 的主混音，自己取 `getChannelBuffer`（增益 + EQ + Filter 之后）来混，推子、门、效果都是自己的。 | 源码；`enginedeck.cpp:69-81` |
+| ✅ | **loop 可以直接写位置再打开，不会跳**：`loop_start_position` / `loop_end_position` 的单位是引擎采样 = 帧 × 2（`loopingcontrol.cpp:1121-1185`），`loop_enabled` 可写、打开时不挪播放位置（`:1034-1055`）；回绕由 Mixxx 在采样上做。出圈：提前半圈把 `loop_enabled` 关掉，放到圈尾自然往下走。 | 1 拍的 loop 转 100 圈，每一圈的起点和全场拍差 < 1 帧（A03） |
+| ✅ | **起播、定位各有一块淡入**：`EnginePregain` 在速度从 0 起来 / 落到 0 时渐变；放着的时候定位，新旧位置交叉淡化一个块（`enginebuffer.cpp:1100-1110`）。→ 起播提前 4 个块（预卷，门关着）；跳段提前一个块定位，跳的那一拍落在淡化之后。 | 实测：不提前时跳过去的第一下只有一半大 |
+| ✅ | **读盘没跟上：这一块是静音，下一块从 0 渐入**（`readaheadmanager.cpp:93-113`）。热 cue 的位置是给读盘线程的预读提示（`cuecontrol.cpp:1277-1291`；没有那个 cue 时 `hotcuePositionChanged` 什么也不做，`:1221-1231`；一共 37 个，`NUM_HOT_CUES`）。→ 跳段、loop 的目标提前写进 `hotcue_N_position`，到时候数据已经在缓存里。 | 实测：加了提示以后跳段的第一下是满的 |
+| ✅ | **定位到帧**：`EngineBuffer::queueNewPlaypos(FramePos, SEEK_EXACT)` 是公开的，不经过 quantize；`getExactPlayPos` 每个块更新（`enginebuffer.cpp:1484-1495、1563-1569`）。调度器按它核对每台 Deck 的相位。 | 四台 Deck 计划重合的脉冲在输出里相差 ≤ 3 帧（A06） |
+| ⚠️ | **sync 会挑一台停着的 Deck 当目标**（`pickNonSyncSyncTarget`，`enginesync.cpp:516-560`）。v5 不用 Mixxx 的 sync：每台 Deck 的速率由调度器按全场速度图直接写。 | 源码 |
+| ✅ | **Echo / Reverb 的效果本身只出湿声，干声是效果链加回去的**（`engineeffectchain.cpp:234-262`；D/W 模式下 mix = m → 输入 + m × 湿声）。v5 的 Delay / Echo 是把 Mixxx 的 Echo 算法抄出来的独立实例（`fx.hpp DelayLine`），Reverb 直接用 Mixxx 带的板式混响（`lib/reverb/Reverb.h` 的 `MixxxPlateX2`），每个效果一个实例，返回只有湿声。 | 源码；D1 的 Echo 关掉 / 换曲不影响 D2 的（A09） |
+| ⚠️ | **声音引擎跟着 Mixxx 用 `-ffast-math` 编**：NaN / 无穷大的判断会被优化掉（`isnan`、`isfinite`、拿 NaN 当「没有」都不能用）。调度器和 DSP 里一律用有限的大数和单独的标志位。 | 实测：状态里出现过 `nan` |
+
 ## 平台差异（仍需真机确认）
 
 - macOS 版 Mixxx 用 CoreAudio 解码 MP3/AAC（`COREAUDIO` 选项，优先级 Higher：`soundsourcecoreaudio.cpp:44-50`）。

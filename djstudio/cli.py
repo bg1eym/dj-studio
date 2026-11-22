@@ -1,4 +1,4 @@
-"""命令行入口：`djstudio serve`（默认）/ app / selftest / demo / doctor / validate / import / prepare / play / probe。"""
+"""命令行入口：`djstudio serve`（默认）/ app / selftest / demo / demo5 / doctor / validate / v5check / import / prepare / play / probe。"""
 from __future__ import annotations
 
 import argparse
@@ -128,11 +128,18 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--speed", type=float, default=8.0, help="模拟器倍速")
     d.add_argument("--port", type=int, default=8431)
     d.add_argument("--no-browser", action="store_true")
+    d5 = sub.add_parser("demo5", help="四 Deck 演示（曲谱 v5）：按示例谱合成素材，用内置引擎，不需要自己的曲子")
+    d5.add_argument("--dir", default=None, help="演示数据目录（默认临时目录）")
+    d5.add_argument("--port", type=int, default=8432)
+    d5.add_argument("--no-browser", action="store_true")
     sub.add_parser("app", help="DJ Studio.app 用：启动网页并打开浏览器（日志写文件，已经开着就只打开网页）")
     sub.add_parser("selftest", help="自检：声音引擎、解码、声音输出")
     sub.add_parser("doctor", help="环境体检")
     v = sub.add_parser("validate", help="校验 set（id 或 json 文件路径）")
     v.add_argument("set")
+    v5c = sub.add_parser("v5check", help="旧 set（v1–v4）按四 Deck 的新编译器再编一遍，和原来的结果逐点比对")
+    v5c.add_argument("set")
+    v5c.add_argument("--save", default=None, help="把转出来的 v5 谱存到这个 .md 文件")
     i = sub.add_parser("import", help="导入音频文件 / 文件夹到托管曲库")
     i.add_argument("paths", nargs="+")
     p = sub.add_parser("prepare", help="准备 set（重启 Mixxx、部署引擎、写 AutoDJ 队列）")
@@ -149,6 +156,15 @@ def main(argv: list[str] | None = None) -> int:
         root = Path(args.dir) if args.dir else Path(tempfile.mkdtemp(prefix="djstudio-demo-"))
         print(f"准备演示数据：{root}（合成曲目 + 分析，约半分钟）")
         studio = setup_demo(root, args.speed)
+        _serve(studio, "127.0.0.1", args.port, not args.no_browser)
+        return 0
+
+    if cmd == "demo5":
+        from .v5.demo import setup_demo5
+
+        root = Path(args.dir) if args.dir else Path(tempfile.mkdtemp(prefix="djstudio-demo5-"))
+        print(f"准备四 Deck 演示：{root}（合成五份素材 + 分析，约一分钟）")
+        studio = setup_demo5(root)
         _serve(studio, "127.0.0.1", args.port, not args.no_browser)
         return 0
 
@@ -186,6 +202,20 @@ def main(argv: list[str] | None = None) -> int:
             print(iss)
         print("✓ 校验通过" if c.ok else "✗ 校验没通过", f"（约 {c.duration / 60:.1f} 分钟）")
         return 0 if c.ok else 1
+    if cmd == "v5check":
+        from .v5.writer import write
+
+        p, new, diffs = studio.v5.from_legacy(args.set)
+        print(f"{p.name}：{len(p.assets)} 份素材 · {len(p.clips)} 个片段 · {len(p.scenes)} 个场景，约 {new.duration / 60:.1f} 分钟")
+        for d in diffs[:50]:
+            print("  ✗", d)
+        if len(diffs) > 50:
+            print(f"  … 还有 {len(diffs) - 50} 处")
+        print("✓ 和原来的编译结果等价（动作位置、旋钮曲线、跳段、Loop、曲长都对得上）" if not diffs else f"✗ 有 {len(diffs)} 处不一样")
+        if args.save:
+            Path(args.save).write_text(write(p), encoding="utf-8")
+            print(f"v5 的谱存到了 {args.save}（原来的谱没动）")
+        return 0 if not diffs else 1
     if cmd == "import":
         res = studio.library.import_paths(args.paths)
         print(f"导入 {len(res.added)} 首，已存在 {len(res.existing)} 首，失败 {len(res.failed)} 首")

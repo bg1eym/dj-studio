@@ -55,6 +55,13 @@ def create_app(studio: Studio) -> FastAPI:
     async def _perm_err(_: Request, e: PermissionError) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=403)
 
+    from ..v5.link import Engine5Error
+
+    @app.exception_handler(Engine5Error)
+    async def _engine5_err(_: Request, e: Engine5Error) -> JSONResponse:
+        # v5 调度器拒绝的操作（没在演出、起点不能恢复……）：原话告诉界面
+        return JSONResponse({"error": str(e)}, status_code=400)
+
     # ------------------------------------------------------------ 状态 / 事件
 
     def state() -> dict[str, Any]:
@@ -329,6 +336,10 @@ def create_app(studio: Studio) -> FastAPI:
     def api_set(sid: str, rehearse_from: int = 0, track: int | None = None, bar: float | None = None) -> dict[str, Any]:
         """rehearse_from = k：从第 k 段过渡开始时实际跑的那份（截掉前面的曲目）；
         track + bar：停下后「继续」跑的那份（从第 track 首（0 起）第 bar 小节起）。"""
+        if studio.v5.has(sid) and not studio.set_path(sid).exists():
+            # v5 的项目：演出页画图用的那一份（共轴图、策略、动作，和交给引擎的计划同一次编译）
+            ch = studio.v5.chart(sid)
+            return {"v5": True, "set": {"id": sid, "name": ch.get("name") or sid}, "chart": ch}
         start = (track, bar) if track is not None and bar is not None else None
         s = studio.rehearsal_set(studio.load(sid), rehearse_from, start)
         return {"set": json.loads(s.to_json()), "compiled": compiled_json(studio.compile(s, resume=start is not None))}
@@ -336,7 +347,8 @@ def create_app(studio: Studio) -> FastAPI:
     @app.get("/api/score/{name}")
     def api_score_doc(name: str, download: int = 0) -> Response:
         """《打碟谱规范》和打碟谱模板（docs/SCORE_SPEC.md、docs/score_template.md）：写谱时照着用。"""
-        files = {"spec.md": ("SCORE_SPEC.md", "打碟谱规范.md"), "template.md": ("score_template.md", "打碟谱模板.md")}
+        files = {"spec.md": ("SCORE_SPEC.md", "打碟谱规范.md"), "template.md": ("score_template.md", "打碟谱模板.md"),
+                 "spec5.md": ("SCORE_SPEC_V5.md", "曲谱规范 v5.md"), "example5.md": ("score_v5_example.md", "四 Deck 场景示例.md")}
         if name not in files:
             raise HTTPException(404, name)
         src, save_as = files[name]
@@ -444,7 +456,8 @@ def create_app(studio: Studio) -> FastAPI:
         speed = float(body.get("speed") or 1.0)
         if not 0.25 <= speed <= 16:
             raise HTTPException(400, "倍速应在 0.25–16 之间")
-        return studio.play(sid, speed, int(body.get("from") or 0)).to_dict()
+        beat = body.get("beat")
+        return studio.play(sid, speed, int(body.get("from") or 0), beat=float(beat) if beat is not None else None).to_dict()
 
     @app.post("/api/stop")
     def api_stop() -> dict[str, Any]:
@@ -463,6 +476,114 @@ def create_app(studio: Studio) -> FastAPI:
     @app.post("/api/resume")
     def api_resume() -> dict[str, Any]:
         return studio.resume().to_dict()
+
+    # ------------------------------------------------------------ 曲谱 v5（四 Deck）
+
+    @app.get("/api/v5/caps")
+    def api_v5_caps() -> dict[str, Any]:
+        """这个引擎的能力表（最多几台 Deck、会哪些效果、几个效果实例 …）。"""
+        from ..v5.caps import BUILTIN, MIXXX
+
+        return (BUILTIN if studio.builtin else MIXXX).to_dict()
+
+    @app.post("/api/v5/seek")
+    def api_v5_seek(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """演出中跳到全场第 beat 拍重新开始（从某个场景 / 某一小节练）。跳转会结束手动接管。"""
+        try:
+            beat = float(body["beat"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, "要 beat（全场拍，1.1 = 0）") from e
+        studio.v5.runner().seek(beat)
+        return {"ok": True}
+
+    @app.post("/api/v5/pause")
+    def api_v5_pause() -> dict[str, Any]:
+        studio.v5.runner().pause()
+        return {"ok": True}
+
+    @app.post("/api/v5/resume")
+    def api_v5_resume() -> dict[str, Any]:
+        studio.v5.runner().resume()
+        return {"ok": True}
+
+    @app.post("/api/v5/takeover")
+    def api_v5_takeover(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """手动接管一个旋钮：deck（1–4）、param（lo / mid / hi / filter / vol）、value（人读单位：EQ dB、Filter -1..1、推子 0..1）。"""
+        from ..compiler import to_native
+
+        try:
+            deck, param, value = int(body["deck"]), str(body["param"]), float(body["value"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, "要 deck、param、value") from e
+        if param not in ("lo", "mid", "hi", "filter", "vol"):
+            raise HTTPException(400, f"没有「{param}」这个旋钮")
+        studio.v5.runner().takeover(deck, param, to_native(param, value))
+        return {"ok": True}
+
+    @app.post("/api/v5/return")
+    def api_v5_return(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """回谱：when = beat（下一拍）/ bar（下一小节）/ now；ramp = 用几拍走回谱上的位置。"""
+        try:
+            deck, param = int(body["deck"]), str(body["param"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, "要 deck、param") from e
+        when = str(body.get("when") or "beat")
+        if when not in ("beat", "bar", "now"):
+            raise HTTPException(400, "when 是 beat / bar / now")
+        studio.v5.runner().give_back(deck, param, when, float(body.get("ramp") or 1.0))
+        return {"ok": True}
+
+    @app.get("/api/v5/{pid}/state_at")
+    def api_v5_state_at(pid: str, beat: float) -> dict[str, Any]:
+        """全场第 beat 拍时四台 Deck 应该在哪（片段、原曲位置、旋钮的谱值、还在响的效果）。"""
+        c = studio.v5.compiled(pid)
+        if not c.ok:
+            raise HTTPException(422, "曲谱没编过")
+        return c.state_at(beat)
+
+    @app.get("/api/v5/{pid}/score.md")
+    def api_v5_score(pid: str, download: int = 0) -> Response:
+        """这个项目写成 v5 的谱（旧谱另存为 v5）。"""
+        disp = "attachment" if download else "inline"
+        return Response(studio.v5.score_md(pid), media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
+                        headers={"Content-Disposition": f"{disp}; filename=\"score.md\"; filename*=UTF-8''{quote(pid + '.v5.md')}"})
+
+    @app.get("/api/sets/{sid}/v5.md")
+    def api_set_as_v5(sid: str, download: int = 0) -> Response:
+        """旧的 set（v1–v4 的谱转出来的）另存为 v5 的谱：一份新文件，原来的不动。"""
+        p, _, _ = studio.v5.from_legacy(sid)
+        from ..v5.writer import write
+
+        disp = "attachment" if download else "inline"
+        return Response(write(p), media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
+                        headers={"Content-Disposition": f"{disp}; filename=\"score.md\"; filename*=UTF-8''{quote(sid + '.v5.md')}"})
+
+    @app.get("/api/sets/{sid}/v5check")
+    def api_set_v5check(sid: str) -> dict[str, Any]:
+        """旧的 set 按 v5 的编译器再编一遍，和原来的结果逐点比（动作位置、旋钮、跳段、Loop、曲长）：diffs 空 = 等价。"""
+        from ..v5.compile import chart
+
+        p, new, diffs = studio.v5.from_legacy(sid)
+        return {"ok": new.ok and not diffs, "diffs": diffs[:200], "n_diffs": len(diffs), "clips": len(p.clips),
+                "scenes": len(p.scenes), "chart": chart(new) if new.ok else None}
+
+    @app.post("/api/v5/{pid}/export")
+    def api_v5_export(pid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """导出演出包：一个文件夹，谱和选中的全部原曲在同一层（不转码、不出混音）。"""
+        parent = Path(body["dir"]).expanduser() if body.get("dir") else None
+        return studio.v5.export_package(pid, parent)
+
+    @app.post("/api/v5/{pid}/pin")
+    def api_v5_pin(pid: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """同名不同内容的文件：这份素材用哪一个。"""
+        studio.v5.pin(pid, str(body["asset"]), str(body["track"]))
+        studio.maybe_auto()
+        return {"ok": True}
+
+    @app.post("/api/v5/import_folder")
+    def api_v5_import_folder(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """导入一个文件夹（一份 v5 的谱 + 谱上写的原曲，按谱里的相对路径取）。"""
+        return studio.v5.import_folder(Path(str(body.get("path") or "")))
 
     @app.post("/api/quit")
     def api_quit() -> dict[str, Any]:

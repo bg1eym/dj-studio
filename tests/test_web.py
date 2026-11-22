@@ -33,9 +33,12 @@ def test_index_and_state(client):
 
 def test_pages_are_not_cached(client):
     """更新代码后刷新就是新界面：首页和网页文件都要求浏览器每次确认。"""
-    for url in ("/", "/static/app.js", "/static/live.js", "/static/style.css"):
+    for url in ("/", "/static/app.js", "/static/live.js", "/static/style.css",
+                "/static/live5.js", "/static/chart5.js", "/static/handover.html", "/static/handover.js"):  # 后四个：v5 四 Deck
         r = client.get(url)
         assert r.status_code == 200 and r.headers["cache-control"] == "no-cache", url
+    for url in ("/api/score/spec5.md", "/api/score/example5.md", "/api/v5/caps"):  # v5 的规范、示例谱、能力表
+        assert client.get(url).status_code == 200, url
 
 
 def test_set_roundtrip_and_validate(client):

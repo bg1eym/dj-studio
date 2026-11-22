@@ -17,6 +17,22 @@
 复制模板 [docs/score_template.md](docs/score_template.md)（一份能直接跑的 3 首例子）改成自己的，存成 .md 拖到首页；写错了网页会报第几行。
 首页也能下载规范和模板。
 
+## 四 Deck：曲谱 v5
+
+要同时用两台以上的 Deck（主曲 + 打击乐循环 + 一句人声 + 下一首）、在独奏的时候也动旋钮、给某一个片段单独上效果，用 v5 的谱：
+[docs/SCORE_SPEC_V5.md](docs/SCORE_SPEC_V5.md)《曲谱规范 v5》，示例 [docs/score_v5_example.md](docs/score_v5_example.md)。
+
+- **素材和片段分开**，四台 Deck（D1–D4）、片段、旋钮、Loop、效果都写在同一条**全场小节轴**上；每个场景写清楚「保留什么、让谁接管、低频在哪一拍换」。
+- **任何时候都能动旋钮**（v4 只能在过渡里动）：参数表写在哪一拍都行；演出时还可以手动接管某一个旋钮，再让它「下一拍 / 下一小节回谱」。
+- **效果各有各的实例**：Delay / Echo / Reverb 走发送（每个片段自己的，尾音互不干扰）；现场效果走插入 / 组插入 / 总输出——
+  分频段的 Trans 和 Roll、Filter、Filter Echo、Spiral、Noise、Flanger、Phaser、采样 fill、Release（Echo / 刹车 / 回转）。
+- **交付**：把谱（.md）和谱上写的原曲放在同一个文件夹里，整个文件夹拖进来；「导出演出包」生成这样一个文件夹（原曲原样，不生成混音）；
+  「交接说明」是一页可以打印 / 存成 PDF 的四 Deck 同轴操作图。
+- v1–v4 的谱照旧能用、不用改；可以「另存为 v5 的谱」，`djstudio v5check <set>` 核对转换前后是不是等价。
+- v5 只在内置引擎里放（四台 Deck 的调度在引擎里，见 [docs/ENGINE5.md](docs/ENGINE5.md)）；连本机 Mixxx 的模式只能放 v1–v4。
+
+没有自己的曲子也能看：`djstudio demo5` 按示例谱合成五份素材，走一遍四 Deck 的整个流程。
+
 ## Set 播放规范
 
 所有 set（打碟谱自动生成的、手工转的）都按 [docs/SET_SPEC.md](docs/SET_SPEC.md)：EQ / Filter / 效果器 / 推子 / 速度 / 音量的取值和换算表，
@@ -141,9 +157,11 @@ git clone https://github.com/bg1eym/dj-studio ~/dj-studio && cd ~/dj-studio && p
 |---|---|
 | `djstudio` / `djstudio serve` | 启动网页 |
 | `djstudio demo` | 演示模式 |
+| `djstudio demo5` | 四 Deck 演示（曲谱 v5 的示例谱，内置引擎） |
 | `djstudio doctor` | 环境体检 |
 | `djstudio import <文件或文件夹>…` | 导入并分析 |
 | `djstudio validate <set id 或 json 路径>` | 校验 set |
+| `djstudio v5check <set id> [--save 文件.md]` | 旧 set 按四 Deck 的新编译器再编一遍、和原来逐点比对；可另存为 v5 的谱 |
 | `djstudio prepare <set id>` | 准备 |
 | `djstudio play <set id>` | 终端里播放（Ctrl-C = 淡出停止） |
 | `djstudio probe` | 真机探测 |
@@ -154,4 +172,4 @@ git clone https://github.com/bg1eym/dj-studio ~/dj-studio && cd ~/dj-studio && p
 ~/.venvs/djstudio/bin/pytest
 ```
 
-测试需要 `node`（运行模拟器）和 `ffmpeg`。文档：[架构](docs/ARCHITECTURE.md) · [set 格式](docs/SET_FORMAT.md) · [引擎协议](docs/ENGINE.md) · [Mixxx 源码核对](docs/MIXXX_NOTES.md) · [上机测试](docs/DEVICE_TEST.md)。
+测试需要 `node`（运行模拟器）、`ffmpeg` 和 C++ 编译器（v5 的调度器模拟器是现编的）。文档：[架构](docs/ARCHITECTURE.md) · [set 格式](docs/SET_FORMAT.md) · [引擎协议](docs/ENGINE.md) · [四 Deck 调度器](docs/ENGINE5.md) · [四 Deck 引擎验证的数字](docs/V5_G0.md) · [Mixxx 源码核对](docs/MIXXX_NOTES.md) · [上机测试](docs/DEVICE_TEST.md)。

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>交接说明 · DJ Studio</title>
+  <style>
+    /* 交接说明：A4 横版，白底黑字。正文 ≥ 10pt；图是按 1 单位 = 1px = 0.75pt 画的 SVG，图里的字 ≥ 12px（9pt）。
+       四台 Deck 除了颜色还有编号和线型（实线 / 虚线 / 点线 / 点划线），黑白打印也分得开。 */
+    @page { size: A4 landscape; margin: 12mm; }
+    :root { --d1: #1668c7; --d2: #c85a00; --d3: #1c8a3c; --d4: #7a3fc0; --ink: #111; --dim: #555; --line: #b8b8b8; --soft: #f1f1f1; }
+    * { box-sizing: border-box; }
+    html { background: #e9e9e9; }
+    body { margin: 0; color: var(--ink); font: 10pt/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+      -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .bar { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center; padding: 8px 16px; background: #222; color: #eee; font-size: 10pt; }
+    .bar button { font: inherit; padding: 5px 14px; border-radius: 6px; border: 1px solid #4fa3ff; background: #4fa3ff; color: #fff; cursor: pointer; }
+    .bar .grow { flex: 1; }
+    main { width: 293mm; max-width: calc(100% - 24px); margin: 12px auto 40px; background: #fff; padding: 10mm; }
+    .sheet { padding: 0 0 4mm; }
+    h1 { font-size: 19pt; margin: 0 0 2mm; line-height: 1.25; }
+    h2 { font-size: 14pt; margin: 0 0 2mm; line-height: 1.3; }
+    h3 { font-size: 11pt; margin: 4mm 0 1.5mm; }
+    h1, h2, h3, figcaption { break-after: avoid; page-break-after: avoid; }
+    .dim { color: var(--dim); }
+    .meta { display: flex; flex-wrap: wrap; gap: 1mm 6mm; margin-bottom: 3mm; }
+    .meta b { font-weight: 600; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tag { display: inline-block; border: 1px solid var(--ink); border-radius: 3px; padding: 0 5px; font-size: 10pt; font-weight: 600; margin-left: 6px; vertical-align: 1px; }
+    .todo { font-weight: 600; text-decoration: underline; text-decoration-style: dotted; }
+    .legend { display: flex; flex-wrap: wrap; gap: 1.5mm 7mm; align-items: center; border: 1px solid var(--line); border-radius: 4px; padding: 2mm 3mm; margin: 2mm 0 4mm; }
+    .legend > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+    .chip { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 3px; color: #fff; font: 700 9pt/1 ui-monospace, Menlo, monospace; flex: none; }
+    .chip.d1 { background: var(--d1); } .chip.d2 { background: var(--d2); } .chip.d3 { background: var(--d3); } .chip.d4 { background: var(--d4); }
+    .dash line { stroke: currentColor; }
+    .dash.d1 { color: var(--d1); } .dash.d2 { color: var(--d2); } .dash.d3 { color: var(--d3); } .dash.d4 { color: var(--d4); }
+    table { border-collapse: collapse; width: 100%; font-size: 10pt; }
+    thead { display: table-header-group; }
+    th, td { text-align: left; padding: 1.2mm 2mm; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-weight: 600; border-bottom: 1.5px solid var(--ink); white-space: nowrap; }
+    tr { break-inside: avoid; }
+    td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    td.nw, td .nw { white-space: nowrap; }
+    td .chip { vertical-align: middle; margin: -2px 4px 0 0; }
+    .scene { break-before: page; padding-top: 6mm; border-top: 3px solid var(--ink); margin-top: 8mm; }
+    .scene h2 .range { font-size: 10pt; font-weight: 400; color: var(--dim); margin-left: 8px; }
+    .strategy { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.6mm 4mm; margin: 0 0 2mm; break-inside: avoid; }
+    .strategy dt { font-weight: 600; white-space: nowrap; }
+    .strategy dd { margin: 0; }
+    .roles { display: flex; flex-wrap: wrap; gap: 1mm 6mm; margin-bottom: 2mm; }
+    .roles > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+    figure.strip { margin: 2mm 0 4mm; break-inside: avoid; }
+    figure.strip figcaption { font-size: 10pt; font-weight: 600; margin-bottom: 1mm; }
+    figure.strip figcaption span { font-weight: 400; color: var(--dim); margin-left: 8px; }
+    figure.strip svg { display: block; width: 100%; height: auto; }
+    .practice { margin: 0; padding-left: 5mm; }
+    .practice li { break-inside: avoid; margin-bottom: 0.8mm; }
+    .practice b { font-weight: 600; }
+    .block { break-inside: avoid; }
+    .err { border: 1.5px solid #b00020; color: #7a0016; padding: 3mm 4mm; border-radius: 4px; white-space: pre-wrap; }
+    @media print {
+      html { background: #fff; }
+      main { width: auto; max-width: none; margin: 0; padding: 0; }
+      .noprint { display: none !important; }
+      .scene { border-top: 0; margin-top: 0; padding-top: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="bar noprint">
+    <b>交接说明</b><span class="dim" style="color:#bbb">A4 横版 · 打印对话框里选「存储为 PDF」，边距选默认</span>
+    <span class="grow"></span>
+    <button id="print-btn" type="button">打印 / 存为 PDF</button>
+  </div>
+  <main id="doc"><p class="dim" style="padding:0 4mm">正在读取…</p></main>
+  <script type="module" src="/static/handover.js"></script>
+</body>
+</html>

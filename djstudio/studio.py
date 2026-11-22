@@ -206,6 +206,10 @@ class Studio:
         self._auto_key: tuple[Any, ...] | None = None
         self.listeners: list[Callable[[str, Any], None]] = []  # (kind, payload) → 网页 SSE
         self.library.on_change = lambda tid: self.emit("track", tid)
+        # 曲谱 v5（四 Deck 编排）：读谱、项目、原生调度器上的演出、演出包都在 v5/service.py；这里遇到 v5 的谱 / 项目就转过去
+        from .v5.service import Service5
+
+        self.v5 = Service5(self)
 
     @property
     def builtin(self) -> bool:
@@ -243,6 +247,7 @@ class Studio:
             self.conductor.request_stop()
             self.conductor.join(3)
         self._close_rehearsal()
+        self.v5.close_run()
         self.disconnect()
 
     def _close_rehearsal(self) -> None:
@@ -277,6 +282,9 @@ class Studio:
         return audio
 
     def engine_state(self) -> dict[str, Any]:
+        st5 = self.v5.engine_state()
+        if st5:  # v5 的演出：引擎里的原生调度器报的状态（按名字的 Deck 列表、回执）
+            return st5
         r = self._rehearsal
         if r:  # 预演中：网页看的是模拟器里的引擎
             c = r["client"]
@@ -844,6 +852,15 @@ class Studio:
         for path in sorted((p for p in self.plans_dir.iterdir() if p.suffix.lower() in self.PLAN_SUFFIXES
                             and not p.name.startswith(".") and p.is_file()), key=lambda p: -p.stat().st_mtime):
             row: dict[str, Any] = {"file": path.name, "current": path == cur, "mtime": path.stat().st_mtime}
+            if self.v5.is_score(path):  # v5 的谱：一份 = 一个项目
+                r5 = self.v5.read(path)
+                row.update(title=r5.title or path.stem, v5=True)
+                if r5.project is None:
+                    row["error"] = "；".join(str(i) for i in r5.errors[:3])
+                else:
+                    row.update(n_tracks=len(r5.project.assets), set=r5.project.id if self.v5.has(r5.project.id) else None)
+                out.append(row)
+                continue
             try:
                 plan = self.load_plan(path)
                 row.update(title=plan.title, n_tracks=len(plan.tracks))
@@ -883,6 +900,12 @@ class Studio:
         key = (str(path), path.stat().st_mtime)
         if key in self._plan_cache:
             return self._plan_cache[key]
+        if self.v5.is_score(path):
+            # v5 的谱：按文件名找曲子那一套只看「曲目表」，这里把素材表当曲目表给它
+            r5 = self.v5.read(path)
+            if r5.project is None:
+                raise cdw.PlanError("；".join(str(i) for i in r5.errors[:5]))
+            return self.v5.as_plan(r5.project)
         plan = (mdplan.parse if path.suffix.lower() in mdplan.SUFFIXES else cdw.parse)(path)
         self._plan_cache = {k: v for k, v in self._plan_cache.items() if k[0] != key[0]}
         self._plan_cache[key] = plan
@@ -931,6 +954,8 @@ class Studio:
         path = self.current_plan()
         if not path:
             return None
+        if self.v5.is_score(path):
+            return self.v5.status(path)
         try:
             plan = self.load_plan(path)
         except (PlanError, PdfError) as e:
@@ -1067,6 +1092,8 @@ class Studio:
         from .setspec import SPEC_VERSION
 
         path = self.current_plan()
+        if path and self.v5.is_score(path):
+            return False
         if not path or not self.set_path(_slug(path.stem)).exists():
             return False
         try:
@@ -1119,7 +1146,11 @@ class Studio:
         path = plan_path or self.current_plan()
         if not path:
             raise StudioError("还没有打碟谱：把谱（.md 或 PDF）拖进来")
-        if self.builtin:
+        if self.v5.is_score(path):
+            if not self.builtin:
+                raise StudioError("v5 的四 Deck 曲谱只能用内置引擎放（连本机 Mixxx 的模式只有两个 Deck，放 v1–v4 的谱）")
+            job = self.start_job("分析", lambda job: self.v5.auto(job, path), self.BUILTIN_STAGES, self.BUILTIN_WEIGHTS)
+        elif self.builtin:
             job = self.start_job("分析", lambda job: self._auto(job, path, settle), self.BUILTIN_STAGES, self.BUILTIN_WEIGHTS)
         else:
             job = self.start_job("分析", lambda job: self._auto(job, path, settle), self.AUTO_STAGES, self.AUTO_WEIGHTS)
@@ -1251,7 +1282,20 @@ class Studio:
 
     # ------------------------------------------------------------ 播放
 
-    def play(self, set_id: str, speed: float = 1.0, from_transition: int = 0) -> Progress:
+    def play(self, set_id: str, speed: float = 1.0, from_transition: int = 0, beat: float | None = None) -> Progress:
+        if self.v5.has(set_id) and not self.set_path(set_id).exists():
+            # v5 的项目：from_transition = 从第几个场景开始（0 = 从头）；beat = 从全场第几拍开始
+            if not self._start_lock.acquire(blocking=False):
+                raise StudioError("正在启动，稍等")
+            try:
+                if beat is None:
+                    scenes = sorted(self.v5.load(set_id).scenes, key=lambda sc: sc.start)
+                    if from_transition and not 1 <= from_transition <= len(scenes):
+                        raise StudioError(f"没有第 {from_transition} 个场景")
+                    beat = float(scenes[from_transition - 1].start) if from_transition else 0.0
+                return self.v5.play(set_id, beat=beat, speed=speed)  # type: ignore[return-value]
+            finally:
+                self._start_lock.release()
         if self.builtin:  # 内置引擎：倍速、从第 k 段过渡开始都可以
             return self.rehearse(set_id, speed, from_transition, builtin=True)
         if self.conductor and self.conductor.running:
@@ -1434,6 +1478,8 @@ class Studio:
         p = self.resume_point
         if not p:
             raise StudioError("没有停下的位置可以继续")
+        if p.get("v5"):
+            return self.play(p["set"], p["speed"], beat=p["beat"])
         return self.rehearse(p["set"], p["speed"], builtin=self.builtin, start=(p["track"], p["bar"]))
 
     def rehearse(self, set_id: str, speed: float = 1.0, from_transition: int = 0, builtin: bool = False,
@@ -1475,8 +1521,9 @@ class Studio:
             link.close()
             raise StudioError("内置引擎没有启动起来")
         audio = link.audio() if hasattr(link, "audio") else None
+        # track / bar 一开始就写上：_rehearsal 一挂出去，状态推送（另一个线程）就会来读
         r = {"client": client, "speed": speed, "set": set_id, "from": from_transition, "builtin": builtin,
-             "audio": audio, "closing": threading.Event()}
+             "audio": audio, "closing": threading.Event(), "track": track0, "bar": bar0}
         self._rehearsal = r
         return self._start_run(r, s, c, from_transition, track0, bar0, resume=start is not None)
 

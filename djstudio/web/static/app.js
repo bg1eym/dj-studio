@@ -1,6 +1,7 @@
 // DJ Studio 前端（原生 JS，无构建步骤）
 import { Wave } from "./wave.js";
 import { LiveView } from "./live.js";
+import { Live5View } from "./live5.js";
 
 // ------------------------------------------------------------------ 工具
 
@@ -107,6 +108,55 @@ async function resumeShow() {
   renderHome(true);
 }
 
+// ---- 曲谱 v5（四 Deck）：演出画面是 live5.js，这里只管开始 / 跳转和首页上 v5 的那几处 ----
+
+const isV5Show = () => !!(S.showCompiled && S.showCompiled.v5);
+const pos5 = (beat) => `${Math.floor(beat / 4) + 1}.${(Math.floor(beat) % 4) + 1}`;
+
+// v5：从全场第 beat 拍重新开始。正在放 = 同一个引擎里跳过去（会结束手动接管，旋钮回到谱上的位置）；停着 = 从那里开始放
+async function seekShow5(beat) {
+  const id = S.showSetId;
+  if (S.state && S.state.playing) {
+    await api("POST", "/api/v5/seek", { beat });
+    toast(`从 ${pos5(beat)} 重新开始（手动接管已结束，旋钮回到谱上的位置）`);
+    return;
+  }
+  const last = (S.state && S.state.last_play) || {};
+  await api("POST", `/api/sets/${id}/play`, { beat, speed: last.set === id && last.speed ? last.speed : 1 });
+  S.showCompiled = null; S.homeDone = null; // 图重新取一次：停着的时候谱可能重新分析过
+  await loadState();
+  if (S.tab === "home") renderHome(true); else renderShow();
+}
+
+// 文件夹里的 .md：开头写着「规范：v5」的是四 Deck 曲谱，收；别的多半是说明文字，不当打碟谱
+async function isV5Score(file) {
+  try {
+    return /^\s*[-*+]?\s*\**规范\**\s*[：:]\s*\**\s*v?\s*5(?!\d)/im.test(await file.slice(0, 4096).text());
+  } catch { return false; }
+}
+
+// 谱里的问题：错误和提示分开放（错误要改了才能演出；提示只是提醒）。一条 = 第几行 + 在哪 + 是什么 + 怎么改
+function issueLine(i) {
+  return h("div", {}, i.line ? h("b", {}, `第 ${i.line} 行 `) : null, i.where ? `${i.where}：` : "", i.msg || "",
+    i.fix ? h("span", { class: "issue-fix" }, `（${i.fix}）`) : null);
+}
+function issueBoxes(issues) {
+  const errs = (issues || []).filter((i) => i.level === "error"), hints = (issues || []).filter((i) => i.level !== "error");
+  return [
+    errs.length ? h("div", { class: "err-box" }, h("b", {}, `曲谱里有 ${errs.length} 处要改`), errs.map(issueLine)) : null,
+    hints.length ? h("div", { class: "hint-box" }, h("b", {}, `提示（${hints.length}）`), hints.map(issueLine)) : null,
+  ];
+}
+
+// 导出演出包：一个文件夹，谱和原曲在同一层
+async function exportPackage5(pid) {
+  const r = await api("POST", `/api/v5/${pid}/export`, {});
+  const folder = r.folder || r.path || "";
+  S.export5 = { set: pid, folder, n: (r.files || []).length, bytes: r.bytes || 0 };
+  toast(`演出包已导出：${folder}`);
+  renderHomeJob();
+}
+
 const fmt = (t) => {
   if (t === null || t === undefined || isNaN(t)) return "–";
   const s = Math.max(0, t);
@@ -201,6 +251,12 @@ function connectEvents() {
     if (S.tab === "home") renderHome();
     updateEngineBadge();
     if (S.progress.finished_at && !was) setTimeout(() => loadState().then(() => { if (S.tab === "show") renderShow(); if (S.tab === "home") renderHome(); }), 300);
+    // 演出不是从这个页面点开始的（另一个标签页、命令行）：这边还以为没在放——读一次状态，首页换到演出画面
+    if (!S.progress.finished_at && S.state && !S.state.playing && !S.syncingPlay) {
+      S.syncingPlay = true;
+      loadState().then(() => { if (S.tab === "home") renderHome(true); if (S.tab === "show") renderShow(); })
+        .catch(() => {}).finally(() => setTimeout(() => { S.syncingPlay = false; }, 1500));
+    }
   });
   es.addEventListener("job", (e) => {
     S.job = JSON.parse(e.data);
@@ -285,7 +341,8 @@ function putFile(file, onprog) {
   });
 }
 
-// 拖进来的可以是文件，也可以是整个文件夹（里面的音频和 PDF 都收，别的跳过；文件夹里的 .md 多半是说明文字，不当打碟谱）
+// 拖进来的可以是文件，也可以是整个文件夹（里面的音频和 PDF 都收，别的跳过；文件夹里的 .md 多半是说明文字，不当打碟谱——
+// 除非开头写着「规范：v5」：四 Deck 的曲谱就是和原曲放在一个文件夹里拖进来的，见 addFiles）
 function filesFromDrop(dt) {
   const entries = [...(dt.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
   if (!entries.length) return Promise.resolve([...dt.files]);
@@ -312,7 +369,8 @@ async function addFiles(list) {
   for (const f of list) {
     const ext = f.name.toLowerCase().split(".").pop();
     if (f.name.startsWith(".") || !UPLOAD_EXTS.includes(ext)) continue; // 文件夹里的封面、文本之类直接跳过
-    if (f.djsInDir && ext !== "pdf" && isPlanFile(f.name)) continue;
+    // 文件夹里的 .md 多半是说明文字；写着「规范：v5」的是四 Deck 曲谱（谱和原曲放一个文件夹，整个拖进来）
+    if (f.djsInDir && ext !== "pdf" && isPlanFile(f.name) && !(await isV5Score(f))) continue;
     UP.files.push({ name: f.name, file: f, state: "queued", frac: 0 });
   }
   renderHomeUploads();
@@ -363,7 +421,7 @@ function setBar() {
           renderHome(true);
         }) },
         plans.map((pl) => h("option", { value: pl.file, selected: pl.current && !S.homeNew },
-          `${pl.title}${pl.n_tracks ? `（${pl.n_tracks} 首）` : ""}${pl.error ? "（读不了）" : ""}`)),
+          `${pl.title}${pl.n_tracks ? `（${pl.n_tracks} ${pl.v5 ? "份素材" : "首"}）` : ""}${pl.error ? "（读不了）" : ""}`)),
         S.homeNew ? h("option", { value: "", selected: true, disabled: true }, "新 set（拖打碟谱进来）") : null);
       bar.append(sel);
     } else {
@@ -417,22 +475,29 @@ async function renderHome(force = false) {
     root.innerHTML = "";
     const prog = S.progress || {};
     const resume = S.state && S.state.resume;
-    root.append(
+    const v5 = isV5Show(); // 曲谱 v5：四 Deck 共轴的演出画面（live5.js）；状态并进顶上这一行，省出地方给图
+    put(root,
       h("div", { class: "panel row home-live-bar" },
         h("b", {}, (S.showCompiled && S.showCompiled.set && S.showCompiled.set.name) || S.showSetId || ""),
-        h("span", { class: "grow" }),
-        h("a", { href: `/api/sets/${S.showSetId}/cuesheet.md`, target: "_blank", class: "dim", style: "margin-right:12px" }, "Hot Cue 表"),
+        v5 ? h("span", { class: "grow show-status5", id: "show-status" }) : h("span", { class: "grow" }),
+        v5 ? h("a", { href: `/static/handover.html?set=${encodeURIComponent(S.showSetId)}`, target: "_blank", class: "dim", style: "margin-right:12px" }, "交接说明")
+          : h("a", { href: `/api/sets/${S.showSetId}/cuesheet.md`, target: "_blank", class: "dim", style: "margin-right:12px" }, "Hot Cue 表"),
         playing ? h("button", { class: "danger", onclick: (e) => busy(e, "停止中…", stopShow) }, "■ 停止")
           : [resume && resume.set === S.showSetId
               ? h("button", { class: "primary", title: "从停下的位置接着放", onclick: (e) => busy(e, "启动中…", resumeShow) }, `▶ 继续（${resume.label}）`)
               : null,
             h("button", { onclick: () => { S.homeDone = prog.started_at; renderHome(true); } }, "回到开始")]),
-      h("div", { class: "panel", id: "show-status" }),
-      liveRoot,
+      v5 ? null : h("div", { class: "panel", id: "show-status" }),
+      v5 ? live5Root : liveRoot,
       h("details", { class: "panel job-log" }, h("summary", {}, "运行日志"), h("div", { class: "log", id: "show-log" })),
     );
-    live.setSet(S.showCompiled);
-    live.onSeek = isBuiltin() ? seekShow : null; // 内置引擎：点波形从那里放
+    if (v5) {
+      live5.setChart(S.showCompiled.chart);
+      if (!playing && resume && resume.v5 && resume.set === S.showSetId) live5.setRest(resume.beat); // 游标停在「继续」会接着放的那一拍
+    } else {
+      live.setSet(S.showCompiled);
+      live.onSeek = isBuiltin() ? seekShow : null; // 内置引擎：点波形从那里放
+    }
     renderShowStatus();
     return;
   }
@@ -455,7 +520,12 @@ async function renderHome(force = false) {
     const docs = h("div", { class: "dim score-docs" }, "自己写谱：",
       h("a", { href: "/api/score/spec.md", target: "_blank" }, "打碟谱规范"), " · ",
       h("a", { href: "/api/score/template.md?download=1" }, "下载模板"),
-      "（Denon Prime 4+ 的旋钮位、推子、效果器、Hot Cue 怎么写）");
+      "（Denon Prime 4+ 的旋钮位、推子、效果器、Hot Cue 怎么写）",
+      h("div", {}, "四 Deck 编排：",
+        h("a", { href: "/api/score/spec5.md", target: "_blank" }, "曲谱规范 v5"), " · ",
+        h("a", { href: "/api/score/example5.md", target: "_blank" }, "示例谱"), " · ",
+        h("a", { href: "/api/score/example5.md?download=1" }, "下载示例谱"),
+        "（谱和原曲放进一个文件夹，整个拖进来）"));
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
     drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); filesFromDrop(e.dataTransfer).then(addFiles); });
@@ -486,6 +556,11 @@ function renderHomeUploads() {
 }
 
 function planHeader(p) {
+  if (p.v5) { // 曲谱 v5：素材 / 片段 / 场景（没有「过渡」的说法）
+    return h("div", { class: "home-title" },
+      h("h1", {}, p.title),
+      h("div", { class: "dim" }, `${p.n_tracks ?? 0} 份素材 · ${p.n_clips ?? 0} 个片段 · ${p.n_scenes ?? 0} 个场景`, h("span", { class: "badge", style: "margin-left:8px" }, "曲谱 v5 · 四 Deck")));
+  }
   const nl = p.techniques.filter((t) => t === "longhand").length;
   return h("div", { class: "home-title" },
     h("h1", {}, p.title),
@@ -498,9 +573,17 @@ function renderHomePlan() {
   const p = S.plan;
   el.innerHTML = "";
   if (!p) return;
-  if (p.error) { el.append(h("div", { class: "err-box" }, `「${p.file}」读不了：${p.error}`)); return; }
+  if (p.error) {
+    // v5 的谱读不了：逐条列出来（第几行、哪里、怎么改）；别的谱只有一句话
+    const errs = p.v5 ? (p.issues || []).filter((i) => i.level === "error") : [];
+    if (errs.length) put(el, h("h1", {}, p.title || p.file), issueBoxes(p.issues));
+    else el.append(h("div", { class: "err-box" }, `「${p.file}」读不了：${p.error}`));
+    return;
+  }
   const have = p.tracks.filter((t) => t.track).length;
-  const missing = p.tracks.filter((t) => !t.track);
+  // v5：同名不同内容的文件有好几个的素材不算「缺」，是等人选（下面有选择框）
+  const unpicked = p.v5 ? p.tracks.filter((t) => !t.track && t.choices && t.choices.length > 1) : [];
+  const missing = p.tracks.filter((t) => !t.track && !unpicked.includes(t));
   const f = p.finder || {};
   const job = S.job && S.job.state === "running" ? S.job : null;
   const findMsg = f.state === "running" ? h("div", { class: "dim" }, "正在电脑里按谱上的文件名找曲子…")
@@ -508,14 +591,27 @@ function renderHomePlan() {
       : f.state === "error" ? h("div", { class: "warn-box" }, `在电脑里找曲子时出错：${f.error}`) : null;
   // 原生 append 会把 null 当成文字「null」：只放有的
   el.append(planHeader(p),
-    h("div", { class: "home-count" }, h("span", { class: "big-pct" }, `${have} / ${p.n_tracks}`), h("span", {}, " 首曲子已就位")),
+    h("div", { class: "home-count" }, h("span", { class: "big-pct" }, `${have} / ${p.n_tracks}`), h("span", {}, p.v5 ? " 份素材已就位" : " 首曲子已就位")),
     ...(findMsg ? [findMsg] : []));
-  if (p.warnings && p.warnings.length) el.append(h("div", { class: "warn-box" }, p.warnings.map((w) => h("div", {}, w))));
+  if (p.v5) {
+    // 错误和提示分开：错误改了才能分析；提示只是提醒（v5 的 warnings 就是这些提示的文字版，不再重复）
+    put(el, issueBoxes(p.issues));
+    // 文件名一样、内容不一样的有好几个：让人选，不猜
+    for (const t of p.tracks.filter((x) => x.choices && x.choices.length > 1)) {
+      const sel = h("select", {}, t.choices.map((c) => h("option", { value: c.track, selected: c.track === t.track },
+        `${c.display || c.track}（${fmtLen(c.duration || 0)}，${c.track}）`)));
+      el.append(h("div", { class: "pick5" }, h("span", {}, `素材 ${t.asset}「${t.title}」有 ${t.choices.length} 个同名文件，用哪一个：`), sel,
+        h("button", { class: "small", onclick: (e) => busy(e, "选定中…", async () => {
+          await api("POST", `/api/v5/${p.project}/pin`, { asset: t.asset, track: sel.value });
+          schedulePlanReload();
+        }) }, "用这个")));
+    }
+  } else if (p.warnings && p.warnings.length) el.append(h("div", { class: "warn-box" }, p.warnings.map((w) => h("div", {}, w))));
   if (missing.length && f.state !== "running") {
-    el.append(h("div", { class: "missing" }, h("div", {}, "还缺这几首，把文件拖到下面："),
-      missing.map((t) => h("div", { class: "mono" }, `#${String(t.no).padStart(2, "0")} ${t.title}`, h("span", { class: "dim" }, t.file ? `  （${t.file}）` : "")))));
+    el.append(h("div", { class: "missing" }, h("div", {}, p.v5 ? "还缺这几份素材，把文件拖到下面：" : "还缺这几首，把文件拖到下面："),
+      missing.map((t) => h("div", { class: "mono" }, p.v5 ? `${t.asset} ${t.title}` : `#${String(t.no).padStart(2, "0")} ${t.title}`, h("span", { class: "dim" }, t.file ? `  （${t.file}）` : "")))));
   }
-  if (!missing.length && f.state !== "running") {
+  if (!missing.length && !unpicked.length && f.state !== "running") {
     el.append(h("div", { class: "row", style: "margin-top:10px" },
       h("button", { class: "primary", disabled: !!job, onclick: () => guard(async () => { S.job = await api("POST", "/api/auto"); S.homeSkipJob = null; renderHome(); }) },
         job ? `「${job.name}」进行中…` : "开始分析")));
@@ -590,7 +686,8 @@ function renderHomeJob() {
         h("button", { onclick: () => { S.homeSkipJob = job.started; renderHome(true); } }, "换一份打碟谱 / 补曲子")));
   }
   const r = job.state === "ok" ? job.result : null;
-  if (r) {
+  if (r && r.v5) renderReady5(el, r);
+  else if (r) {
     const warns = (r.notes || []).filter((n) => n.level === "warn");
     const builtin = isBuiltin();
     const nTr = (p && !p.error && p.n_transitions) || 0;
@@ -616,10 +713,45 @@ function renderHomeJob() {
       }); } }, "先在模拟器里预演（不碰 Mixxx，没有声音）"),
       h("a", { href: `/api/sets/${r.set}/cuesheet.md`, target: "_blank", title: "按播放规范（docs/SET_SPEC.md）生成的 hot cue：打击垫 1–8、名字、颜色、位置" }, "Hot Cue 表（Prime 4+）"),
       h("a", { href: `/api/sets/${r.set}/cuesheet.md?download=1` }, "下载 .md"),
+      // 旧谱也能看成四 Deck 的图、另存成 v5 的谱（原来的谱和 set 都不动）
+      h("a", { href: `/static/handover.html?set=${encodeURIComponent(r.set)}`, target: "_blank", title: "这套 set 画成四 Deck 同轴的操作图（A / B 交替在 D1 / D2 上），可以打印 / 存成 PDF" }, "交接说明"),
+      h("a", { href: `/api/sets/${r.set}/v5.md?download=1`, title: "把这套 set 写成曲谱 v5（每个旋钮动作都写明），存成一份新文件" }, "另存为 v5 的谱"),
       h("span", { class: "grow" }),
       h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeNew = true; renderHome(true); } }, "＋ 新 set")));
   }
   el.append(h("details", { class: "job-log" }, h("summary", {}, "详细日志"), h("div", { class: "log" }, job.log.join("\n"))));
+}
+
+// 「可以演出了」那一屏，曲谱 v5：从头 / 从某个场景开始；规范、示例、另存为 v5、演出包、交接说明。
+// 没有 Hot Cue 表和「录成 MP3」：v5 不生成混音试听（那两个接口是 v1–v4 的）。
+function renderReady5(el, r) {
+  const scenes = r.scenes || [];
+  const opts = h("div", { class: "row play-opts" },
+    h("label", {}, "从 ", h("select", { id: "play-from" }, h("option", { value: 0 }, "头"),
+      scenes.map((sc) => h("option", { value: sc.no }, `场景 ${sc.no}${sc.name ? `「${sc.name}」` : ""}（第 ${pos5(sc.beat || 0)}）`))), " 开始"),
+    h("label", {}, "速度 ", h("select", { id: "play-speed" }, [1, 2, 4, 8].map((v) => h("option", { value: v }, v === 1 ? (hasSound() ? "1×（有声音）" : "1×") : `${v}×（没有声音）`)))));
+  el.append(h("div", { class: "ready" },
+    h("div", { class: "grow" }, h("div", { class: "ready-big" }, "可以演出了"),
+      h("div", { class: "dim" }, `${Math.round(r.bars || 0)} 小节，约 ${Math.round((r.duration || 0) / 60)} 分钟。四台 Deck 用内置引擎放，不连你装的 Mixxx。` +
+        (hasSound() ? "原速时从电脑的声音输出放出来；倍速时没有声音。" : "没有找到声音引擎：看得到每台 Deck 和旋钮怎么动，没有声音。")), opts),
+    h("button", { class: "primary huge", onclick: (e) => busy(e, "启动中…", () =>
+      startShow(r.set, { from: +$("#play-from").value, speed: +$("#play-speed").value })) }, "▶ 开始演出")));
+  const hints = (r.notes || []).filter((n) => n.level === "warn");
+  if (hints.length) el.append(h("div", { class: "hint-box" }, h("b", {}, `提示（${hints.length}）`), hints.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
+  const ex = S.export5 && S.export5.set === r.set ? S.export5 : null;
+  if (ex) {
+    el.append(h("div", { class: "export5" }, h("b", { class: "rec-ok" }, "✓ 演出包已导出 "),
+      `谱和 ${ex.n} 个原曲文件${ex.bytes ? `（${Math.max(1, Math.round(ex.bytes / 1e6))} MB）` : ""}在这个文件夹里：`, h("div", { class: "mono" }, ex.folder)));
+  }
+  el.append(h("div", { class: "row dim", style: "margin-top:10px" },
+    h("a", { href: `/static/handover.html?set=${encodeURIComponent(r.set)}`, target: "_blank", title: "整场结构、每个场景的策略、四 Deck 共轴图和动作表，A4 横版" }, "交接说明（打印 / 存 PDF）"),
+    h("a", { href: "#home", title: "一个文件夹：谱和用到的全部原曲在同一层（原文件，不转码、不出混音）",
+      onclick: (e) => { e.preventDefault(); busy(e, "导出中…", () => exportPackage5(r.set)); } }, "导出演出包"),
+    h("a", { href: `/api/v5/${r.set}/score.md?download=1`, title: "把这个项目写成一份 v5 的谱（.md）" }, "另存为 v5 的谱"),
+    h("a", { href: "/api/score/spec5.md", target: "_blank" }, "曲谱规范 v5"),
+    h("a", { href: "/api/score/example5.md", target: "_blank" }, "示例谱"),
+    h("span", { class: "grow" }),
+    h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeNew = true; renderHome(true); } }, "＋ 新 set")));
 }
 
 // ------------------------------------------------------------------ 曲库
@@ -1200,6 +1332,7 @@ async function renderShow() {
   const prepared = S.state && S.state.prepared;
   if (!S.showSetId) S.showSetId = (prepared && prepared.set) || S.setId || (S.sets[0] && S.sets[0].id);
   await loadShowCompiled();
+  if (isV5Show()) { renderShow5(root); return; }
   const playing = S.state && S.state.playing;
   const busy = playing || (S.job && S.job.state === "running");
   const isPrepared = prepared && prepared.set === S.showSetId;
@@ -1245,9 +1378,50 @@ async function loadShowCompiled() {
   const want = showKey();
   if (S.showSetId && (!S.showCompiled || S.showCompiled._key !== want.key)) {
     const r = await api("GET", want.url).catch(() => null);
+    // 曲谱 v5 的项目：没有 compiled（曲目 / 过渡 / 时间表），是一份 chart（共轴图、场景、动作），演出画面换成 live5.js
+    if (r && r.v5) S.showCompiled = { v5: true, chart: r.chart, set: r.set, _id: S.showSetId, _key: want.key, _offset: 0 };
     // _offset：从第 k 段过渡开始时，截短的 set 里第 1 首其实是原来的第 k 首（编号照原来的显示）
-    S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, _key: want.key, _offset: want.offset || 0, set: r.set } : null;
+    else S.showCompiled = r ? { ...r.compiled, _id: S.showSetId, _key: want.key, _offset: want.offset || 0, set: r.set } : null;
   }
+}
+
+// 演出页（高级）放的是 v5 的项目时：从头 / 从某个场景开始、倍速、停止，下面是同一个四 Deck 演出画面
+function renderShow5(root) {
+  const playing = S.state && S.state.playing;
+  const jobBusy = playing || (S.job && S.job.state === "running");
+  const chart = S.showCompiled.chart || {};
+  const resume = S.state && S.state.resume;
+  root.innerHTML = "";
+  root.append(
+    h("div", { class: "panel row" },
+      h("select", { disabled: playing, onchange: (e) => { S.showSetId = e.target.value; S.showCompiled = null; renderShow(); } },
+        h("option", { value: S.showSetId, selected: true }, `${(S.showCompiled.set && S.showCompiled.set.name) || S.showSetId}（曲谱 v5）`),
+        S.sets.map((s) => h("option", { value: s.id }, s.name || s.id))),
+      h("span", { class: "grow" }),
+      h("span", { class: "dim" }, "从"),
+      h("select", { id: "rh-from", disabled: jobBusy }, h("option", { value: 0 }, "头"),
+        (chart.scenes || []).map((sc) => h("option", { value: sc.no, selected: S.rhFrom === sc.no }, `场景 ${sc.no}${sc.name ? `「${sc.name}」` : ""}`))),
+      h("select", { id: "rh-speed", disabled: jobBusy }, [1, 2, 4, 8].map((v) => h("option", { value: v, selected: v === (S.rhSpeed || 1) }, `${v}×`))),
+      h("button", { class: "primary", disabled: jobBusy || chart.ok === false, onclick: (e) => window.busy(e, "启动中…", async () => {
+        S.rhFrom = +$("#rh-from").value; S.rhSpeed = +$("#rh-speed").value;
+        await api("POST", `/api/sets/${S.showSetId}/play`, { from: S.rhFrom, speed: S.rhSpeed });
+        S.showCompiled = null;
+        await loadState(); renderShow();
+      }) }, "▶ 开始"),
+      !playing && resume && resume.set === S.showSetId ? h("button", { onclick: (e) => window.busy(e, "启动中…", async () => {
+        await api("POST", "/api/resume"); await loadState(); renderShow();
+      }) }, `▶ 继续（${resume.label}）`) : null,
+      h("button", { class: "danger", disabled: !playing, onclick: (e) => window.busy(e, "停止中…", stopShow) }, "■ 停止"),
+    ),
+    h("div", { id: "job-show" }),
+    h("div", { class: "panel show-status5", id: "show-status" }),
+    live5Root,
+    h("div", { class: "panel", style: "margin-top:14px" }, h("h3", {}, "运行日志"), h("div", { class: "log", id: "show-log" })),
+  );
+  live5.setChart(S.showCompiled.chart);
+  if (!playing && resume && resume.v5 && resume.set === S.showSetId) live5.setRest(resume.beat);
+  renderJobPanels();
+  renderShowStatus();
 }
 
 // 演出页显示哪份编译结果：预演从第 k 段开始时是截短的那份（progress.index 按它算）
@@ -1255,6 +1429,10 @@ function showKey() {
   const e = S.engine || {};
   // 这一场从第几首第几小节开始（从第 k 段过渡开始、停下后继续）：正在放按引擎报的，停下以后按上一次开始时的
   const last = (S.state && S.state.last_play) || {};
+  // 曲谱 v5：一个项目只有一份图（从哪开始都是它），不按「第几首第几小节」分
+  if ((e.v5 && e.set === S.showSetId) || (last.v5 && last.set === S.showSetId) || (S.showCompiled && S.showCompiled.v5 && S.showCompiled._id === S.showSetId)) {
+    return { key: `v5~${S.showSetId}`, url: "/api/sets/" + S.showSetId };
+  }
   const r = e.rehearsal ? { set: e.set, track: e.track, bar: e.bar } : last;
   if (r.set === S.showSetId && r.track !== undefined && r.track !== null && r.bar !== undefined && r.bar !== null) {
     return { key: `${r.set}~${r.track}~${r.bar}`, url: `/api/sets/${r.set}?track=${r.track}&bar=${r.bar}`, offset: r.track };
@@ -1269,10 +1447,14 @@ const live = new LiveView(liveRoot, async (id) => {
   return { wave, sections: t.sections || [] };
 });
 
+// 曲谱 v5 的演出画面（live5.js）：和上面一样只有一个实例，换页时搬过去
+const live5Root = h("div", { id: "live5" });
+const live5 = new Live5View(live5Root, { api, toast, onSeek: (beat) => guard(() => seekShow5(beat)) });
+
 // 整套时间表：独奏 / 过渡 / 终曲按时长排开，当前所在段高亮
 function setStrip(p) {
   const comp = S.showCompiled;
-  if (!comp || !comp.schedule || !comp.schedule.length) return null;
+  if (!comp || comp.v5 || !comp.schedule || !comp.schedule.length) return null;
   const total = comp.duration || comp.schedule[comp.schedule.length - 1].t1 || 1;
   const curKind = p.stage === "transition" ? "transition" : p.stage === "ending" ? "ending" : "solo";
   const curIdx = p.stage === "transition" ? (p.program === "end" ? -1 : p.index) : p.index;
@@ -1289,9 +1471,39 @@ const STAGE_LABEL = {
   transition: "过渡中", ending: "终曲淡出", done: "整套播完", stopping: "淡出停止中", stopped: "已停止", error: "出错停止",
 };
 
+const STAGE5_LABEL = {
+  idle: "空闲", starting: "连接引擎", preparing: "准备中", running: "演出中", paused: "已暂停", done: "整场放完",
+  stopping: "停止中", stopped: "已停止", error: "出错停止",
+};
+
+// 曲谱 v5：一行状态（位置、场景、电平都在演出画面里）；曲谱没编过时把问题列出来
+function renderShowStatus5(el) {
+  const p = S.progress && S.progress.v5 ? S.progress : null;
+  const e = S.engine || {};
+  const chart = S.showCompiled.chart || {};
+  el.innerHTML = "";
+  put(el,
+    h("span", { class: "stage", style: p && p.stage === "error" ? "color:var(--err)" : "" }, p ? STAGE5_LABEL[p.stage] || p.stage : "还没有开始"),
+    e.v5 && e.rehearsal ? h("span", { class: "badge ok", title: "四台 Deck 在内置引擎的调度器里放；旋钮、电平、动作的回执都是引擎报回来的" }, soundText(e)) : null,
+    p && p.message && p.stage !== "running" && p.message !== STAGE5_LABEL[p.stage] && p.message !== p.error ? h("span", { class: "dim" }, p.message) : null,
+    p && p.error ? h("span", { style: "color:var(--err)" }, p.error) : null,
+    chart.ok === false ? h("span", { style: "color:var(--err)" }, "曲谱没编过：" + (chart.issues || []).filter((i) => i.level === "error").slice(0, 3)
+      .map((i) => `${i.line ? `第 ${i.line} 行 ` : ""}${i.where || ""}：${i.msg}`).join("；")) : null);
+  const log = $("#show-log");
+  const sig = `${S.log.length}|${S.log[S.log.length - 1] || ""}`;
+  if (log && log._sig !== sig) { // 状态一秒来好几次：日志有新行才重写
+    log._sig = sig;
+    log.innerHTML = "";
+    for (const line of S.log.slice(-300)) log.append(h("div", { class: line.includes("!!") ? "e" : "" }, line));
+    log.scrollTop = log.scrollHeight;
+  }
+  updateDecks();
+}
+
 function renderShowStatus() {
   const el = $("#show-status");
   if (!el) return;
+  if (isV5Show()) { renderShowStatus5(el); return; }
   const p = S.progress;
   el.innerHTML = "";
   if (!p) { el.append(h("div", { class: "dim" }, "还没有开始播放。真机：先「准备」（重启 Mixxx、部署引擎、写 AutoDJ 队列），再「开始」。不开 Mixxx 也可以「预演」：在模拟器里把这套 set 跑一遍看旋钮怎么动。")); }
@@ -1324,13 +1536,23 @@ function renderShowStatus() {
 
 let showReloading = false;
 function updateDecks() {
-  if (!liveRoot.isConnected) return;
+  const v5 = isV5Show();
+  if (!(v5 ? live5Root : liveRoot).isConnected) return;
   const e = S.engine || {};
-  if (S.showCompiled && S.showCompiled._key !== showKey().key && !showReloading) {
+  // v5：引擎在放的计划和手上这份图不是同一次编译（停着的时候重新分析过）→ 重新取图
+  const stale5 = v5 && e.v5 && e.status && e.status.exec && S.showCompiled.chart && S.showCompiled.chart.exec && e.status.exec !== S.showCompiled.chart.exec
+    && S.showCompiled._staleFor !== e.status.exec;
+  if (S.showCompiled && (S.showCompiled._key !== showKey().key || stale5) && !showReloading) {
     showReloading = true;
-    (S.tab === "home" ? renderHome(true) : renderShow()).finally(() => { showReloading = false; });
+    const staleFor = stale5 ? e.status.exec : null;
+    if (stale5) S.showCompiled = null;
+    (S.tab === "home" ? renderHome(true) : renderShow()).finally(() => {
+      showReloading = false;
+      if (staleFor && S.showCompiled) S.showCompiled._staleFor = staleFor; // 取回来还是对不上：不反复取
+    });
     return;
   }
+  if (v5) { live5.update(e, S.progress); return; }
   live.setBanner(!e.rehearsal && e.connected && !e.online && S.state && S.state.playing ? "引擎失联：画面停在最后一帧" : "");
   live.update(e, S.progress);
 }
