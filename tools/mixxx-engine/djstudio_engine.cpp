@@ -8,6 +8,9 @@
 //   djstudio-engine                 演出：stdin / stdout 与 Python 通信（djstudio/engine/link.py 的 EngineLink），
 //                                   协议与 sim/fake_mixxx.mjs 相同：十六进制 = 原始 MIDI；'#' 开头 = 控制命令 / 回复（JSON）。
 //                                   声音经 PortAudio 输出到系统默认输出设备，引擎按声卡的时钟走（和 Mixxx 一样）。
+//                                   DJSTUDIO_V5=1：四 Deck 原生调度（曲谱 v5）。不加载 DJStudio.js，不用 AutoDJ；
+//                                   「#」命令里 v5.* 交给 djs5/engine5.hpp 的调度器，「@」开头 = 它发的回执 / 事件 / 状态。
+//                                   协议见 docs/ENGINE5.md，和独立模拟器 djs5/sim5.cpp 相同。
 //   djstudio-engine --probe <文件>  打印 JSON：时长、采样率、声道、码率、标签
 //   djstudio-engine --decode <文件> <输出> <采样率>
 //                                   解码成单声道 float32（小端）写到输出文件，按给定采样率重采样（分析用）。
@@ -45,6 +48,7 @@
 #include <QMutex>
 #include <QTemporaryDir>
 #include <QThread>
+#include <Reverb.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -61,6 +65,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "control/control.h"
 #include "control/controlindicatortimer.h"
 #include "control/controlobject.h"
 #include "control/controlpushbutton.h"
@@ -93,12 +98,15 @@
 #include "util/samplebuffer.h"
 #include "util/time.h"
 
+#include "djs5/engine5.hpp"
+
 namespace {
 
 constexpr int kSampleRate = 44100;
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kBufferSamples = 1024; // 每次处理 512 帧（立体声），和 Mixxx 自己的测试一样
 constexpr int kBufferFrames = kBufferSamples / 2;
+constexpr int kNumDecks = 4; // v4 的谱只用 deck 1、2（AutoDJ 装载）；v5 的四 Deck 调度用全部四个
 
 std::FILE* gOut = stdout;
 QMutex gOutLock;
@@ -477,9 +485,29 @@ class FileEncoderCallback : public EncoderCallback {
     QFile* m_f;
 };
 
-// ------------------------------------------------------------ 引擎（两个 deck + 混音器 + 效果 + 控制器）
+// v5 的 Reverb 实例：Mixxx 的板式混响（lib/reverb 的 MixxxPlateX2，Mixxx 自己的 Reverb 效果用的就是它，
+// reverbeffect.cpp:83-128），每个实例一份自己的状态。输出只有效果声（Mixxx 的效果链再把干声加回去，
+// engineeffectchain.cpp:234-262；v5 里干声由通道自己出）
+class PlateReverb : public djs5::Reverb {
+  public:
+    explicit PlateReverb(int sampleRate) {
+        m_plate.init(static_cast<float>(sampleRate));
+    }
+    void reset() override {
+        m_plate.activate();
+    }
+    void process(const float* in, float* out, int frames, float decay, float bandwidth, float damping, float send,
+            float sendPrev) override {
+        m_plate.processBuffer(in, out, static_cast<uint>(frames * 2), bandwidth, decay, damping, send, sendPrev);
+    }
 
-class Engine {
+  private:
+    MixxxPlateX2 m_plate;
+};
+
+// ------------------------------------------------------------ 引擎（四个 deck + 混音器 + 效果 + 控制器）
+
+class Engine : public djs5::Backend {
   public:
     explicit Engine(UserSettingsPointer config)
             : m_pConfig(config) {
@@ -501,7 +529,7 @@ class Engine {
         ControlObject::set(ConfigKey(QStringLiteral("[Mixer Profile]"), QStringLiteral("HiEQFrequency")), 2500.0);
         m_pEngineMixer = new OutputEngineMixer(m_pConfig, kMainGroup, m_pEffectsManager, m_pChannelHandleFactory, false);
         m_pEngineMixer->enableOutputs();
-        for (int n = 1; n <= 2; ++n) {
+        for (int n = 1; n <= kNumDecks; ++n) {
             const QString group = QString("[Channel%1]").arg(n);
             Deck* d = new Deck(nullptr, m_pConfig, m_pEngineMixer, m_pEffectsManager, EngineChannel::CENTER,
                     m_pEngineMixer->registerChannelGroup(group));
@@ -520,8 +548,8 @@ class Engine {
         ControlObject::set(ConfigKey("[ReplayGain]", "DefaultBoost"), 1.0);
         // 电平表（dBFS）：deck 推子前（增益、EQ、滤波之后，和 DJ 混音台一样）和主输出。Mixxx 自己的 vu_meter 是对数刻度、
         // 封顶 1，响的曲子一直顶满，看不出差几个 dB
-        const char* groups[3] = {"[Channel1]", "[Channel2]", "[Main]"};
-        for (int i = 0; i < 3; ++i) {
+        const char* groups[kNumDecks + 1] = {"[Channel1]", "[Channel2]", "[Channel3]", "[Channel4]", "[Main]"};
+        for (int i = 0; i <= kNumDecks; ++i) {
             m_meters[i].level = std::make_unique<ControlObject>(ConfigKey(groups[i], "djs_level"));
             m_meters[i].peak = std::make_unique<ControlObject>(ConfigKey(groups[i], "djs_peak"));
             m_meters[i].level->set(-90.0);
@@ -536,7 +564,7 @@ class Engine {
         m_tick = std::make_unique<ControlObject>(ConfigKey("[DJStudio]", "tick"));
         PlayerInfo::create();
         // EQ 与快速效果链（真 Mixxx 里由 PlayerManager::addDeckInner 注册），以及标准效果单元
-        for (int n = 1; n <= 2; ++n) {
+        for (int n = 1; n <= kNumDecks; ++n) {
             m_pEffectsManager->addDeck(ChannelHandleAndGroup(
                     m_decks[n]->getEngineDeck()->getHandle(), QString("[Channel%1]").arg(n)));
         }
@@ -571,7 +599,7 @@ class Engine {
         for (int unit = 1; unit <= 4; ++unit) {
             const QString g = QString("[EffectRack1_EffectUnit%1]").arg(unit);
             ControlObject::set(ConfigKey(g, "mix"), 0.0);
-            for (int n = 1; n <= 2; ++n) {
+            for (int n = 1; n <= kNumDecks; ++n) {
                 ControlObject::set(ConfigKey(g, QString("group_[Channel%1]_enable").arg(n)), 0.0);
             }
         }
@@ -708,6 +736,10 @@ class Engine {
     double engineMs() const {
         return static_cast<double>(m_engineFrames) * 1000.0 / kSampleRate;
     }
+    // 主输出：v5 是调度器自己混的那一块，其余是 Mixxx 的主输出
+    const CSAMPLE* outBuffer() const {
+        return m_v5 ? m_out5.data() : m_pEngineMixer->getMainBuffer();
+    }
     void processOne() {
         m_pEngineMixer->process(kBufferSamples);
         updateMeters();
@@ -745,15 +777,15 @@ class Engine {
         const double dt = static_cast<double>(kBufferFrames) / kSampleRate;
         const double a = 1.0 - std::exp(-dt / 0.3);
         const double fall = std::pow(10.0, -dt); // -20 dB/s
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i <= kNumDecks; ++i) {
             const CSAMPLE* p = nullptr;
-            if (i < 2) {
+            if (i < kNumDecks) {
                 // 停着的 deck 不处理，它的缓冲区里是上一次的内容：当静音
                 if (co(i + 1, "play") > 0) {
                     p = m_pEngineMixer->getChannelBuffer(QString("[Channel%1]").arg(i + 1));
                 }
             } else {
-                p = m_pEngineMixer->getMainBuffer();
+                p = outBuffer();
             }
             double sum = 0.0, mx = 0.0;
             if (p) {
@@ -1007,7 +1039,7 @@ class Engine {
         if (!m_rec) {
             return;
         }
-        const CSAMPLE* p = m_pEngineMixer->getMainBuffer();
+        const CSAMPLE* p = outBuffer();
         if (m_recTrim) {
             float peak = 0.0f;
             for (int i = 0; i < kBufferSamples; ++i) {
@@ -1056,6 +1088,324 @@ class Engine {
             m_rec->close();
             m_rec.reset();
         }
+    }
+
+    // ------------------------------------------------------------ v5：四 Deck 原生调度（DJSTUDIO_V5=1）
+    //
+    // deck 还是 Mixxx 的 deck（解码、变速、loop、EQ、滤波），调度和通道之后的混音换成 djs5/engine5.hpp：
+    // - 每个 deck 的 main_mix 关掉：Mixxx 自己的主输出里没有它们（通道缓冲区保持推子前的样子——只有进了主混音的通道
+    //   才会被就地乘上推子、过效果单元，channelmixer.cpp:56-96），调度器从通道缓冲区取声音，自己算门、推子、发送效果；
+    // - quantize 关掉：起播 / 定位不做相位同步（enginebuffer.cpp:776-791），位置完全由调度器按全场速度图给；
+    // - 装载直接走 Deck::slotLoadTrack（主线程），不用 AutoDJ；装好没有看 track_loaded 和 deck 上的曲目。
+    // 「控制步」和「处理一块音频」用调度器的 gate 互斥：同一步里对 deck 的改动在同一块音频之前一起生效。
+
+  public:
+    int decks() override {
+        return kNumDecks;
+    }
+    void load(int d, const std::string& asset, int gen) override {
+        QMutexLocker lock(&m_loadLock);
+        Deck5& x = m_d5[d];
+        x.gen = 0;
+        x.want = true;
+        x.wantGen = gen;
+        x.wantAsset = QString::fromStdString(asset);
+    }
+    int loaded(int d) override {
+        return m_d5[d].gen.load();
+    }
+    double position(int d) override {
+        // 每块处理完更新一次（EngineBuffer::updateIndicators，enginebuffer.cpp:1484-1495）= 下一块开头的位置
+        const auto pos = deckN(d)->getEngineDeck()->getEngineBuffer()->getExactPlayPos();
+        return pos.isValid() ? pos.value() / m_d5[d].sr : 0.0;
+    }
+    void seek(int d, double sec) override {
+        // 下一块开头生效（processSeek）；SEEK_EXACT = 不吸附到拍上。曲首之前也可以（那一段读出来是静音）
+        deckN(d)->getEngineDeck()->getEngineBuffer()->queueNewPlaypos(
+                mixxx::audio::FramePos(sec * m_d5[d].sr), EngineBuffer::SEEK_EXACT);
+    }
+    // 控件一律用「没有发送者」的写法（同 ControlObject::set(key, value)，controlobject.cpp）：拿着控件自己的 ControlObject
+    // 指针写的话，它不给自己发 valueChanged（controlobject.cpp privateValueChanged：pSender == this 不发），
+    // 接在这个信号上的 Mixxx 代码（loop 起止点、EQ 旋钮、速率）就收不到
+    void play(int d, bool on) override {
+        m_d5[d].play->set(on ? 1.0 : 0.0, nullptr);
+    }
+    void rate(int d, double ratio) override {
+        m_d5[d].rate->set(ratio, nullptr);
+    }
+    void loop(int d, double s0, double s1, bool on) override {
+        Deck5& x = m_d5[d];
+        if (on) {
+            // 位置单位是「引擎采样」= 帧 × 2（loopingcontrol.cpp:1121-1185）；loop_enabled 写 1 只开 loop，不跳位置
+            // （slotLoopEnabledValueChangeRequest，loopingcontrol.cpp:1034-1055）。回绕由 deck 自己在 loop 尾做
+            if (x.loopEnabled->get() > 0) {
+                x.loopEnabled->set(0.0, nullptr);
+            }
+            x.loopStart->set(s0 * x.sr * 2.0, nullptr);
+            x.loopEnd->set(s1 * x.sr * 2.0, nullptr);
+            x.loopEnabled->set(1.0, nullptr);
+        } else if (x.loopEnabled->get() > 0) {
+            x.loopEnabled->set(0.0, nullptr);
+        }
+    }
+    void param(int d, int p, double v) override {
+        Deck5& x = m_d5[d];
+        if (p == djs5::P_FILTER) {
+            x.filter->set(v, nullptr);
+        } else if (p >= 0 && p < 3) {
+            x.eq[p]->set(v, nullptr);
+        }
+    }
+    void keylock(int d, bool on) override {
+        m_d5[d].keylock->set(on ? 1.0 : 0.0, nullptr);
+    }
+    const float* channel(int d) override {
+        return m_d5[d].gen.load() > 0 ? m_d5[d].buffer : nullptr;
+    }
+    double delayFrames() override {
+        return m_eqDelay5;
+    }
+
+    int run5(double speed, bool wantAudio) {
+        m_v5 = true;
+        for (int n = 1; n <= kNumDecks; ++n) {
+            const QString g = QString("[Channel%1]").arg(n);
+            const auto co5 = [&g](const char* key) { return ControlDoublePrivate::getControl(ConfigKey(g, key)); };
+            Deck5& x = m_d5[n];
+            x.play = co5("play");
+            x.rate = co5("rate_ratio");
+            x.loopStart = co5("loop_start_position");
+            x.loopEnd = co5("loop_end_position");
+            x.loopEnabled = co5("loop_enabled");
+            x.keylock = co5("keylock");
+            const QString eq = QString("[EqualizerRack1_[Channel%1]_Effect1]").arg(n);
+            x.eq[0] = ControlDoublePrivate::getControl(ConfigKey(eq, "parameter1"));
+            x.eq[1] = ControlDoublePrivate::getControl(ConfigKey(eq, "parameter2"));
+            x.eq[2] = ControlDoublePrivate::getControl(ConfigKey(eq, "parameter3"));
+            x.filter = ControlDoublePrivate::getControl(ConfigKey(QString("[QuickEffectRack1_[Channel%1]]").arg(n), "super1"));
+            x.buffer = m_pEngineMixer->getChannelBuffer(g);
+            for (const auto& c : {x.play, x.rate, x.loopStart, x.loopEnd, x.loopEnabled, x.keylock, x.eq[0], x.eq[1],
+                         x.eq[2], x.filter}) {
+                if (!c) {
+                    std::fprintf(stderr, "deck %d 的控件不全\n", n);
+                    return 4;
+                }
+            }
+            ControlObject::set(ConfigKey(g, "quantize"), 0.0);
+            ControlObject::set(ConfigKey(g, "keylock"), 0.0);
+            ControlObject::set(ConfigKey(g, "main_mix"), 0.0);
+            ControlObject::set(ConfigKey(g, "orientation"), 1.0);
+            ControlObject::set(ConfigKey(g, "volume"), 1.0);
+        }
+        m_eqDelay5 = eqDelayFrames();
+        m_out5.assign(kBufferSamples, 0.0f);
+        m_e5 = std::make_unique<djs5::Engine5>(*this, kSampleRate, kBufferFrames,
+                [](int sr) { return std::unique_ptr<djs5::Reverb>(new PlateReverb(sr)); });
+        const QString fake = qEnvironmentVariable("DJSTUDIO_AUDIO_FAKE");
+        // 出声时在声卡回调里处理；全场暂停 / 静音预运行 / 冻结时这边放静音，不碰引擎
+        const auto render = [this](float* out) {
+            std::lock_guard<std::recursive_mutex> lock(m_e5->gate());
+            if (m_frozen || m_e5->frozen() || m_e5->prerunning()) {
+                std::fill(out, out + kBufferSamples, 0.0f);
+                return;
+            }
+            process5(true);
+            std::copy(m_out5.begin(), m_out5.end(), out);
+        };
+        if (wantAudio && speed == 1.0 && !m_audio.open(render, fake)) {
+            std::fprintf(stderr, "没有声音：%s\n", m_audio.m_error.toUtf8().constData());
+        }
+
+        QMutex inLock;
+        std::deque<std::string> inbox;
+        std::atomic<bool> eof{false};
+        std::thread reader([&] {
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                QMutexLocker lock(&inLock);
+                inbox.push_back(line);
+            }
+            eof = true;
+        });
+        reader.detach();
+
+        const qint64 t0 = mixxx::Time::elapsed().toIntegerMillis();
+        double heldMs = 0.0; // 不走时钟的墙钟时间（全场暂停、冻结、预运行跑掉的）：不出声时不拿它去追
+        qint64 lastWall = 0, lastStatus = -1000;
+        while (!m_quit && !eof) {
+            m_audio.followDefault();
+            std::deque<std::string> lines;
+            {
+                QMutexLocker lock(&inLock);
+                lines.swap(inbox);
+            }
+            for (auto& line : lines) {
+                if (!line.empty() && line[0] == '#') {
+                    command5(line.substr(1));
+                }
+            }
+            const qint64 wall = mixxx::Time::elapsed().toIntegerMillis() - t0;
+            if (m_frozen || m_e5->frozen()) {
+                heldMs += static_cast<double>(wall - lastWall);
+            }
+            lastWall = wall;
+            if (!m_frozen) {
+                serviceLoads5();
+                if (m_audio.active()) {
+                    prerun5();
+                    m_e5->controlStep(); // 下一块音频的控制步（声卡回调来之前做好）
+                } else {
+                    prerun5();
+                    int n = 0;
+                    while (!m_e5->frozen() && !m_e5->prerunning() && engineMs() < (wall - heldMs) * speed && n < 64) {
+                        std::lock_guard<std::recursive_mutex> lock(m_e5->gate());
+                        process5(false);
+                        recordBuffer();
+                        ++n;
+                    }
+                    if (n >= 64) { // 跟不上倍速（或者预运行刚跑完）：不攒着以后猛追
+                        heldMs = wall - engineMs() / speed;
+                    }
+                }
+                QCoreApplication::processEvents();
+            }
+            for (const std::string& m : m_e5->drain()) {
+                emitLine("@" + m);
+            }
+            if (!m_frozen && wall - lastStatus >= 50) {
+                lastStatus = wall;
+                emitLine("@" + m_e5->status().dump());
+            }
+            QThread::msleep(1);
+        }
+        stopRecord();
+        m_audio.close();
+        return 0;
+    }
+
+  private:
+    struct Deck5 {
+        QSharedPointer<ControlDoublePrivate> play, rate, loopStart, loopEnd, loopEnabled, keylock, eq[3], filter;
+        const CSAMPLE* buffer = nullptr;
+        std::atomic<int> gen{0}; // 装好的代数（负 = 那一代没装上）
+        double sr = kSampleRate;
+        bool want = false; // 调度器要装的（load() 可能在声卡线程里调，主线程来做）
+        int wantGen = 0;
+        QString wantAsset;
+        int loadingGen = 0;
+        TrackPointer loadingTrack;
+        qint64 loadingSince = 0;
+    };
+
+    // 处理一块音频（拿着 gate）：控制步没来得及跑就先补上，然后 Mixxx 的 deck，再是 v5 的混音
+    void process5(bool countLate) {
+        m_e5->preProcess(countLate);
+        const auto t0 = std::chrono::steady_clock::now();
+        m_pEngineMixer->process(kBufferSamples);
+        m_e5->render(m_out5.data());
+        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+        m_perfN++;
+        m_perfSumUs += us;
+        m_perfMaxUs = std::max(m_perfMaxUs, us);
+        updateMeters();
+        m_engineFrames += kBufferFrames;
+    }
+    // 静音预运行（定位到中间：把效果的历史补出来）：不看时钟，尽快处理到听得见的那一拍前面。
+    // 每块之间让一下读盘线程（跑得比它快的话那一块是静音，readaheadmanager.cpp:93-100）
+    void prerun5() {
+        int n = 0;
+        while (m_e5->prerunning() && !m_quit) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(m_e5->gate());
+                process5(false);
+            }
+            if (++n % 32 == 0) {
+                serviceLoads5();
+                QCoreApplication::processEvents();
+            }
+            QThread::usleep(150);
+        }
+    }
+    // 主线程：调度器要装的曲目交给 deck，装好了（或者装不上）记下代数
+    void serviceLoads5() {
+        const qint64 now = mixxx::Time::elapsed().toIntegerMillis();
+        for (int n = 1; n <= kNumDecks; ++n) {
+            Deck5& x = m_d5[n];
+            bool want = false;
+            int gen = 0;
+            QString asset;
+            {
+                QMutexLocker lock(&m_loadLock);
+                if (x.want) {
+                    want = true;
+                    gen = x.wantGen;
+                    asset = x.wantAsset;
+                    x.want = false;
+                }
+            }
+            if (want) {
+                x.loadingGen = 0;
+                x.loadingTrack.reset();
+                auto it = m_lib.find(asset);
+                if (it == m_lib.end() || !QFileInfo(it->second.track->getLocation()).isReadable()) {
+                    std::fprintf(stderr, "v5：deck %d 装不上 %s（曲库里没有 / 文件读不了）\n", n, asset.toUtf8().constData());
+                    x.gen = -gen;
+                } else if (co(n, "track_loaded") > 0 && deckN(n)->getLoadedTrack() == it->second.track && !playing(n)) {
+                    x.gen = gen; // 这个 deck 上已经是这首：不重装
+                } else {
+                    ControlObject::set(ConfigKey(QString("[Channel%1]").arg(n), "play"), 0.0);
+                    deckN(n)->slotLoadTrack(it->second.track, false);
+                    x.loadingGen = gen;
+                    x.loadingTrack = it->second.track;
+                    x.loadingSince = now;
+                }
+            }
+            if (x.loadingGen) {
+                if (co(n, "track_loaded") > 0 && co(n, "track_samples") > 0 && deckN(n)->getLoadedTrack() == x.loadingTrack) {
+                    const auto sr = x.loadingTrack->getSampleRate();
+                    x.sr = sr.isValid() ? sr.toDouble() : static_cast<double>(kSampleRate);
+                    x.gen = x.loadingGen;
+                    x.loadingGen = 0;
+                    x.loadingTrack.reset();
+                } else if (now - x.loadingSince > 15000) {
+                    std::fprintf(stderr, "v5：deck %d 装载超时\n", n);
+                    x.gen = -x.loadingGen;
+                    x.loadingGen = 0;
+                    x.loadingTrack.reset();
+                }
+            }
+        }
+    }
+    void command5(const std::string& text) {
+        djs5::Json c;
+        try {
+            c = djs5::Json::parse(text);
+        } catch (const std::exception& e) {
+            emitLine(std::string("#{\"ok\":false,\"err\":\"bad json\"}"));
+            return;
+        }
+        const std::string cmd = c["cmd"].str("");
+        if (cmd.rfind("v5.", 0) != 0) {
+            command(QJsonDocument::fromJson(QByteArray::fromStdString(text)).object());
+            return;
+        }
+        djs5::Json r;
+        if (cmd == "v5.perf") { // 每块音频（Mixxx 的 deck + v5 混音）的处理时间；读一次清一次
+            r = djs5::Json::object();
+            r.set("ok", true).set("buffers", static_cast<long long>(m_perfN));
+            r.set("avg_us", m_perfN ? m_perfSumUs / static_cast<double>(m_perfN) : 0.0).set("max_us", m_perfMaxUs);
+            r.set("budget_us", kBufferFrames * 1e6 / kSampleRate).set("late", m_e5->lateSteps());
+            r.set("underruns", static_cast<long long>(m_audio.info()["underruns"].toDouble()));
+            m_perfN = 0;
+            m_perfSumUs = m_perfMaxUs = 0.0;
+        } else {
+            r = m_e5->command(c);
+            if (cmd == "v5.caps") {
+                r.set("engine", "mixxx-2.5.6").set("eq_delay_ms", m_eqDelay5 * 1000.0 / kSampleRate);
+            }
+        }
+        r.set("_id", c["_id"]);
+        emitLine("#" + r.dump());
     }
 
     // ------------------------------------------------------------ 离线渲染（--render，对时测试用）
@@ -1135,7 +1485,7 @@ class Engine {
         o["xFaderMode"] = ControlObject::get(ConfigKey("[Mixer Profile]", "xFaderMode"));
         o["audio"] = audioInfo();
         QJsonArray decks;
-        for (int n = 1; n <= 2; ++n) {
+        for (int n = 1; n <= kNumDecks; ++n) {
             QJsonObject d;
             d["n"] = n;
             QString id = loadedId(n);
@@ -1282,7 +1632,16 @@ class Engine {
         double ms = 0.0, pk = 0.0;
         std::unique_ptr<ControlObject> level, peak;
     };
-    LevelMeter m_meters[3];
+    LevelMeter m_meters[kNumDecks + 1];
+    // v5
+    bool m_v5 = false;
+    std::unique_ptr<djs5::Engine5> m_e5;
+    Deck5 m_d5[kNumDecks + 1];
+    QMutex m_loadLock;
+    std::vector<float> m_out5;
+    double m_eqDelay5 = 0.0;
+    long long m_perfN = 0;
+    double m_perfSumUs = 0.0, m_perfMaxUs = 0.0;
     std::unique_ptr<ControlObject> m_metersFlag;
     AudioOut m_audio;
 };
@@ -1539,6 +1898,15 @@ int main(int argc, char** argv) {
     if (args.size() >= 5 && args[1] == QLatin1String("--render")) {
         auto* engine = new Engine(config);
         const int rc = engine->render(args[2], args[3], args[4].toDouble(), args.size() >= 6 ? args[5].toDouble() : 0.0);
+        std::fflush(gOut);
+        tmp.remove();
+        std::_Exit(rc);
+    }
+
+    const double speed5 = qEnvironmentVariableIsSet("DJSTUDIO_SPEED") ? qEnvironmentVariable("DJSTUDIO_SPEED").toDouble() : 1.0;
+    if (qEnvironmentVariable("DJSTUDIO_V5") == QLatin1String("1")) {
+        auto* engine = new Engine(config);
+        const int rc = engine->run5(speed5, qEnvironmentVariable("DJSTUDIO_AUDIO", QStringLiteral("1")) != QLatin1String("0"));
         std::fflush(gOut);
         tmp.remove();
         std::_Exit(rc);
