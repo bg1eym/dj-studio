@@ -217,6 +217,10 @@ jobs:
         run: |
           set -o pipefail
           "dist/DJ Studio.app/Contents/MacOS/DJ Studio" selftest 2>&1 | tee selftest-${{ matrix.arch }}.txt
+      - name: 四 Deck 演示（在 .app 里：示例谱 → 合成素材 → 分析 → 编译 → 用包里的引擎放几小节）
+        run: |
+          set -o pipefail
+          "dist/DJ Studio.app/Contents/MacOS/DJ Studio" demo5 --check 2>&1 | tee demo5-check.log
       - name: 签名（ad-hoc）并压缩
         run: |
           codesign --force --deep --sign - "dist/DJ Studio.app"
@@ -282,5 +286,5 @@ jobs:
         run: |
           set +e
           gh release create ci-logs --prerelease --title "CI logs" --notes "构建日志（自动上传）" 2>/dev/null || true
-          { echo "== $GITHUB_SHA app-${{ matrix.arch }} ${{ job.status }}"; cat engine-smoke.log timing.log v5-smoke.log minos.log selftest-${{ matrix.arch }}.txt 2>/dev/null || true; tail -n 400 app-build.log 2>/dev/null || true; } > app-${{ matrix.arch }}.log
+          { echo "== $GITHUB_SHA app-${{ matrix.arch }} ${{ job.status }}"; cat engine-smoke.log timing.log v5-smoke.log demo5-check.log minos.log selftest-${{ matrix.arch }}.txt 2>/dev/null || true; tail -n 400 app-build.log 2>/dev/null || true; } > app-${{ matrix.arch }}.log
           for i in 1 2 3 4 5 6; do gh release upload ci-logs app-${{ matrix.arch }}.log --clobber && break; sleep 10; done

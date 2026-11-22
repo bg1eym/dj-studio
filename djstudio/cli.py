@@ -106,6 +106,57 @@ def _selftest() -> int:
     return 0 if ok else 1
 
 
+def _demo5_check(studio) -> int:  # type: ignore[no-untyped-def]
+    """四 Deck 演示这条路走不走得通（打包好的应用在构建机上跑；用户也可以跑）：示例谱和合成的素材导进来、分析完、
+    编得过，再用内置引擎从场景 2 放几小节（8 倍速，不出声）。不开网页。应用包里缺文件、引擎起不来，都在这里露出来。"""
+    import time
+
+    res: dict = {"frozen": bool(getattr(sys, "frozen", False))}
+    ok = False
+    try:
+        t0 = time.time()
+        while (studio.job is None or studio.job.state == "running") and time.time() - t0 < 900:
+            time.sleep(0.2)
+        job = studio.job
+        res["job"] = job.state if job else None
+        if not job or job.state != "ok":
+            print("\n".join(job.log[-30:]) if job else "没有分析任务")
+        else:
+            pid = job.result["set"]
+            comp = studio.v5.compiled(pid)
+            res.update(project=pid, clips=len(comp.clips), bars=comp.length / 4, errors=[str(i) for i in comp.errors],
+                       hints=len(comp.hints), buses=len(comp.buses), fx=len(comp.fx) + len(comp.live))
+            studio.play(pid, speed=8.0, from_transition=2)
+            t1, first, st, stage = time.time(), None, {}, ""
+            while time.time() - t1 < 120:
+                es = studio.engine_state() or {}
+                st = es.get("status") or {}
+                stage = studio.conductor.progress.stage if studio.conductor else ""
+                res["link"] = es.get("link", res.get("link"))
+                if stage == "error":
+                    break
+                if st.get("state") == "running":
+                    first = st["beat"] if first is None else first
+                    if st["beat"] - first >= 32:  # 放过 8 小节
+                        ok = comp.ok
+                        break
+                time.sleep(0.1)
+            res.update(stage=stage, from_bar=None if first is None else first / 4 + 1,
+                       to_bar=None if not st else st.get("beat", 0) / 4 + 1, late=st.get("late"),
+                       decks=[d.get("state") for d in st.get("decks", [])],
+                       receipts=sorted(f"{k}:{v['st']}" for k, v in (studio.engine_state() or {}).get("receipts", {}).items()),
+                       error=studio.conductor.progress.error if studio.conductor else None)
+            studio.stop()
+            t2 = time.time()
+            while studio.conductor and studio.conductor.running and time.time() - t2 < 20:
+                time.sleep(0.1)
+    finally:
+        studio.shutdown()
+    res["ok"] = ok
+    print(json.dumps(res, ensure_ascii=False, indent=1))
+    return 0 if ok else 1
+
+
 def _wait_job(job) -> int:  # type: ignore[no-untyped-def]
     seen = 0
     while True:
@@ -132,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     d5.add_argument("--dir", default=None, help="演示数据目录（默认临时目录）")
     d5.add_argument("--port", type=int, default=8432)
     d5.add_argument("--no-browser", action="store_true")
+    d5.add_argument("--check", action="store_true",
+                    help="只准备、用内置引擎放几小节就退出，不开网页（构建机上验打包好的应用用）")
     sub.add_parser("app", help="DJ Studio.app 用：启动网页并打开浏览器（日志写文件，已经开着就只打开网页）")
     sub.add_parser("selftest", help="自检：声音引擎、解码、声音输出")
     sub.add_parser("doctor", help="环境体检")
@@ -165,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         root = Path(args.dir) if args.dir else Path(tempfile.mkdtemp(prefix="djstudio-demo5-"))
         print(f"准备四 Deck 演示：{root}（合成五份素材 + 分析，约一分钟）")
         studio = setup_demo5(root)
+        if args.check:
+            return _demo5_check(studio)
         _serve(studio, "127.0.0.1", args.port, not args.no_browser)
         return 0
 

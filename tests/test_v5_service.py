@@ -395,3 +395,37 @@ def test_score_errors_reach_the_user_with_line_numbers(ready, tmp_path):
     line = next(i for i, ln in enumerate(text.splitlines(), 1) if "25.9" in ln)
     with pytest.raises(StudioError, match=f"第 {line} 行"):
         studio.v5.import_folder(bad)
+
+
+def test_demo5_check_needs_no_fake_mixxx_library(tmp_path, monkeypatch):
+    """`demo5 --check`（构建机在打包好的应用里跑的那一步）：示例谱 → 合成素材 → 分析 → 编译 → 放 8 小节。
+    不依赖假的 Mixxx 曲库：那份 schema 只在源码里、没有打进应用包，0.4.0 的 demo5 因此在应用里一运行就找不到文件。"""
+    from djstudio.cli import main
+    from djstudio.mixxx import fakedb
+
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")
+    monkeypatch.setenv("DJSTUDIO_NO_UPDATE", "1")
+    monkeypatch.setenv("DJSTUDIO_FIND_DIRS", "")
+    monkeypatch.setattr(fakedb, "SCHEMA_SQL", tmp_path / "不在应用包里.sql")  # 应用包里的情况：读不到
+    assert main(["demo5", "--check", "--dir", str(tmp_path / "demo")]) == 0
+
+
+def test_data_files_the_app_reads_are_in_the_bundle():
+    """djstudio/ 下不是 .py 的文件：要么在 pyproject 的 package-data 里（会打进应用包），要么是只给源码用的、
+    并且应用里走得到的代码不碰它。新加了数据文件忘了打包，这里先红。"""
+    import fnmatch
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    globs = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]["djstudio"]
+    source_only = {"mixxx/schema_2_5_6.sql"}  # 假的 Mixxx 曲库的表结构：只有 v4 的 `djstudio demo`（源码里跑、要 node）和测试用
+    pkg = root / "djstudio"
+    for f in pkg.rglob("*"):
+        if not f.is_file() or f.suffix in (".py", ".pyc") or "__pycache__" in f.parts:
+            continue
+        rel = f.relative_to(pkg).as_posix()
+        packaged = any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(rel, g.replace("**/", "")) for g in globs)
+        assert packaged or rel in source_only, f"{rel} 没有打进应用包（pyproject.toml 的 package-data）"
+    # 用到那份表结构的只有 fakedb；用 fakedb 的只有 v4 的源码演示——四 Deck 的演示、应用本身都不碰
+    users = sorted(f.relative_to(root).as_posix() for f in pkg.rglob("*.py") if "fakedb" in f.read_text(encoding="utf-8"))
+    assert users == ["djstudio/demo.py"], users
