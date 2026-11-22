@@ -8,6 +8,7 @@ import shutil
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -310,6 +311,79 @@ def test_export_package_and_import_it_somewhere_else(ready, folder, tmp_path, mo
             third.v5.import_folder(moved)
     finally:
         third.shutdown()
+
+
+def test_own_sample_files_travel_with_the_folder_and_the_package(tmp_path, monkeypatch):
+    """谱旁边的采样文件：导入文件夹时带进来，编译时解码成引擎要的裸数据，导出演出包时和谱、原曲放同一层；缺了指出是哪一个。"""
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")
+    monkeypatch.setenv("DJSTUDIO_NO_UPDATE", "1")
+    monkeypatch.setenv("DJSTUDIO_FIND_DIRS", "")
+    d = tmp_path / "带采样"
+    d.mkdir()
+    write_wav(d / "alpha.wav", techno(128.0, 0.25, 0, LAYOUT, seed=5))
+    hit = np.zeros(4410, dtype=np.float32)
+    hit[:2000] = 0.5 * np.sin(2 * np.pi * 900 * np.arange(2000) / 44100) * np.exp(-np.arange(2000) / 400)
+    write_wav(d / "fill.wav", hit)
+    (d / "带采样.md").write_text(f"""# 带采样
+
+- 规范：v5
+- 主速：128
+
+## 素材
+
+| ID | 曲名 | 文件名 | 原 BPM | 第 1 小节（秒） | 小节数 |
+|---|---|---|---|---|---|
+| A1 | Alpha | alpha.wav | 128 | {bar1('alpha.wav'):.3f} | 56 |
+
+## 片段
+
+| ID | 素材 | Deck | 原曲起点 | 全场起播 | 全场停止 |
+|---|---|---|---|---|---|
+| C1 | A1 | D1 | 9.1 | 1.1 | 17.1 |
+
+## 效果
+
+| ID | 类型 | 路由 | 目标 | 开始 | 结束 | 参数 | 说明 |
+|---|---|---|---|---|---|---|---|
+| F1 | 采样 | 采样 | fill.wav | 8.1 | 9.1 | 重复 1拍；音量 0.7 | 自己的采样 |
+| F2 | 采样 | 采样 | clap | 12.1 | 13.1 | 重复 2拍 | 内置的 |
+""", encoding="utf-8")
+    studio = make_studio(tmp_path / "studio")
+    try:
+        res = studio.v5.import_folder(d)
+        wait_job(studio)
+        pid = res["project"]
+        c = studio.v5.compiled(pid)
+        assert c.ok, [str(i) for i in c.issues]
+        smp = {x["id"]: x for x in c.plan["samples"]}
+        # 采样文件是 22.05 kHz 的 4410 帧 = 0.2 秒：解码到引擎的 44.1 kHz 是 8820 帧，存成 float32 立体声
+        assert smp["fill.wav"]["frames"] == 8820 and Path(smp["fill.wav"]["path"]).stat().st_size == 8820 * 8
+        assert smp["clap"]["frames"] > 1000 and len([h for h in c.plan["hits"] if not h.get("stop")]) == 4 + 2
+        out = studio.v5.export_package(pid, tmp_path / "out")
+        pkg = Path(out["path"])
+        assert sorted(f.name for f in pkg.iterdir()) == sorted(["带采样.md", "alpha.wav", "fill.wav", MANIFEST])
+        assert sha(pkg / "fill.wav") == sha(d / "fill.wav")
+        man = json.loads((pkg / MANIFEST).read_text(encoding="utf-8"))
+        assert [x["file"] for x in man["samples"]] == ["fill.wav"] and man["samples"][0]["sha256"] == sha(d / "fill.wav")
+        # 换一台电脑导入演出包：采样照样在
+        other = make_studio(tmp_path / "other")
+        try:
+            r2 = other.v5.import_folder(pkg)
+            wait_job(other)
+            c2 = other.v5.compiled(r2["project"])
+            assert c2.ok and c2.plan["hits"] == c.plan["hits"]
+        finally:
+            other.shutdown()
+        # 缺了采样文件：导入时就说缺哪个
+        (pkg / "fill.wav").unlink()
+        third = make_studio(tmp_path / "third")
+        try:
+            with pytest.raises(StudioError, match=r"缺这些采样文件.*fill\.wav"):
+                third.v5.import_folder(pkg)
+        finally:
+            third.shutdown()
+    finally:
+        studio.shutdown()
 
 
 def test_score_errors_reach_the_user_with_line_numbers(ready, tmp_path):

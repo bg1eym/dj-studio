@@ -324,7 +324,7 @@ class Service5:
         p = p.model_copy(update={"assets": [a.model_copy(update={"track_id": m.id if m else ""})
                                             for a, m in zip(p.assets, matches)]})
         table, g_issues = self.infos(p, matches)
-        c = compile_project(p, lambda a: table.get(a.id), BUILTIN)
+        c = compile_project(p, lambda a: table.get(a.id), BUILTIN, samples=self.sample_resolver(p.id, BUILTIN.sample_rate))
         for i in g_issues + c.issues:
             job.say(("!! " if i.level == "error" else "提示 ") + str(i))
         if not c.ok or any(i.level == "error" for i in g_issues):
