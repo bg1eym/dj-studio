@@ -27,7 +27,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..plan.cdw import PlanError, clock, fader
-from ..plan.convert import eq_db, fader_pos, filter_val
+from ..plan.convert import eq_db, filter_val
 from ..plan.mdplan import _alias, _bullets, _clean, _dash, _key, _Line, _lines, _number, _seconds, _tables
 from .compile import FX_PARAMS, Issue5
 from .model import MAX_DECKS, SCORE_VERSION, Project
@@ -127,7 +127,7 @@ def knob_value(param: str, text: str) -> float:
     """旋钮位（Prime 4+ 面板上的说法）→ 人读单位：EQ 钟点位 / dB、Filter 左右钟点、推子 0–10。"""
     t = text.strip().replace(" ", "")
     if param == "vol":
-        return fader_pos(fader(t))
+        return round(fader(t) / 10.0, 6)
     if param == "filter":
         m = re.fullmatch(r"(左|右)(\d+(?:\.\d+)?)%", t)  # 对不上钟点位的：左 / 右多少（100% = 拧到底）
         if m:
