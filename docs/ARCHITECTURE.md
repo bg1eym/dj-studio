@@ -27,6 +27,20 @@ Mixxx + DJStudio.js（控制器映射）
   分析也用声音引擎解码（`--decode`），和播放是同一个 Mixxx 解码器；分析结果记下解码器，换了就重新分析。
 - **mixxx**：下面的结构图——`DJStudio.js` 作为控制器映射跑在本机的 Mixxx 里，经 IAC 通信。
 
+## 两代谱，两条执行的路
+
+| | v1–v4 的打碟谱 | v5 的曲谱（四 Deck） |
+|---|---|---|
+| 模型 | `djset/2`：曲目 + 相邻两首之间的过渡（`setfile.py`） | `djset/3`：素材、片段、场景、参数曲线、Loop、效果，全在一条全场拍轴上（`v5/model.py`） |
+| 解析 | `plan/mdplan.py`、`plan/cdw.py` | `v5/score.py`（带行号的错误和提示，两者分开） |
+| 编译 | `compiler.py` → 每段过渡一份程序 | `v5/compile.py` + `v5/livefx.py` → 一份执行计划 `djplan/1` + 图谱数据，绑定引擎的能力签名（`v5/caps.py`） |
+| 执行 | `DJStudio.js`（20 ms tick）+ AutoDJ + conductor | 引擎里的调度器 `tools/mixxx-engine/djs5/`（每个音频块，落在采样上）+ `v5/runner.py` |
+| 引擎 | 内置引擎、或本机的 Mixxx | 只有内置引擎（`DJSTUDIO_V5=1` 起成调度器模式）；没有声音引擎时用现编的模拟器 `sim5` |
+| 界面 | `live.js` | `live5.js`（四 Deck 共轴图）、`handover.html`（交接说明） |
+
+`Studio` 按谱的版本分到两条路上（`studio.v5 = Service5`）；v4 这条路的代码没有因为 v5 改动。旧 set 可以经适配器（`v5/legacy.py`）转成 v5 的项目，
+转换前后逐点比对（`legacy.check`，`djstudio v5check`），但默认仍走原来的路。调度器的结构、协议、混音链路见 [ENGINE5.md](ENGINE5.md)。
+
 ## 分工：快的在引擎，慢的在 Python
 
 | 层 | 做什么 | 不做什么 |
@@ -145,6 +159,13 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
 - `tests/test_mixxx_engine.py`：同样的 conductor 驱动**声音引擎**（`tools/mixxx-engine`，Mixxx 2.5.6 的真 MidiController、脚本引擎、deck、
   EQ / 滤波、同步），录下主输出在**音频**上检查过渡中两个 kick 没有双击；解码与 ffmpeg 一致；出声时引擎跟着（假）声卡的时钟走、不断音。
   需要先构建引擎（`DJSTUDIO_ENGINE_BIN`），否则跳过。
+
+- `tests/test_v5_engine.py`：v5 的调度器——四台 Deck 对齐、互不影响、loop 100 圈、变速、60 分钟不漂、晚装载 / 装载失败、
+  效果实例独立、手动接管、暂停、从中间开始、能力拒绝。模拟器 `sim5`（同一份调度器代码 + 假 Deck）上全跑，带「真引擎」的几项在声音引擎里再跑一遍。
+- `tests/test_v5_live.py`：现场效果——路由（插入没有重复的干声、组插入、总输出）、分频的旁路残差、Release、Roll / 采样的时间、每种效果从中间重建。
+- `tests/test_v5_score.py` / `test_v5_legacy.py` / `test_v5_service.py`：v5 的谱（含「规范文档里的表和代码对得上」）、旧谱转换的等价检查、
+  应用里的整条路（文件夹导入 → 分析 → 演出 → 演出包 → 换地方再导入）。
+- `tools/mixxx-engine/djs5/test_dsp.cpp`：DSP 模块自己的检查（独立编译运行）。`packaging/macos/smoke_v5.py`：真引擎里的冒烟 + 基准（CI 在 Mac 上跑）。
 
 ## 独立的 Mac 应用
 
