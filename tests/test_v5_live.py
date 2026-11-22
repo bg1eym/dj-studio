@@ -79,6 +79,27 @@ def test_insert_bypass_is_the_same_signal_and_the_same_level(tmp_path):
         assert db(ref[:n] - neu[:n]) <= -60.0, (wave, db(ref[:n] - neu[:n]))
 
 
+def test_group_and_master_split_are_the_same_signal_when_neutral(tmp_path):
+    """组插入、总输出用到分频时也一样：各段不动 = 原来的信号晚固定的帧数（组 264；总输出再 264），没有哪一路多一份或少一份。"""
+    clips = [clip("C1", "A1", 1), clip("C2", "A1", 2, src="3.1")]
+    waves = {"A1": "noise"}
+    ref, r0, _ = render(tmp_path, clips, [], waves, name="ref")
+    L = BUILTIN.split_latency
+    cases = {
+        "group": ([fx("F1", "trans", "group-insert", ["C1", "C2"], "3.1", "7.1", 频段="HIGH", 深度=0)], L),
+        "master": ([fx("F1", "trans", "master-insert", [], "3.1", "7.1", 频段="LOW", 深度=0)], L),
+        "insert + master": ([fx("F1", "trans", "insert", ["C1"], "2.1", "3.1", 频段="MID", 深度=0),
+                             fx("F2", "trans", "master-insert", [], "5.1", "7.1", 频段="HIGH", 深度=0)], 2 * L),
+    }
+    for name, (effects, latency) in cases.items():
+        x, r, rc = render(tmp_path, clips, effects, waves, name="x")
+        assert r.latency == latency, name
+        assert all(m["st"] == "ok" for m in rc), name
+        n = min(len(ref), len(x))
+        assert abs(db(x[:n]) - db(ref[:n])) <= 0.1, name
+        assert db(ref[:n] - x[:n]) <= -60.0, (name, db(ref[:n] - x[:n]))
+
+
 def test_send_takes_the_signal_after_the_insert(tmp_path):
     """插入组在推子前、发送取推子后：被 Trans 切掉的那几拍不在主输出里（没有另一条干声），也不会被送进 Delay。"""
     clips = [clip("C1", "A1", 1)]
