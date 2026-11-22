@@ -120,19 +120,26 @@ class AssetInfo:
     gain: float | None = None
     title: str = ""
     track_id: str = ""
+    # 谱上这首的「1.1」是网格的第几拍。None = 曲中最早的小节线（Grid.bar1_beat）。谱上写了「第 1 小节（秒）」、
+    # 而且它不是文件里最早的那条小节线时（前面还有几小节前奏没算），就是这里记的那一拍
+    bar1: int | None = None
 
     @property
     def bpm(self) -> float:
         return self.grid.bpm
 
+    @property
+    def bar1_beat(self) -> int:
+        return self.grid.bar1_beat if self.bar1 is None else self.bar1
+
     def beat_time(self, src_beats: float) -> float:
         """这首自己的第 src_beats 拍（从它的 1.1 数，0 起）离文件开头多少秒。"""
-        return self.grid.beat_time(self.grid.bar1_beat + src_beats)
+        return self.grid.beat_time(self.bar1_beat + src_beats)
 
     @property
     def last_beat(self) -> float:
         """曲尾是这首自己的第几拍。"""
-        return self.grid.time_beat(self.grid.duration) - self.grid.bar1_beat
+        return self.grid.time_beat(self.grid.duration) - self.bar1_beat
 
 
 @dataclass
