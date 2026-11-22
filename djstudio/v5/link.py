@@ -179,7 +179,9 @@ def open_engine(library: list[dict[str, Any]], speed: float = 1.0, audio: bool =
     """起一个 v5 调度器：有声音引擎就用它（audio=True 且原速时出声），没有（或 sim=True）就用独立模拟器。"""
     binary = None if sim else engine_binary()
     if binary:
-        env = {**engine_env(binary), "DJSTUDIO_V5": "1", "DJSTUDIO_SPEED": str(speed), "DJSTUDIO_AUDIO": "1" if audio else "0"}
+        # QT_LOGGING_RULES 放开 default 分类：引擎靠 Mixxx 的一条调试日志数「读盘没跟上」的次数（别的调试信息它自己丢掉）
+        env = {**engine_env(binary), "DJSTUDIO_V5": "1", "DJSTUDIO_SPEED": str(speed), "DJSTUDIO_AUDIO": "1" if audio else "0",
+               "QT_LOGGING_RULES": "*.debug=false;default.debug=true"}
         return Engine5Link([str(binary)], env, library, "mixxx-engine")
     simbin = sim5_binary()
     if not simbin:

@@ -72,6 +72,7 @@ class Runner5:
         self._cmd_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._seen = 0
+        self._misses, self._miss_logged = 0, 0.0  # 读盘没跟上的次数（引擎报的）、上次记日志的时刻
         self._seek: float | None = None
         self.stopped_beat: float | None = None  # 手动停下时放到全场第几拍（「继续」从这里接）
 
@@ -185,6 +186,7 @@ class Runner5:
             if a["rc"] and abs(a["at"] - beat) < 1e-6:
                 self.receipts[a["rc"]] = {"st": "restored", "beat": a["at"], "at": a["at"], "msg": ""}
         self._seen = self.link.n_events
+        self._misses, self._miss_logged = 0, 0.0
         self._call({"cmd": "v5.start", "beat": beat, "prerun": pre})
         where = self.pos_text(beat)
         self.log(f"▶ 从 {where} 开始" + (f"（先从 {self.pos_text(pre)} 静音预运行，把效果的尾音补出来）" if pre < beat else ""))
@@ -219,6 +221,7 @@ class Runner5:
                 self.log(f"引擎恢复（失联 {time.monotonic() - lost_since:.1f}s）")
                 lost_since = None
                 self.progress.engine_ok = True
+            self._watch_misses(st)
             if self._stop.is_set():
                 self._stage("stopping", "淡出停止")
                 if st.get("state") in ("running", "pausing", "paused"):
@@ -249,6 +252,17 @@ class Runner5:
                 self._stage("done", "整场放完")
                 self.log("✓ 整场放完")
                 return
+
+    def _watch_misses(self, st: dict[str, Any]) -> None:
+        """读盘没跟上的次数（声音引擎才报；模拟器没有盘）：涨了就记一行，最多两秒一行。"""
+        if st.get("state") not in ("prerun", "running", "pausing", "paused"):
+            return
+        n = int(st.get("misses", 0) or 0)
+        if n < self._misses:
+            self._misses = n  # 重新开始了：引擎从 0 重新数
+        elif n > self._misses and time.monotonic() - self._miss_logged > 2.0:
+            self.log(f"!! 读盘没跟上：有 Deck 断了一小下（这次开始以来 {n} 次）—— 电脑太忙，或者放音乐的盘太慢")
+            self._misses, self._miss_logged = n, time.monotonic()
 
     def _drain(self) -> None:
         new = self.link.receipts(self._seen)
