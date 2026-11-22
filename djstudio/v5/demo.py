@@ -15,7 +15,15 @@ from ..studio import Studio
 from ..synth import techno, write_wav
 from . import score
 
-EXAMPLE = Path(__file__).resolve().parents[2] / "docs" / "score_v5_example.md"
+
+def example_path() -> Path:
+    """示例谱：源码里在仓库的 docs/，打包的 App 里在 djstudio/docs/。"""
+    from ..plan.mdplan import score_doc
+
+    f = score_doc("score_v5_example.md")
+    if f is None:
+        raise RuntimeError("找不到示例谱 score_v5_example.md")
+    return f
 
 
 def layout(bars: int) -> tuple[tuple[str, int], ...]:
@@ -26,12 +34,12 @@ def layout(bars: int) -> tuple[tuple[str, int], ...]:
     return (("intro", unit), ("groove", 2 * unit), ("breakdown", unit), ("drop", 3 * unit), ("outro", bars - 7 * unit))
 
 
-def make_folder(folder: Path, example: Path = EXAMPLE) -> Path:
+def make_folder(folder: Path, example: Path | None = None) -> Path:
     """演示用的文件夹：示例谱 + 按它的素材表合成的原曲。已经有的文件不重做。"""
     folder.mkdir(parents=True, exist_ok=True)
     md = folder / "四 Deck 场景示例.md"
     if not md.exists():
-        shutil.copyfile(example, md)
+        shutil.copyfile(example or example_path(), md)
     have_mp3 = bool(shutil.which("ffmpeg"))
     if not have_mp3 and ".mp3" in md.read_text(encoding="utf-8"):
         # 没有 ffmpeg 就做不出 MP3：演示改用 WAV（谱里的文件名跟着改）

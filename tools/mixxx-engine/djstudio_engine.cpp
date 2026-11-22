@@ -1321,6 +1321,9 @@ class Engine : public djs5::Backend {
         m_perfN++;
         m_perfSumUs += us;
         m_perfMaxUs = std::max(m_perfMaxUs, us);
+        const double budgetUs = kBufferFrames * 1e6 / kSampleRate;
+        m_perfOver += us > budgetUs ? 1 : 0;       // 这一块算超了预算（真在出声的话就是一次欠载）
+        m_perfHalf += us > 0.5 * budgetUs ? 1 : 0; // 超过一半预算的
         updateMeters();
         m_engineFrames += kBufferFrames;
     }
@@ -1409,8 +1412,9 @@ class Engine : public djs5::Backend {
             r.set("ok", true).set("buffers", static_cast<long long>(m_perfN));
             r.set("avg_us", m_perfN ? m_perfSumUs / static_cast<double>(m_perfN) : 0.0).set("max_us", m_perfMaxUs);
             r.set("budget_us", kBufferFrames * 1e6 / kSampleRate).set("late", m_e5->lateSteps());
+            r.set("over", static_cast<long long>(m_perfOver)).set("over_half", static_cast<long long>(m_perfHalf));
             r.set("underruns", static_cast<long long>(m_audio.info()["underruns"].toDouble()));
-            m_perfN = 0;
+            m_perfN = m_perfOver = m_perfHalf = 0;
             m_perfSumUs = m_perfMaxUs = 0.0;
         } else {
             r = m_e5->command(c);
@@ -1655,7 +1659,7 @@ class Engine : public djs5::Backend {
     QMutex m_loadLock;
     std::vector<float> m_out5;
     double m_eqDelay5 = 0.0;
-    long long m_perfN = 0;
+    long long m_perfN = 0, m_perfOver = 0, m_perfHalf = 0;
     double m_perfSumUs = 0.0, m_perfMaxUs = 0.0;
     std::unique_ptr<ControlObject> m_metersFlag;
     AudioOut m_audio;

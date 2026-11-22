@@ -450,6 +450,8 @@ class Service5:
                 pass
         audio = r["audio"]
         lat = float(audio.get("latency_ms") or 0) + float(audio.get("eq_delay_ms") or 0) if audio and audio.get("on") else 0.0
+        # 用到分频的计划：输出比 deck 晚固定的若干帧（引擎报的 latency），播放头也要算上
+        lat += float((link.status or {}).get("latency") or 0) / runner.c.caps.sample_rate * 1000.0 / max(r["speed"], 1e-9)
         status = link.status
         if status:
             # 旋钮的实际位置换成谱上的单位（界面不用自己懂增益怎么换钟点位）

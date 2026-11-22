@@ -234,7 +234,7 @@ int main() {
     reader.detach();
 
     std::FILE* rec = nullptr;
-    long long recFrames = 0;
+    long long recFrames = 0; (void)recFrames;
     std::vector<float> out(kBufferFrames * 2);
     bool quit = false;
     const auto t0 = std::chrono::steady_clock::now();
