@@ -251,6 +251,12 @@ function connectEvents() {
     if (S.tab === "home") renderHome();
     updateEngineBadge();
     if (S.progress.finished_at && !was) setTimeout(() => loadState().then(() => { if (S.tab === "show") renderShow(); if (S.tab === "home") renderHome(); }), 300);
+    // 演出不是从这个页面点开始的（另一个标签页、命令行）：这边还以为没在放——读一次状态，首页换到演出画面
+    if (!S.progress.finished_at && S.state && !S.state.playing && !S.syncingPlay) {
+      S.syncingPlay = true;
+      loadState().then(() => { if (S.tab === "home") renderHome(true); if (S.tab === "show") renderShow(); })
+        .catch(() => {}).finally(() => setTimeout(() => { S.syncingPlay = false; }, 1500));
+    }
   });
   es.addEventListener("job", (e) => {
     S.job = JSON.parse(e.data);
