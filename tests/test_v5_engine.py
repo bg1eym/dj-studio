@@ -96,6 +96,45 @@ def test_four_decks_start_on_the_same_sample(backend, wavs, tmp_path):
         assert peak_at(x, r.frame_of(39)) == pytest.approx(1.6 * g, rel=amp)
         assert peak_at(x, r.frame_of(40)) == pytest.approx(0.8 * 3 * g, rel=amp)
         assert peak_at(x, r.frame_of(48)) == pytest.approx(0.8 * 2 * g, rel=amp)
+        if not sim:  # 声音引擎数得到读盘没跟上的次数：一次就是某台 Deck 一块静音
+            assert r.e.call({"cmd": "v5.perf"})["cache_misses"] == 0 and r.e.status["misses"] == 0
+
+
+@pytest.mark.skipif(not HAVE_ENGINE, reason="要声音引擎（读盘线程是 Mixxx 的）")
+def test_catching_up_at_high_speed_does_not_outrun_the_reader(wavs, tmp_path):
+    """倍速（不出声）时引擎一口气补很多块：要让着 Mixxx 的读盘线程，不然会跑到它前面，那台 Deck 这一块是静音——
+    四个脉冲的拍上只叠得出三个（Mac 构建机上出过）。100 倍速放完：读盘没跟上 0 次，每个小节第 1 拍四个脉冲都在。"""
+    g = fader_gain(0.25)
+    c = compiled(four(0.25), dur=150.0, paths=wavs)
+    with Run(c, speed=100, sim=False, record=tmp_path / "out.wav") as r:
+        r.start()
+        r.wait_state("done", 120)
+        perf = r.e.call({"cmd": "v5.perf"})
+        assert perf["cache_misses"] == 0 and r.e.status["misses"] == 0, perf
+        x = r.audio()
+        for b in (8, 12, 16, 20, 24, 28, 32, 36):
+            assert peak_at(x, r.frame_of(b)) == pytest.approx(3.2 * g, rel=0.09), b
+
+
+def test_runner_reports_reader_misses_once_in_a_while():
+    """引擎报的 misses 涨了，Runner5 记一行日志（最多两秒一行）；没在放、或者引擎不报（模拟器）就不记；重新开始后从 0 数。"""
+    from djstudio.v5.runner import Runner5
+
+    r = Runner5(compiled(four()), link=None)  # type: ignore[arg-type]
+    for st in ({"state": "idle", "misses": 3}, {"state": "running"}, {"state": "running", "misses": 0}):
+        r._watch_misses(st)
+    assert not r.progress.log
+    r._watch_misses({"state": "running", "misses": 2})
+    assert "读盘没跟上" in r.progress.log[-1] and "2 次" in r.progress.log[-1]
+    r._watch_misses({"state": "running", "misses": 3})
+    assert len(r.progress.log) == 1  # 刚写过
+    r._miss_logged -= 3.0
+    r._watch_misses({"state": "running", "misses": 3})
+    assert len(r.progress.log) == 2 and "3 次" in r.progress.log[-1]
+    r._watch_misses({"state": "prerun", "misses": 0})  # 重新开始：引擎从 0 数
+    r._miss_logged -= 3.0
+    r._watch_misses({"state": "running", "misses": 1})
+    assert len(r.progress.log) == 3 and "1 次" in r.progress.log[-1]
 
 
 def test_decks_are_independent(tmp_path):

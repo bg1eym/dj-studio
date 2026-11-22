@@ -77,34 +77,50 @@ p = project(
          "params": {"重复": "1拍", "音量": "0.5"}}])
 c = compiled(p, 200.0, wavs)
 check(c.ok, "示例计划编得过" + ("" if c.ok else "：" + "；".join(str(i) for i in c.errors[:3])))
-with Run(c, speed=20, sim=False, record=tmp / "align.wav") as r:
-    caps = Caps.from_engine(r.e.call({"cmd": "v5.caps"}))
-    check(caps.signature() == BUILTIN.signature(), f"引擎报的能力和 Python 里的对照表一致（{caps.max_decks} 台 Deck，分频延迟 {caps.split_latency} 帧）")
-    check(r.latency == BUILTIN.split_latency, f"用到分频的计划：输出晚 {r.latency} 帧 = {r.latency / SR * 1000:.2f} ms")
-    r.start()
-    r.wait_state("done", 240)
-    x = r.audio()
-    rc = r.rc()
-    bad = [(m["id"], m["st"]) for m in rc if m["st"] != "ok"]
-    check(not bad, f"{len(rc)} 条回执全部 ok" + (f"，除了 {bad}" if bad else ""))
-    # 四台都在放、没有效果插进来的那一段（第 3–4 小节）：每一拍四个脉冲应该落在同一帧
-    on = onsets(x, thr=0.2, gap=int(0.2 * SR * 60 / 134))
-    errs = []
-    for beat in range(8, 16):
-        want = r.frame_of(float(beat))
-        near = on[np.abs(on - want) < 0.05 * SR]
-        if len(near):
-            errs.append(float(near[0] - want))
-        seg = x[int(want) - 8:int(want) + int(0.004 * SR)]
-        errs.append(float(np.argmax(np.abs(seg) > 0.2) - 8 + int(want) - want) if np.any(np.abs(seg) > 0.2) else 1e9)
-    worst = max(abs(e) for e in errs) if errs else 1e9
-    check(worst <= 0.005 * SR, f"四路计划重合的脉冲：最大偏差 {worst:.1f} 帧 = {worst / SR * 1000:.3f} ms（要求 ≤ 5 ms）")
-    peak = [float(np.abs(x[int(r.frame_of(float(b))):][:200]).max()) for b in range(8, 16)]
-    one = 0.4 * fader_gain(0.5)  # 一个脉冲（非小节第 1 拍）过了推子有多大
-    check(min(peak) > 3.2 * one, f"四个脉冲叠在一起的峰值 {min(peak):.2f}–{max(peak):.2f}（单个 {one:.3f}：错开了就叠不到四倍）")
-    ph = [abs(d["phase_ms"]) for d in r.e.status["decks"]]
-    perf = r.e.call({"cmd": "v5.perf"})
-    print(f"  每块 {perf['avg_us']:.0f} µs 平均 / {perf['max_us']:.0f} µs 最大（预算 {perf['budget_us']:.0f} µs，{perf['buffers']} 块）", flush=True)
+
+
+def align_run(speed: float) -> dict:
+    """对齐那一段放一遍、录下来量。speed 倍速、不出声。"""
+    with Run(c, speed=speed, sim=False, record=tmp / "align.wav") as r:
+        caps = Caps.from_engine(r.e.call({"cmd": "v5.caps"}))
+        r.start()
+        r.wait_state("done", 240)
+        x = r.audio()
+        rc = r.rc()
+        # 四台都在放、没有效果插进来的那一段（第 3–4 小节）：每一拍四个脉冲应该落在同一帧
+        on = onsets(x, thr=0.2, gap=int(0.2 * SR * 60 / 134))
+        errs = []
+        for beat in range(8, 16):
+            want = r.frame_of(float(beat))
+            near = on[np.abs(on - want) < 0.05 * SR]
+            if len(near):
+                errs.append(float(near[0] - want))
+            seg = x[int(want) - 8:int(want) + int(0.004 * SR)]
+            errs.append(float(np.argmax(np.abs(seg) > 0.2) - 8 + int(want) - want) if np.any(np.abs(seg) > 0.2) else 1e9)
+        peak = [float(np.abs(x[int(r.frame_of(float(b))):][:200]).max()) for b in range(8, 16)]
+        perf = r.e.call({"cmd": "v5.perf"})
+        return {"caps": caps, "latency": r.latency, "rc": rc, "worst": max(abs(e) for e in errs) if errs else 1e9, "peak": peak,
+                "perf": perf, "misses": int(perf.get("cache_misses", 0))}
+
+
+# 读盘没跟上（引擎跑到读盘线程前面去了）时 Mixxx 给那台 deck 一块静音：四个脉冲的拍上少一个，那一遍量出来的不作数。
+# 引擎连着补块时会让着读盘线程，正常不会有；构建机特别卡的时候万一还有，用 4 倍速再量一遍（演出是原速，比这宽松得多）——
+# 4 倍速那一遍下面每一条都要过。读盘没跟上的次数数到的是下限（每台 deck 定位后的头一回 Mixxx 不报），所以脉冲少了也算
+one = 0.4 * fader_gain(0.5)  # 一个脉冲（非小节第 1 拍）过了推子有多大
+m = align_run(20)
+if m["misses"] or min(m["peak"]) <= 3.2 * one:
+    print(f"  ⚠ 20 倍速这一遍：读盘没跟上数到 {m['misses']} 次，四个脉冲的拍上峰值最小 {min(m['peak']):.2f}（四个都在是 {4 * one:.2f}）"
+          f"——有一块是静音，量出来的不作数：用 4 倍速再量一遍", flush=True)
+    m = align_run(4)
+caps, perf = m["caps"], m["perf"]
+check(caps.signature() == BUILTIN.signature(), f"引擎报的能力和 Python 里的对照表一致（{caps.max_decks} 台 Deck，分频延迟 {caps.split_latency} 帧）")
+check(m["latency"] == BUILTIN.split_latency, f"用到分频的计划：输出晚 {m['latency']} 帧 = {m['latency'] / SR * 1000:.2f} ms")
+check(m["misses"] == 0, f"这一遍读盘一直跟得上（没跟上数到 {m['misses']} 次）")
+bad = [(x["id"], x["st"]) for x in m["rc"] if x["st"] != "ok"]
+check(not bad, f"{len(m['rc'])} 条回执全部 ok" + (f"，除了 {bad}" if bad else ""))
+check(m["worst"] <= 0.005 * SR, f"四路计划重合的脉冲：最大偏差 {m['worst']:.1f} 帧 = {m['worst'] / SR * 1000:.3f} ms（要求 ≤ 5 ms）")
+check(min(m["peak"]) > 3.2 * one, f"四个脉冲叠在一起的峰值 {min(m['peak']):.2f}–{max(m['peak']):.2f}（单个 {one:.3f}：错开了、或者少了一个，就叠不到四倍）")
+print(f"  每块 {perf['avg_us']:.0f} µs 平均 / {perf['max_us']:.0f} µs 最大（预算 {perf['budget_us']:.0f} µs，{perf['buffers']} 块）", flush=True)
 
 # ---------------------------------------------------------------- 1b Key Lock 的处理延迟（只量、只记，不判过不过）
 for keylock in (False, True):
@@ -168,6 +184,9 @@ with Run(c2, speed=1, sim=False) as r:
           f"负载（四路 {kind} 原速 {time.time() - t0:.0f} 秒，{n} 块）：每块平均 {perf['avg_us']:.0f} µs = 预算 {budget:.0f} µs 的 "
           f"{perf['avg_us'] / budget * 100:.1f}%；最大 {perf['max_us']:.0f} µs；超过一半预算 {perf['over_half']} 块，超过预算 {perf['over']} 块")
     check(perf["late"] == 0 and perf.get("underruns", 0) == 0, f"没有晚到的控制步、没有欠载（late {perf['late']}，underruns {perf.get('underruns', 0)}）")
+    # 没接声卡时引擎按自己的时钟出块，构建机卡一下它就要连着补：容许 2 次（和「超过预算的块」一个道理），0 才是正常
+    miss = int(perf.get("cache_misses", 0))
+    check(miss <= 2, f"原速满负载读盘跟得上（没跟上数到 {miss} 次" + ("）" if not miss else "：⚠ 正常是 0，构建机上容许 2 次）"))
     check(st["master"]["over"] == 0, f"主输出没有过载（过载的采样 {st['master']['over']} 个，现在的峰值 {st['master']['peak']:.1f} dBFS）")
     check(worst < 1.0, f"这一段里四台 Deck 的位置和全场拍的差最大 {worst:.3f} ms（不漂）")
     dup = [m["id"] for m in r.rc()]

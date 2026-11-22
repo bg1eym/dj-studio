@@ -1174,6 +1174,12 @@ class Engine : public djs5::Backend {
     }
 
     int run5(double speed, bool wantAudio) {
+        // 读盘没跟上（Mixxx 给一块静音）要数得出来：状态里报 misses，v5.perf 里报这一段的次数。
+        // 起引擎的一方给 QT_LOGGING_RULES 放开 default 分类才有这条日志（见 countingMessageHandler 上面的说明）。
+        // 数到的是下限：一台 deck 每次定位以后的头一回，Mixxx 当作「预料之中」不打日志
+        // （readaheadmanager.cpp:108-112、216-219）——那一回数不到
+        g_prevMessageHandler = qInstallMessageHandler(countingMessageHandler);
+        m_perfMisses0 = g_cacheMisses.load();
         m_v5 = true;
         for (int n = 1; n <= kNumDecks; ++n) {
             const QString g = QString("[Channel%1]").arg(n);
@@ -1272,6 +1278,13 @@ class Engine : public djs5::Backend {
                     prerun5();
                     int n = 0;
                     while (!m_e5->frozen() && !m_e5->prerunning() && engineMs() < (wall - heldMs) * speed && n < 64) {
+                        if (n > 0) {
+                            // 一口气连着补块（倍速不出声；原速卡了一下之后）会跑到读盘线程前面去：它只往前预读两块
+                            // （cachingreader.cpp kDefaultHintFrames = 1024），没读到的那一块 Mixxx 给那台 deck 放静音
+                            // （Mac 的构建机上四个脉冲里少过一个）。和静音预跑一样，连着的块之间让一下。
+                            // 一次只出一块时（原速的常态）不等
+                            QThread::usleep(150);
+                        }
                         std::lock_guard<std::recursive_mutex> lock(m_e5->gate());
                         process5(false);
                         recordBuffer();
@@ -1288,7 +1301,9 @@ class Engine : public djs5::Backend {
             }
             if (!m_frozen && wall - lastStatus >= 50) {
                 lastStatus = wall;
-                emitLine("@" + m_e5->status().dump());
+                djs5::Json st5 = m_e5->status();
+                st5.set("misses", g_cacheMisses.load() - m_startMisses5); // 这一场里读盘没跟上的次数（每次 = 某台 deck 一块静音）
+                emitLine("@" + st5.dump());
             }
             QThread::msleep(1);
         }
@@ -1414,11 +1429,16 @@ class Engine : public djs5::Backend {
             r.set("avg_us", m_perfN ? m_perfSumUs / static_cast<double>(m_perfN) : 0.0).set("max_us", m_perfMaxUs);
             r.set("budget_us", kBufferFrames * 1e6 / kSampleRate).set("late", m_e5->lateSteps());
             r.set("over", static_cast<long long>(m_perfOver)).set("over_half", static_cast<long long>(m_perfHalf));
+            r.set("cache_misses", g_cacheMisses.load() - m_perfMisses0); // 这一段里读盘没跟上几次
+            m_perfMisses0 = g_cacheMisses.load();
             r.set("underruns", static_cast<long long>(m_audio.info()["underruns"].toDouble()));
             m_perfN = m_perfOver = m_perfHalf = 0;
             m_perfSumUs = m_perfMaxUs = 0.0;
         } else {
             r = m_e5->command(c);
+            if (cmd == "v5.start") {
+                m_startMisses5 = g_cacheMisses.load(); // 每一场从 0 数
+            }
             if (cmd == "v5.caps") {
                 r.set("engine", "mixxx-2.5.6").set("eq_delay_ms", m_eqDelay5 * 1000.0 / kSampleRate);
             }
@@ -1638,6 +1658,7 @@ class Engine : public djs5::Backend {
     std::unique_ptr<EncoderMp3> m_recMp3;
     qint64 m_recFrames = 0;
     int m_recMisses0 = 0;
+    int m_perfMisses0 = 0, m_startMisses5 = 0;
     bool m_recTrim = false;
     bool m_recStarted = false;
     long m_recPendingSilent = 0;

@@ -579,8 +579,11 @@ export class Live5View {
     setClass(this.overLamp, "l5-over" + (m && m.over_now ? " on" : m && m.over > 0 ? " was" : ""));
     setText(this.overCount, m && m.over > 0 ? `过载过 ${m.over} 次` : "");
     setClass(this.overCount, "l5-overn" + (m && m.over > 0 ? "" : " hidden"));
-    setText(this.lateEl, st && st.late > 0 ? `引擎晚了 ${st.late} 次` : "");
-    setClass(this.lateEl, "l5-late" + (st && st.late > 0 ? "" : " hidden"));
+    const warn = [];
+    if (st && st.late > 0) warn.push(`引擎晚了 ${st.late} 次`);
+    if (st && st.misses > 0) warn.push(`读盘没跟上 ${st.misses} 次`);
+    setText(this.lateEl, warn.join("，"));
+    setClass(this.lateEl, "l5-late" + (warn.length ? "" : " hidden"));
     // 行头
     this._renderDecks(st);
     this._renderDeckInfo(this._beatNow());
