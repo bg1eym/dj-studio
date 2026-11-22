@@ -8,11 +8,26 @@
 
 ## 开发
 
-- 测试：`pytest`（需要 node 和 ffmpeg）。改了引擎脚本、协议、conductor 后必须跑 `tests/test_sim_e2e.py`。
+- 测试：`pytest`（需要 node、ffmpeg 和 C++ 编译器）。改了引擎脚本、协议、conductor 后必须跑 `tests/test_sim_e2e.py`。
 - 改 `DJStudio.js` 时同步改 `protocol.py` / `sim/fake_mixxx.mjs`，并把 `DJStudio.VERSION` 加一。脚本只用 ES5。
 - 涉及 Mixxx 行为的判断**先查 Mixxx 源码**（docs/MIXXX_NOTES.md 记录了已核对的结论和行号），不能凭印象；平台行为（进程名、MIDI 口名、CoreMIDI）还**必须真机验证**：模拟器是按我们的理解写的，测过不代表 Mixxx 真这样。不确定的地方写进 docs/DEVICE_TEST.md 的假设表。
 - 演示模式 `djstudio demo` 可以在没有 Mixxx 的环境里跑完整流程（含网页）。
 - **每次发布（版本号加一）都在 [docs/CHANGELOG.md](docs/CHANGELOG.md) 最上面写一段**（中文，写用户能感觉到的变化，带日期）：`tests/test_changelog.py` 查当前版本有没有写；CI 把这一段写进 Release 说明，并单独发一个 `v版本号` 的 Release（带应用）。
+
+## 四 Deck（曲谱 v5）
+
+- 两代谱两条路：v1–v4 走 DJStudio.js + AutoDJ（上面那些规矩）；**v5 走引擎里的原生调度器**（`tools/mixxx-engine/djs5/`，协议和混音链路见
+  docs/ENGINE5.md），Python 在 `djstudio/v5/`。v5 只在内置引擎里放。改 v5 不要动 v4 那条路的行为（`state` 这类 v4 命令仍然只报两台 Deck）。
+- 谱法以 [docs/SCORE_SPEC_V5.md](docs/SCORE_SPEC_V5.md) 为准，示例 docs/score_v5_example.md 必须零错误零提示地编过。
+  规范里第 8 节的效果表由 `tests/test_v5_score.py` 和代码（`livefx.PARAMS`、`compile.FX_PARAMS`）比对：改一边要同时改另一边。
+- 改了 `djs5/*.hpp`：跑 `tests/test_v5_engine.py`、`tests/test_v5_live.py`（模拟器 `sim5` 会按源码哈希自动重编），
+  DSP 模块另跑 `g++ -O2 -std=c++17 -Wall -Wextra -ffast-math tools/mixxx-engine/djs5/test_dsp.cpp`；有声音引擎时再重编引擎、
+  跑 `python packaging/macos/smoke_v5.py <引擎>` 和带 `DJSTUDIO_ENGINE_BIN` 的全量 pytest（引擎是四台 Deck，v4 的引擎测试也要过）。
+- 引擎跟着 Mixxx 用 `-ffast-math` 编：调度器和 DSP 里不能用 NaN / 无穷大当「没有」，也不能用 `isnan` / `isfinite`。
+- **所有的沿都在音乐上的那个点之前走完**（起 / 停、门、交叉淡化、Release 的收和放）：正好落在点上的鼓头要么完整、要么没有。新加的效果照这个规矩，并用「脉冲正好在点上」的测试钉住。
+- 能力表两边要一致：引擎的 `v5.caps` 和 `djstudio/v5/caps.py`（测试比对）。算法、处理组里的顺序、时间常数变了：`kDspVersion` / `kBusVersion` 加一，
+  `caps.FX_VERSIONS` 跟着改（存下来的谱按版本提示「声音可能不一样」）。
+- 量出来的数字（对齐、每块耗时、分频残差）和没做的事记在 docs/V5_G0.md；只有 Mac 真机才知道的写进 docs/DEVICE_TEST.md 的假设表。
 
 ## 把编排方案转成 set 文件
 
