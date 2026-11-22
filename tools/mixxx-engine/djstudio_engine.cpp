@@ -1159,6 +1159,12 @@ class Engine : public djs5::Backend {
     void keylock(int d, bool on) override {
         m_d5[d].keylock->set(on ? 1.0 : 0.0, nullptr);
     }
+    void hint(int d, int slot, double sec, bool on) override {
+        // 预读点 = hot cue 的位置控件：读盘线程每块都会把各个 hot cue 那里的一段留在缓存里（CueControl::hintReader，
+        // cuecontrol.cpp:1277-1291，取的就是这个控件的值）。只写位置，不建 cue（没有 cue 时 hotcuePositionChanged 什么也不做，
+        // cuecontrol.cpp:1221-1231）。-1 = 没有
+        m_d5[d].hot[slot]->set(on ? sec * m_d5[d].sr * 2.0 : -1.0, nullptr);
+    }
     const float* channel(int d) override {
         return m_d5[d].gen.load() > 0 ? m_d5[d].buffer : nullptr;
     }
@@ -1184,6 +1190,13 @@ class Engine : public djs5::Backend {
             x.eq[2] = ControlDoublePrivate::getControl(ConfigKey(eq, "parameter3"));
             x.filter = ControlDoublePrivate::getControl(ConfigKey(QString("[QuickEffectRack1_[Channel%1]]").arg(n), "super1"));
             x.buffer = m_pEngineMixer->getChannelBuffer(g);
+            for (int h = 0; h < djs5::kHints; ++h) {
+                x.hot[h] = co5(QString("hotcue_%1_position").arg(h + 1).toLatin1().constData());
+                if (!x.hot[h]) {
+                    std::fprintf(stderr, "deck %d 没有 hot cue %d\n", n, h + 1);
+                    return 4;
+                }
+            }
             for (const auto& c : {x.play, x.rate, x.loopStart, x.loopEnd, x.loopEnabled, x.keylock, x.eq[0], x.eq[1],
                          x.eq[2], x.filter}) {
                 if (!c) {
@@ -1286,6 +1299,7 @@ class Engine : public djs5::Backend {
   private:
     struct Deck5 {
         QSharedPointer<ControlDoublePrivate> play, rate, loopStart, loopEnd, loopEnabled, keylock, eq[3], filter;
+        QSharedPointer<ControlDoublePrivate> hot[djs5::kHints];
         const CSAMPLE* buffer = nullptr;
         std::atomic<int> gen{0}; // 装好的代数（负 = 那一代没装上）
         double sr = kSampleRate;
@@ -1567,6 +1581,7 @@ class Engine : public djs5::Backend {
             QString err;
             startRecord(c["path"].toString(), c["trim"].toBool(), &err);
             r["ok"] = static_cast<bool>(m_rec);
+            r["frame"] = static_cast<qint64>(m_engineFrames.load()); // 录音的第 0 帧 = 引擎的第几帧（测试里对帧用）
             if (!err.isEmpty()) {
                 r["err"] = err;
             }

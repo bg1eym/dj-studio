@@ -24,11 +24,12 @@ class DelayLine {
         m_buf.assign(static_cast<size_t>(kMaxSeconds) * static_cast<size_t>(sampleRate) * 2, 0.0f);
         reset();
     }
-    void reset() {
+    // send：之后每块用的送出量（调度器把送出的开关和大小先乘进输入里，这里固定是 1，不再从 0 爬上来）
+    void reset(float send = 0.0f) {
         std::fill(m_buf.begin(), m_buf.end(), 0.0f);
         m_write = 0;
         m_prevDelay = 0;
-        m_prevSend = 0.0f;
+        m_prevSend = send;
         m_prevFeedback = 0.0f;
         m_pingPong = 0;
     }

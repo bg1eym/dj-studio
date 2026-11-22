@@ -46,6 +46,10 @@ struct FakeDeck {
     double l0 = 0.0, l1 = 0.0;
     double params[P_COUNT] = {1, 1, 1, 0.5, 1};
     bool keylock = false;
+    bool xfade = false; // 这一块是定位后的交叉淡化
+    double oldPos = 0.0;
+    double hints[kHints] = {-1, -1, -1, -1, -1, -1, -1, -1}; // 预读点（秒）
+    int miss = 0; // 读盘没跟上：2 = 这一块静音，1 = 这一块从 0 渐入
     std::vector<float> out = std::vector<float>(kBufferFrames * 2, 0.0f);
     std::deque<float> delay = std::deque<float>(static_cast<size_t>(kDelayFrames) * 2, 0.0f);
     long long seeks = 0, loads = 0;
@@ -74,9 +78,23 @@ class FakeBackend : public Backend {
     }
     int loaded(int k) override { return d[k].gen; }
     double position(int k) override { return d[k].pos; }
+    void hint(int k, int slot, double sec, bool on) override {
+        d[k].hints[slot] = on ? sec : -1.0;
+    }
     void seek(int k, double sec) override {
-        d[k].pos = sec;
-        ++d[k].seeks;
+        FakeDeck& x = d[k];
+        if (x.playing && x.asset) { // 放着的时候定位：下一块里旧位置渐出、新位置渐入（同 Mixxx）
+            x.xfade = true;
+            x.oldPos = x.pos;
+            // 没登记预读的远处：读盘线程还没读好，这一块是静音，下一块从 0 渐入（同 Mixxx 的 cache miss）
+            bool cached = std::fabs(sec - x.pos) < 2.0;
+            for (double h : x.hints) {
+                cached = cached || (h >= 0.0 && std::fabs(sec - h) < 2.0);
+            }
+            x.miss = cached ? 0 : 2;
+        }
+        x.pos = sec;
+        ++x.seeks;
     }
     void play(int k, bool on) override { d[k].playing = on && d[k].asset; }
     void rate(int k, double r) override { d[k].rate = r; }
@@ -121,6 +139,16 @@ class FakeBackend : public Backend {
                 float v = 0.0f;
                 if (x.asset && x.playing) {
                     v = click(*x.asset, x.pos);
+                    if (x.miss == 2) {
+                        v = 0.0f;
+                    } else if (x.miss == 1) {
+                        v *= static_cast<float>(n) / kBufferFrames;
+                    }
+                    if (x.xfade) {
+                        const float t = static_cast<float>(n) / kBufferFrames;
+                        v = v * t + click(*x.asset, x.oldPos) * (1.0f - t);
+                        x.oldPos += x.rate / kSampleRate;
+                    }
                     if (!x.wasPlaying) {
                         v *= static_cast<float>(n) / kBufferFrames; // 起播那一块从 0 渐入
                     }
@@ -142,6 +170,10 @@ class FakeBackend : public Backend {
                 x.delay.pop_front();
             }
             x.wasPlaying = x.playing;
+            x.xfade = false;
+            if (x.miss > 0) {
+                --x.miss;
+            }
         }
         frames += kBufferFrames;
     }
@@ -249,9 +281,10 @@ int main() {
                         it->second.fail = c.has("on") ? c["on"].boolean() : true;
                     }
                 }
-                if (c.has("speed")) {
+                if (c.has("speed")) { // 换倍速：从现在的位置接着按新的倍速走（不等墙钟追上，也不猛追）
                     speed = std::max(0.01, c["speed"].num());
                     lastWall = wallSec();
+                    pausedWall = lastWall - simSec / speed;
                 }
                 if (c.has("nudge")) { // 把一个 deck 的位置人为推开（验证位置核对）
                     be.d[static_cast<int>(c["deck"].num())].pos += c["nudge"].num();

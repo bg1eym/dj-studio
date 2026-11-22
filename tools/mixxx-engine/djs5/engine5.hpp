@@ -29,11 +29,12 @@ namespace djs5 {
 
 // 版本化的固定参数（改了要加 kFxVersion / 协议版本，并同步 docs/ENGINE5.md）
 constexpr double kGateInMs = 1.0;    // 门在起播点前这么久开始打开，到起播点全开
-constexpr double kGateOutMs = 3.0;   // 停止点之后这么久关完
+constexpr double kGateOutMs = 3.0;   // 门在停止点前这么久开始关，到停止点关完（停止那一拍上的 kick 不会漏出来）
 constexpr double kVolSmoothMs = 2.0; // 推子一下跳变时的平滑（去掉爆音）
 constexpr double kMasterFadeMs = 10.0; // 全场暂停 / 继续的淡出淡入
 constexpr int kPrerollBuffers = 4;
 constexpr int kFxSlots = 8;            // 同时最多几个发送效果实例（含尾音）
+constexpr int kHints = 8;              // 每个 deck 预读几个跳段目标
 constexpr double kPhaseHardMs = 25.0;  // 位置差超过这么多：重新定位
 constexpr double kPhaseCorrSec = 0.25; // 小的位置差在这么久里拉回来
 constexpr double kPhaseMaxNudge = 0.004;
@@ -53,6 +54,9 @@ struct Backend {
     virtual void loop(int deck, double s0, double s1, bool on) = 0; // on = false：只关 loop，位置不动
     virtual void param(int deck, int p, double v) = 0;              // P_LO / P_MID / P_HI / P_FILTER（Mixxx 原生值）
     virtual void keylock(int deck, bool on) = 0;
+    // 预读点：告诉 deck 等会儿要跳到原曲的这里，先把那一段读进缓存（slot = 0..kHints-1；on = false 清掉）。
+    // 没预读的位置一跳过去，读盘线程还没读好，那一块是静音、下一块从 0 渐入（Mixxx：readaheadmanager.cpp:93-113）
+    virtual void hint(int deck, int slot, double sec, bool on) = 0;
     virtual const float* channel(int deck) = 0; // 刚处理完的这一块：推子前（EQ / 滤波之后），交错立体声；没装歌 = nullptr
     virtual double delayFrames() = 0;           // 通道音频比 deck 位置晚多少帧（EQ 群延迟）
 };
@@ -70,6 +74,7 @@ class Engine5 {
         m_decks = std::min(kMaxDecks, m_be.decks());
         m_post.assign(static_cast<size_t>(kMaxDecks + 1), std::vector<float>(static_cast<size_t>(m_n) * 2, 0.0f));
         m_wet.assign(static_cast<size_t>(m_n) * 2, 0.0f);
+        m_fxIn.assign(static_cast<size_t>(m_n) * 2, 0.0f);
         for (auto& s : m_slots) {
             s.delay.init(m_sr);
         }
@@ -299,6 +304,7 @@ class Engine5 {
         const double dgs = (g1 - g0) / N;
         const double bpm = pl.tempo.bpmAt(0.5 * (g0 + g1));
         const double gateIn = kGateInMs / 1000.0 * bpm / 60.0; // 拍
+        const double gateOut = kGateOutMs / 1000.0 * bpm / 60.0;
         const float upStep = static_cast<float>(1000.0 / (kGateInMs * m_sr));
         const float downStep = static_cast<float>(1000.0 / (kGateOutMs * m_sr));
         const float volA = static_cast<float>(1.0 - std::exp(-1000.0 / (kVolSmoothMs * m_sr)));
@@ -315,7 +321,7 @@ class Engine5 {
             double pre = 0.0, pst = 0.0;
             for (int n = 0; n < N; ++n) {
                 const double g = g0 + n * dgs;
-                const float target = (g >= openFrom && g < closeAt) ? 1.0f : 0.0f;
+                const float target = (g >= openFrom && g < closeAt - gateOut) ? 1.0f : 0.0f;
                 if (rt.gate < target) {
                     rt.gate = std::min(target, rt.gate + upStep);
                 } else if (rt.gate > target) {
@@ -341,7 +347,7 @@ class Engine5 {
             rt.postMs += (pst / (2.0 * N) - rt.postMs) * a300;
         }
 
-        renderFx(out, g0, g1, bpm, a300);
+        renderFx(out, g0, g1, bpm, a300);  // 发送效果：送出的开 / 关也落在采样上
 
         // 主输出：开演 / 定位后到「听得见」的那一拍才放出来；全场暂停 / 停止时淡出
         double sum = 0.0;
@@ -416,6 +422,7 @@ class Engine5 {
         DelayLine delay;
         std::unique_ptr<Reverb> reverb;
         float prevSend = 0.0f, prevWet = 0.0f;
+        float gate = 0.0f; // 送出的门（0..1）
         double ms = 0.0;
     };
 
@@ -651,6 +658,47 @@ class Engine5 {
             rt.have[p] = false;
         }
         applyControls(d, &c, at);
+        hintJumps(d, c, c.segIndex(at));
+    }
+
+    // 两段之间怎么接：出 loop（连续）/ 进 loop（连续）/ 跳段（不连续，deck 要重新定位）
+    enum Join { JoinExit, JoinEnter, JoinJump };
+    static Join joinOf(const Clip& c, int i, double* phaseOut = nullptr) {
+        const Seg& cur = c.segs[static_cast<size_t>(i) - 1];
+        const Seg& nx = c.segs[static_cast<size_t>(i)];
+        const double spb = c.spb();
+        double phase = 0.0; // loop 里出的那一刻转到这一遍的第几拍（正好转满 = 一整遍）
+        double cont = cur.src + (nx.g - cur.g) * spb;
+        if (cur.loop > 0.0) {
+            phase = std::fmod(nx.g - cur.g + (cur.src - cur.lsrc) / spb, cur.loop);
+            if (phase < 1e-6) {
+                phase = cur.loop;
+            }
+            cont = cur.lsrc + phase * spb;
+        }
+        if (phaseOut) {
+            *phaseOut = phase;
+        }
+        const bool continuous = std::fabs(nx.src - cont) < 0.002;
+        if (cur.loop > 0.0 && nx.loop <= 0.0 && continuous) {
+            return JoinExit;
+        }
+        if (cur.loop <= 0.0 && nx.loop > 0.0 && continuous && nx.src >= nx.lsrc - 1e-9 && nx.src < nx.lsrc + nx.loop * spb) {
+            return JoinEnter;
+        }
+        return JoinJump;
+    }
+    // 把这个片段后面要跳到的地方登记成预读点（装好时、每跳过一次以后各登记一次）
+    void hintJumps(int d, const Clip& c, int fromSeg) {
+        int slot = 0;
+        for (int i = fromSeg + 1; i < static_cast<int>(c.segs.size()) && slot < kHints; ++i) {
+            if (joinOf(c, i) == JoinJump && c.segs[static_cast<size_t>(i)].src > 0.0) {
+                m_be.hint(d, slot++, c.segs[static_cast<size_t>(i)].src, true);
+            }
+        }
+        for (; slot < kHints; ++slot) {
+            m_be.hint(d, slot, 0.0, false);
+        }
     }
 
     void stepPreparing() {
@@ -788,8 +836,7 @@ class Engine5 {
                 return;
             }
             case DPlaying: {
-                const double tail = kGateOutMs / 1000.0 * bpm / 60.0 + 2.0 * dg;
-                if (g0 >= c->stop + tail) {
+                if (g0 >= c->stop + 2.0 * dg) { // 门已经在停止点关完了：过两块再停 deck
                     m_be.play(d, false);
                     m_be.loop(d, 0.0, 0.0, false);
                     receipt(c->id + ".stop", "ok", c, c->stop, c->stop);
@@ -834,7 +881,7 @@ class Engine5 {
     }
 
     // 片段里一段接一段：进 loop、出 loop（连续）在块边界上开 / 关 Mixxx 的 loop（回绕由 deck 自己做，落在采样上）；
-    // 不连续 = 跳段：在包含那一拍的块开头定位到「新的一段往回推」的位置——早跳不到一块，拍子不乱。
+    // 不连续 = 跳段：在那一拍之前的块开头定位到「新的一段往回推」的位置——早跳一到两块（≤ 23 ms），拍子不乱。
     void followSegs(int d, const Clip& c, double g0, double g1) {
         DeckRt& rt = m_d[d];
         const double spb = c.spb();
@@ -842,30 +889,24 @@ class Engine5 {
             const Seg& cur = c.segs[static_cast<size_t>(rt.seg)];
             const Seg& nx = c.segs[static_cast<size_t>(rt.seg) + 1];
             const double gb = nx.g;
-            double phase = 0.0; // loop 里出的那一刻转到这一遍的第几拍（正好转满 = 一整遍）
-            double cont = cur.src + (gb - cur.g) * spb;
-            if (cur.loop > 0.0) {
-                phase = std::fmod(gb - cur.g + (cur.src - cur.lsrc) / spb, cur.loop);
-                if (phase < 1e-6) {
-                    phase = cur.loop;
-                }
-                cont = cur.lsrc + phase * spb;
-            }
-            const bool continuous = std::fabs(nx.src - cont) < 0.002;
-            if (cur.loop > 0.0 && nx.loop <= 0.0 && continuous) {
+            double phase = 0.0;
+            const Join join = joinOf(c, rt.seg + 1, &phase);
+            if (join == JoinExit) {
                 // 出 loop：最后一遍转到一半时关（正好在 loop 尾那一拍关的话，deck 可能已经跳回 loop 头，会多转一遍）
                 if (g1 < gb - phase / 2.0) {
                     return;
                 }
                 m_be.loop(d, 0.0, 0.0, false);
-            } else if (cur.loop <= 0.0 && nx.loop > 0.0 && continuous && nx.src >= nx.lsrc - 1e-9 &&
-                    nx.src < nx.lsrc + nx.loop * spb) {
+            } else if (join == JoinEnter) {
                 if (g1 < gb) {
                     return;
                 }
                 m_be.loop(d, nx.lsrc, nx.lsrc + nx.loop * spb, true);
             } else {
-                if (g1 < gb) {
+                // 跳段：deck 定位的那一块是旧位置渐出、新位置渐入（Mixxx 定位时的防爆音交叉淡化，enginebuffer.cpp:1100-1110）。
+                // 提前一块跳：那一拍落在下一块里，到那一拍时新位置已经是满的（跳到的 kick 不会被削掉一截）。
+                // 目标在装好时就登记成了预读点（hintJumps），跳过去不用等读盘
+                if (g1 + (g1 - g0) < gb) {
                     return;
                 }
                 if (cur.loop > 0.0) {
@@ -876,6 +917,7 @@ class Engine5 {
                     m_be.loop(d, nx.lsrc, nx.lsrc + nx.loop * spb, true);
                 }
                 rt.settle = 3;
+                hintJumps(d, c, rt.seg + 1);
             }
             ++rt.seg;
             if (!nx.id.empty()) {
@@ -894,12 +936,13 @@ class Engine5 {
             const FxSpec& f = pl.fx[m_fxNext];
             if (f.end + f.tail > g0) {
                 Slot& s = m_slots[f.slot];
-                s.delay.reset();
+                s.delay.reset(1.0f);
                 if (s.reverb) {
                     s.reverb->reset();
                 }
                 s.fx = static_cast<int>(m_fxNext);
                 s.prevSend = s.prevWet = 0.0f;
+                s.gate = 0.0f;
                 s.ms = 0.0;
             }
             ++m_fxNext;
@@ -920,22 +963,40 @@ class Engine5 {
             const Clip& c = pl.clips[static_cast<size_t>(ci)];
             const bool feeding = clipOf(c.deck) == &c && m_d[c.deck].st == DPlaying;
             const std::vector<float>& src = m_post[static_cast<size_t>(c.deck)];
-            const bool open = feeding && g1 > f.start && g1 <= f.end;
-            const float send = open ? static_cast<float>(f.param("send_gain", 1.0) * f.send.at(g1)) : 0.0f;
+            // 送出：从 start 开到 end（和 deck 的门一样落在采样上：start 那一帧已经全开，end 那一帧已经关完），
+            // 量 = send_gain × 送出曲线。先乘进输入里，效果本身的送出固定是 1
+            const double dgs = (g1 - g0) / N;
+            const double gateIn = kGateInMs / 1000.0 * bpm / 60.0, gateOut = kGateOutMs / 1000.0 * bpm / 60.0;
+            const float upStep = static_cast<float>(1000.0 / (kGateInMs * m_sr));
+            const float downStep = static_cast<float>(1000.0 / (kGateOutMs * m_sr));
+            const float sg = static_cast<float>(f.param("send_gain", 1.0));
+            const float c0 = static_cast<float>(f.send.at(std::min(g0, f.end))), c1 = static_cast<float>(f.send.at(std::min(g1, f.end)));
+            float last = 0.0f;
+            for (int n = 0; n < N; ++n) {
+                const double g = g0 + n * dgs;
+                const float target = (feeding && g >= f.start - gateIn && g < f.end - gateOut) ? 1.0f : 0.0f;
+                if (s.gate < target) {
+                    s.gate = std::min(target, s.gate + upStep);
+                } else if (s.gate > target) {
+                    s.gate = std::max(target, s.gate - downStep);
+                }
+                last = s.gate * sg * (c0 + (c1 - c0) * static_cast<float>(n) / static_cast<float>(N));
+                m_fxIn[static_cast<size_t>(2 * n)] = src[static_cast<size_t>(2 * n)] * last;
+                m_fxIn[static_cast<size_t>(2 * n + 1)] = src[static_cast<size_t>(2 * n + 1)] * last;
+            }
+            const float send = last;
             // 返回量：关送出以后保持最后的值；尾音的最后 1/4 淡掉（实例要让给别人了）
             double wet = f.wet.at(std::min(g1, f.end));
             if (f.tail > 0.0 && g1 > f.end + 0.75 * f.tail) {
                 wet *= std::max(0.0, (f.end + f.tail - g1) / (0.25 * f.tail));
             }
-            const float* in = feeding ? src.data() : zeros(N);
             if (f.kind == "reverb" && s.reverb) {
-                s.reverb->process(in, m_wet.data(), N, static_cast<float>(f.param("decay", 0.5)),
-                        static_cast<float>(f.param("bandwidth", 1.0)), static_cast<float>(f.param("damping", 0.0)), send,
-                        s.prevSend);
+                s.reverb->process(m_fxIn.data(), m_wet.data(), N, static_cast<float>(f.param("decay", 0.5)),
+                        static_cast<float>(f.param("bandwidth", 1.0)), static_cast<float>(f.param("damping", 0.0)), 1.0f, 1.0f);
             } else {
                 const double beats = f.param("beats", 0.5);
                 const int frames = static_cast<int>(beats * 60.0 / bpm * m_sr);
-                s.delay.process(in, m_wet.data(), N, frames, send, static_cast<float>(f.param("feedback", 0.0)),
+                s.delay.process(m_fxIn.data(), m_wet.data(), N, frames, 1.0f, static_cast<float>(f.param("feedback", 0.0)),
                         static_cast<float>(f.param("pingpong", 0.0)));
             }
             const float w0 = s.prevWet, w1 = static_cast<float>(wet);
@@ -952,13 +1013,6 @@ class Engine5 {
             s.ms += (sum / (2.0 * N) - s.ms) * a300;
         }
     }
-    const float* zeros(int n) {
-        if (m_zeros.size() < static_cast<size_t>(n) * 2) {
-            m_zeros.assign(static_cast<size_t>(n) * 2, 0.0f);
-        }
-        return m_zeros.data();
-    }
-
     Backend& m_be;
     int m_sr, m_n, m_decks = kMaxDecks;
     ReverbFactory m_reverbFactory;
@@ -975,7 +1029,7 @@ class Engine5 {
     Slot m_slots[kFxSlots];
     size_t m_fxNext = 0;
     std::vector<std::vector<float>> m_post;
-    std::vector<float> m_wet, m_zeros;
+    std::vector<float> m_wet, m_fxIn;
     float m_master = 0.0f, m_masterTarget = 1.0f, m_masterStep = 1.0f;
     double m_masterMs = 0.0, m_masterPeak = 0.0;
     long long m_over = 0;
