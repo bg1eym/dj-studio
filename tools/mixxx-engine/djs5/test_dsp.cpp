@@ -13,6 +13,9 @@
 #include <utility>
 
 using namespace djs5;
+using std::int32_t;
+using std::uint32_t;
+using std::uint64_t;
 
 namespace {
 
@@ -463,7 +466,8 @@ void testTransGate() {
         check(p + "gain_at_beat", g.gain(1.0, dbeat), "==", 1.0);
         check(p + "gain_closed_err", std::fabs(g.gain(0.4, dbeat) - 0.2), "<=", 1e-12);
         check(p + "gain_static_err",
-                std::fabs(TransGate::gainAt(0.4, edgeFrames * dbeat, 0.5, 0.5, 0.8, 0.0) - g.gain(0.4, dbeat)), "==", 0.0);
+                std::fabs(TransGate::gainAt(0.4, TransGate::edgeBeats(dbeat, sr), 0.5, 0.5, 0.8, 0.0) - g.gain(0.4, dbeat)),
+                "==", 0.0);
     }
     // 直流过门 = 增益本身：和纯函数一致；沿的长度 1–2 ms；每个采样的变化有界
     {
@@ -691,6 +695,8 @@ void testRoll() {
                     }
                 },
                 {m1, m2});
+        // 限值：两路正弦各自的变化（2 × 0.008）+ 2 ms 升余弦在两路之间换（最多差 1.0 × π/2 / 88 = 0.018）
+        //       + mix 的斜率（1/88 × 两路之差）；硬回绕 / 硬切会一下跳到 ~1.0
         std::printf("INFO %sinput_max_step %.5f (hard wrap would step up to ~1.0)\n", p.c_str(), maxStep(s, 0, total));
         check(p + "click_max_step", maxStep(y, 0, total), "<=", 0.04);
     }
@@ -708,6 +714,36 @@ void testRoll() {
             return runBlocks(wn, pattern,
                     [&](int start, int n, const float* i, float* o) { r.process(i, o, n, b0 + start * db2, db2); });
         });
+    }
+    // 120 BPM：一拍正好 22050 帧，录制起点 / 每一遍的起点 / 改长度 / 松开全都正好落在采样上——
+    // 拍从不同的块起点算过来会差最后几位，「到没到这一拍」不能因此早晚一个采样
+    {
+        const double db3 = 120.0 / 60.0 / sr;
+        auto mk = [&](Roll& r) {
+            r.init(sr);
+            r.setMix(0.9f);
+            r.arm(4.0, 1.0);
+            r.setLength(6.0, 0.5);
+            r.setLength(7.0, 0.25);
+            r.release(9.0);
+        };
+        checkBlockIndep("roll.on_sample_events", [&](const std::vector<int>& pattern) {
+            Roll r;
+            mk(r);
+            return runBlocks(wn, pattern,
+                    [&](int start, int n, const float* i, float* o) { r.process(i, o, n, start * db3, db3); });
+        });
+        // 引擎的算法：每一块的 beat0 / dbeat 都从速度图（秒 → 拍）重新算，块和块之间差着浮点误差
+        Roll a, b;
+        mk(a);
+        mk(b);
+        const Buf ref = runBlocks(wn, kOneCall,
+                [&](int start, int n, const float* i, float* o) { a.process(i, o, n, start * db3, db3); });
+        auto beatAt = [&](int frame) { return (static_cast<double>(frame) / sr) * (120.0 / 60.0); };
+        const Buf eng = runBlocks(wn, {512}, [&](int start, int n, const float* i, float* o) {
+            b.process(i, o, n, beatAt(start), (beatAt(start + n) - beatAt(start)) / n);
+        });
+        check(p + "engine_style_beats_diff", maxDiff(eng, ref), "<=", 1e-6);
     }
     // 从中间（录之前）开始 = 一路放过来
     {
@@ -878,6 +914,8 @@ void testSvf() {
     // 扫频 / 换模式不出爆音：100 Hz 正弦，每 512 帧截止在两头之间跳一次
     {
         const Buf s = sine(2 * sr, 100.0, 0.5, sr);
+        // 限值 0.02 ≈ 输入自己每采样变化（0.007）的 3 倍：截止变的时候幅度 / 相位在几毫秒里跟着变，
+        // 但不能比这更陡（直接平滑 g 而不是 ln g 的做法实测 0.030，过不了）
         std::printf("INFO %sinput_max_step %.5f\n", p.c_str(), maxStep(s, 0, 2 * sr));
         const struct {
             const char* name;
@@ -894,7 +932,7 @@ void testSvf() {
                 f.setCutoff((start / 512) % 2 == 0 ? c.a : c.b);
                 f.process(in, out, n);
             });
-            check(p + "sweep_click_max_step_" + c.name, maxStep(y, 0, 2 * sr), "<=", 0.03);
+            check(p + "sweep_click_max_step_" + c.name, maxStep(y, 0, 2 * sr), "<=", 0.02);
         }
         SvfFilter f;
         f.init(sr);
@@ -902,7 +940,7 @@ void testSvf() {
             f.set(static_cast<SvfFilter::Mode>((start / 4096) % 3), 400.0, 1.0);
             f.process(in, out, n);
         });
-        check(p + "mode_switch_max_step", maxStep(y, 0, 2 * sr), "<=", 0.03);
+        check(p + "mode_switch_max_step", maxStep(y, 0, 2 * sr), "<=", 0.02);
     }
     // 块大小无关（中间改三次参数）；reset 清状态
     const Buf wn = noise(30000, 0.25, 45u);
@@ -935,7 +973,14 @@ void testSvf() {
         f.process(z.data(), o.data(), 1024);
         check(p + "reset_residue", maxAbs(o, 0, 1024), "<=", 1e-12);
         const double ns = nsPerFrame(framesOf(wn), [&]() { f.process(wn.data(), y.data(), framesOf(wn)); });
-        cpuInfo("SvfFilter", ns, sr);
+        cpuInfo("SvfFilter(static)", ns, sr);
+        const double ns2 = nsPerFrame(framesOf(wn) / 512 * 512, [&]() {
+            for (int pos = 0; pos + 512 <= framesOf(wn); pos += 512) {
+                f.setCutoff((pos / 512) % 2 == 0 ? 200.0 : 8000.0);
+                f.process(&wn[static_cast<size_t>(pos) * 2], &y[static_cast<size_t>(pos) * 2], 512);
+            }
+        });
+        cpuInfo("SvfFilter(sweeping)", ns2, sr);
     }
 }
 
@@ -1051,6 +1096,8 @@ void testSpiral() {
                     s.process(i, o, n, b, start < fc ? dbeat : dbeat * 1.02);
                 },
                 {fc, m1, m2});
+        // 限值：干声 0.014 + 回声叠起来最多 0.5 / (1 - 0.5) = 1.0 倍幅度、变速那一下读得快 16% → 0.033，
+        //       再加 mix 的斜率；读的位置硬跳 216 帧的话会一下跳 ~1.0
         std::printf("INFO %sinput_max_step %.5f\n", p.c_str(), maxStep(sn, 0, total));
         check(p + "click_max_step", maxStep(y, 0, total), "<=", 0.06);
     }
@@ -1279,8 +1326,9 @@ void testMod(const std::string& name, double notchHz, double passHz, double boun
                     f.process(i, o, n, start * dbeat, dbeat);
                 },
                 {m1, m2, m3});
+        // 限值 0.02 ≈ 输入自己每采样变化（0.007）的 3 倍（带反馈时共振会把 100 Hz 抬高一点）；硬切 mix 会跳 ~0.5
         std::printf("INFO %sinput_max_step %.5f\n", p.c_str(), maxStep(sn, 0, total));
-        check(p + "click_max_step", maxStep(y, 0, total), "<=", 0.03);
+        check(p + "click_max_step", maxStep(y, 0, total), "<=", 0.02);
     }
     checkBlockIndep(name, [&](const std::vector<int>& pattern) {
         Fx f;

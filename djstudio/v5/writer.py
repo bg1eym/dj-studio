@@ -33,7 +33,7 @@ def _clock(h: float) -> str:
 def knob_write(param: str, v: float) -> str:
     """值 → 谱上的写法，读回去（score.knob_value）还是同一个值。"""
     if param == "vol":
-        return f"{round(v * 10, 2):g}"
+        return f"{round(v * 10, 4):g}"
     if param == "filter":
         h = v * 5
         if abs(h * 2 - round(h * 2)) < 1e-6:
@@ -70,12 +70,13 @@ def _fx_params(f: Fx) -> str:
         if k in ("legacy", "send_gain"):
             continue
         parts.append(f"{ZH_FX_KEY.get(k, k)} {_beats(float(v)) if k == 'beats' else (_amount(float(v)) if isinstance(v, (int, float)) else v)}")
-    for name, pts in (("送出", f.send), ("返回", f.wet)):
-        if not pts:
+    for name, raw in (("送出", f.send), ("返回", f.wet)):
+        if not raw:
             continue
-        if len(pts) == 1 and pts[0].at == f.start and pts[0].step:
+        pts = [raw[0]] + [b for a, b in zip(raw, raw[1:]) if abs(b.value - a.value) > 1e-9]  # 值没变的点不用写
+        if len(pts) == 1 and pts[0].at == f.start:
             parts.append(f"{name} {_amount(pts[0].value)}")
-        elif len(pts) == 2 and pts[0].at == f.start and pts[0].step and pts[1].at == f.end and not pts[1].step:
+        elif len(pts) == 2 and pts[0].at == f.start and pts[1].at == f.end and not pts[1].step:
             parts.append(f"{name} {_amount(pts[0].value)} → {_amount(pts[1].value)}")
         else:
             raise NotExpressible(f"效果 {f.id} 的{name}曲线有 {len(pts)} 个点，表里的一格只能写一个值或者「a → b」")

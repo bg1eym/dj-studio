@@ -367,7 +367,11 @@ class TransGate {
         m_depth = std::min(std::max(depth, 0.0), 1.0);
         m_phase = phaseBeats;
     }
-    // 纯函数：全场第 beat 拍上的增益。edgeBeats = 沿的长度（拍）= kGateEdgeMs 换成帧 × dbeat
+    // 沿的长度（拍）= kGateEdgeMs 换成帧 × dbeat
+    static double edgeBeats(double dbeat, int sampleRate) {
+        return kGateEdgeMs * sampleRate / 1000.0 * std::max(dbeat, 0.0);
+    }
+    // 纯函数：全场第 beat 拍上的增益（edgeBeats 见上）
     static double gainAt(double beat, double edgeBeats, double period, double duty, double depth, double phase) {
         if (depth <= 0.0 || duty >= 1.0) {
             return 1.0;
@@ -423,7 +427,7 @@ class TransGate {
 // 读的位置从绝对拍算（不是自己往前数）：录完的那一刻定下一张「帧格」（θ = (拍 - g0) / 录制时的 dbeat，
 // 第 θ 帧 = 录下来的第 θ 帧），之后每个采样由它的拍算出 θ，再算出在第几遍、这一遍里的第几帧。
 // 每一遍的起点取整到帧（第一个「拍 ≥ 起点」的采样），所以速度不变时读的都是整数帧 = 原样拷贝，没有插值损失；
-// 起点是每一遍各自从拍算的，不累积误差。
+// 起点是每一遍各自从拍算的：对拍的误差 < 1 帧，放多少遍都不累积。
 // 变速（dbeat 在块之间变了）：θ 每个采样走 dbeat / 录制时的 dbeat 帧，按这个比例变速读（Lagrange 插值），
 // 所以 roll 一直对在拍上；音高跟着速度变，和没开 keylock 的 deck 一样。录制中途变速：照常一帧一帧录，
 // 录完时按当时的速度定帧格（之前录的那一点点速度差不管）。
@@ -887,7 +891,7 @@ class Spiral {
 class Noise {
   public:
     static constexpr int kCtlFrames = 16;
-    static constexpr uint32_t kDefaultSeed = 0x9E3779B9u;
+    static constexpr std::uint32_t kDefaultSeed = 0x9E3779B9u;
 
     void init(int sampleRate) {
         m_svf.init(sampleRate);
@@ -902,7 +906,7 @@ class Noise {
         m_svf.reset();
         m_fresh = true;
     }
-    void setSeed(uint32_t seed) { m_seed = seed != 0 ? seed : kDefaultSeed; } // 下次 reset() 起用
+    void setSeed(std::uint32_t seed) { m_seed = seed != 0 ? seed : kDefaultSeed; } // 下次 reset() 起用
     void setLevel(float level) { m_level.set(std::max(level, 0.0f)); }
     void setQ(double q) { m_svf.setQ(q); }
     void setSweep(double startBeat, double lengthBeats, double fromHz, double toHz) {
@@ -939,12 +943,12 @@ class Noise {
         m_rng ^= m_rng << 13;
         m_rng ^= m_rng >> 17;
         m_rng ^= m_rng << 5;
-        return static_cast<float>(static_cast<int32_t>(m_rng)) * (1.0f / 2147483648.0f);
+        return static_cast<float>(static_cast<std::int32_t>(m_rng)) * (1.0f / 2147483648.0f);
     }
 
     SvfFilter m_svf;
     dspd::Slew m_level;
-    uint32_t m_seed = kDefaultSeed, m_rng = kDefaultSeed;
+    std::uint32_t m_seed = kDefaultSeed, m_rng = kDefaultSeed;
     long long m_count = 0;
     double m_start = 0.0, m_len = 0.0, m_from = 1000.0, m_to = 1000.0;
     bool m_fresh = true;
