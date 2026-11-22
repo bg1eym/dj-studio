@@ -166,6 +166,12 @@ class Engine5Link:
             self._p.wait(timeout=3)
         except Exception:  # noqa: BLE001
             self._p.kill()
+        for f in (self._p.stdin, self._p.stdout, self._p.stderr):
+            try:  # 进程自己先没了的话，管道里还有没写出去的命令：关的时候会报「管道断了」，不用管
+                if f:
+                    f.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def open_engine(library: list[dict[str, Any]], speed: float = 1.0, audio: bool = False, sim: bool = False,

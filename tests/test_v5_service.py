@@ -213,6 +213,37 @@ def test_seek_pause_and_takeover_through_the_runner(ready):
     wait_stage(studio, ("stopped",))
 
 
+def test_engine_process_dying_stops_the_show_and_is_not_restarted(ready):
+    """引擎进程中途没了：这一场停在那里、报错，不自动重启重放；用户重新开始才会起新的引擎。"""
+    studio, res, job = ready
+    studio.play(res["project"], speed=8)
+    wait_stage(studio, ("running",))
+    run = studio.v5.run
+    run["link"]._p.kill()
+    assert wait_stage(studio, ("error",), 20) == "error"
+    pr = studio.conductor.progress
+    assert "引擎" in (pr.error or "") and pr.finished_at
+    t0 = time.time()
+    while studio.v5.run is not None and time.time() - t0 < 10:
+        time.sleep(0.05)
+    assert studio.v5.run is None and not studio.conductor.running  # 没有偷偷重开
+    studio.play(res["project"], speed=8)  # 用户再点开始：新的引擎，照常
+    wait_stage(studio, ("running",))
+    assert studio.v5.run["link"] is not run["link"]
+    studio.stop()
+    wait_stage(studio, ("stopped",))
+
+
+def test_a_start_point_that_cannot_be_restored_is_refused(ready):
+    """抓取型的效果离得太远：不让从那里开始（不装成恢复了），原话告诉用户从哪之前开始。"""
+    studio, res, job = ready
+    c = studio.v5.compiled(res["project"])
+    assert c.restore_problem(40.0) is None  # 这份谱里没有这样的效果：哪里都能开始
+    c.live.append({"id": "FX", "kind": "roll", "name": "Roll", "route": "insert", "clips": ["C1"], "start": 4.0, "end": 600.0,
+                   "tail": 0.0, "restore": "capture", "line": 1, "rc": "FX", "text": ""})
+    assert "FX" in c.restore_problem(400.0)
+
+
 def test_web_api_serves_the_chart_and_controls(ready):
     studio, res, job = ready
     pid = res["project"]
