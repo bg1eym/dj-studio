@@ -548,6 +548,25 @@ def create_app(studio: Studio) -> FastAPI:
         return Response(studio.v5.score_md(pid), media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
                         headers={"Content-Disposition": f"{disp}; filename=\"score.md\"; filename*=UTF-8''{quote(pid + '.v5.md')}"})
 
+    @app.get("/api/sets/{sid}/v5.md")
+    def api_set_as_v5(sid: str, download: int = 0) -> Response:
+        """旧的 set（v1–v4 的谱转出来的）另存为 v5 的谱：一份新文件，原来的不动。"""
+        p, _, _ = studio.v5.from_legacy(sid)
+        from ..v5.writer import write
+
+        disp = "attachment" if download else "inline"
+        return Response(write(p), media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
+                        headers={"Content-Disposition": f"{disp}; filename=\"score.md\"; filename*=UTF-8''{quote(sid + '.v5.md')}"})
+
+    @app.get("/api/sets/{sid}/v5check")
+    def api_set_v5check(sid: str) -> dict[str, Any]:
+        """旧的 set 按 v5 的编译器再编一遍，和原来的结果逐点比（动作位置、旋钮、跳段、Loop、曲长）：diffs 空 = 等价。"""
+        from ..v5.compile import chart
+
+        p, new, diffs = studio.v5.from_legacy(sid)
+        return {"ok": new.ok and not diffs, "diffs": diffs[:200], "n_diffs": len(diffs), "clips": len(p.clips),
+                "scenes": len(p.scenes), "chart": chart(new) if new.ok else None}
+
     @app.post("/api/v5/{pid}/export")
     def api_v5_export(pid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         """导出演出包：一个文件夹，谱和选中的全部原曲在同一层（不转码、不出混音）。"""

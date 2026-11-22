@@ -1,4 +1,4 @@
-"""命令行入口：`djstudio serve`（默认）/ app / selftest / demo / demo5 / doctor / validate / import / prepare / play / probe。"""
+"""命令行入口：`djstudio serve`（默认）/ app / selftest / demo / demo5 / doctor / validate / v5check / import / prepare / play / probe。"""
 from __future__ import annotations
 
 import argparse
@@ -137,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="环境体检")
     v = sub.add_parser("validate", help="校验 set（id 或 json 文件路径）")
     v.add_argument("set")
+    v5c = sub.add_parser("v5check", help="旧 set（v1–v4）按四 Deck 的新编译器再编一遍，和原来的结果逐点比对")
+    v5c.add_argument("set")
+    v5c.add_argument("--save", default=None, help="把转出来的 v5 谱存到这个 .md 文件")
     i = sub.add_parser("import", help="导入音频文件 / 文件夹到托管曲库")
     i.add_argument("paths", nargs="+")
     p = sub.add_parser("prepare", help="准备 set（重启 Mixxx、部署引擎、写 AutoDJ 队列）")
@@ -199,6 +202,20 @@ def main(argv: list[str] | None = None) -> int:
             print(iss)
         print("✓ 校验通过" if c.ok else "✗ 校验没通过", f"（约 {c.duration / 60:.1f} 分钟）")
         return 0 if c.ok else 1
+    if cmd == "v5check":
+        from .v5.writer import write
+
+        p, new, diffs = studio.v5.from_legacy(args.set)
+        print(f"{p.name}：{len(p.assets)} 份素材 · {len(p.clips)} 个片段 · {len(p.scenes)} 个场景，约 {new.duration / 60:.1f} 分钟")
+        for d in diffs[:50]:
+            print("  ✗", d)
+        if len(diffs) > 50:
+            print(f"  … 还有 {len(diffs) - 50} 处")
+        print("✓ 和原来的编译结果等价（动作位置、旋钮曲线、跳段、Loop、曲长都对得上）" if not diffs else f"✗ 有 {len(diffs)} 处不一样")
+        if args.save:
+            Path(args.save).write_text(write(p), encoding="utf-8")
+            print(f"v5 的谱存到了 {args.save}（原来的谱没动）")
+        return 0 if not diffs else 1
     if cmd == "import":
         res = studio.library.import_paths(args.paths)
         print(f"导入 {len(res.added)} 首，已存在 {len(res.existing)} 首，失败 {len(res.failed)} 首")

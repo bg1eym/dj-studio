@@ -291,3 +291,45 @@ def test_chart_has_everything_the_page_draws():
     assert ch["scenes"][2]["strategy"]["LOW"].startswith("第 97 小节") and ch["scenes"][2]["roles"] == {"D1": "出曲", "D2": "进曲"}
     st = c.state_at(450.0)  # 第 113 小节半：D1 在旧主题的 loop 里，D2 已经接管
     assert st["decks"][0]["state"] == "looping" and st["decks"][0]["loop"]["lap"] == 1 and st["decks"][1]["clip"] == "C2"
+
+
+def test_the_same_knob_in_two_tables_must_not_overlap():
+    """同一个旋钮同一段时间写在两张表里 = 错误（指出两处的行号）；首尾相接可以。"""
+    def more(rows: str, clip: str = "C2", col: str = "推子") -> str:
+        return small() + f"\n### {clip} 参数\n\n| 位置 | {col} | 说明 |\n|---|---|---|\n{rows}"
+
+    two = more("| 47.1 | 保持 | |\n| 50.1 | 8 | |\n")
+    r = parse_text(two)
+    assert [i.code for i in r.errors] == ["lane_overlap"], [str(i) for i in r.issues]
+    assert r.errors[0].line == line_of(two, "| 47.1 | 保持") and f"第 {line_of(two, '| 48.1 | | 保持')} 行" in r.errors[0].msg
+    touch = more("| 49.1 | 保持 | |\n| 57.1 | 6 | |\n")
+    assert not parse_text(touch).errors, [str(i) for i in parse_text(touch).errors]
+    back = more("| 60.1 | 保持 | |\n| 58.1 | 9点 | |\n", col="MID")
+    assert [i.code for i in parse_text(back).errors] == ["param_order"]
+
+
+def test_the_spec_lists_exactly_the_effects_and_parameters_the_code_knows():
+    """《曲谱规范 v5》第 8 节的两张表和代码对得上：效果的种类、每种的参数名。改一边要同时改另一边。"""
+    import re
+
+    from djstudio.v5 import livefx
+    from djstudio.v5.compile import FX_PARAMS
+    from djstudio.v5.score import FX_KEYS, FX_KIND, _key
+
+    spec = (Path(__file__).resolve().parents[1] / "docs" / "SCORE_SPEC_V5.md").read_text(encoding="utf-8")
+    part = spec[spec.index("### 8.2"):spec.index("### 8.4")]  # 8.2 发送效果、8.3 现场效果 这两张表
+    rows = re.findall(r"^\| `([^`]+)` \| (.+?) \|", part, flags=re.M)
+    seen: dict[str, list[str]] = {}
+    for name, cell in rows:
+        kind = FX_KIND.get(_key(name))
+        assert kind, f"规范里的「{name}」解析器不认识"
+        names = [re.sub(r"[（(].*", "", part).strip() for part in re.split(r"、(?![^（]*）)", cell)]
+        seen[kind] = [n for n in names if n]
+    assert set(seen) == set(FX_PARAMS) | set(livefx.LIVE_KINDS), seen.keys()
+    zh = {en: z for z, en in FX_KEYS.items()}
+    for kind, spec_names in seen.items():
+        if kind in FX_PARAMS:
+            want = {zh[k] for k in FX_PARAMS[kind] if k in zh} | {"送出", "返回", "尾音"}
+        else:
+            want = set(livefx.PARAMS[kind]) | ({"尾音"} if kind in ("filter_echo", "spiral") else set())
+        assert set(spec_names) == want, (kind, spec_names, sorted(want))

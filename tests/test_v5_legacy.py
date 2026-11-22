@@ -157,3 +157,27 @@ def test_converted_set_plays_through_on_the_scheduler():
 
 def test_template_lib_is_shared():
     assert len(TEMPLATE_LIB) == 3 and Path(TEMPLATE).exists()
+
+
+def test_a_stored_set_converts_through_the_service_and_the_web(tmp_path, monkeypatch):
+    """应用里存着的旧 set：按新编译器再编一遍和原来等价；另存为 v5 的谱带着文件名，读回来没有错。"""
+    from fastapi.testclient import TestClient
+
+    from djstudio.demo import setup_demo
+    from djstudio.web.app import create_app
+
+    monkeypatch.setenv("DJSTUDIO_NO_UPDATE", "1")
+    studio = setup_demo(tmp_path, 8.0)
+    try:
+        p, new, diffs = studio.v5.from_legacy("demo")
+        assert new.ok and diffs == [] and len(p.clips) == 4 and all(a.file.endswith(".wav") for a in p.assets)
+        web = TestClient(create_app(studio))
+        r = web.get("/api/sets/demo/v5check").json()
+        assert r["ok"] and r["n_diffs"] == 0 and r["chart"]["decks"] == 4 and len(r["chart"]["clips"]) == 4
+        md = web.get("/api/sets/demo/v5.md").text
+        back = parse_text(md, "demo")
+        assert back.project is not None and not back.errors, [str(i) for i in back.issues]
+        assert [f.kind for f in back.project.fx] == [f.kind for f in p.fx]
+        assert studio.set_path("demo").exists()  # 原来的 set 没动
+    finally:
+        studio.shutdown()

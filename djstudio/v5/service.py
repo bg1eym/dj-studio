@@ -194,6 +194,28 @@ class Service5:
             c.plan = None
         return c
 
+    # ------------------------------------------------------------ 旧谱（v1–v4）看成 v5
+
+    def from_legacy(self, set_id: str) -> tuple[Project, Compiled5, list[str]]:
+        """一套旧的 set（djset/2）→ v5 的项目 + 按新编译器编出来的结果 + 和旧编译结果逐点比对的差异（空 = 等价）。
+        只读：原来的 set 和谱都不动。"""
+        from ..studio import StudioError
+        from . import legacy
+
+        st = self.s.load(set_id)
+        old = self.s.compile(st)
+        if not old.ok:
+            raise StudioError("这套 set 自己还没编过：" + "；".join(str(i) for i in old.errors[:5]))
+        p = legacy.from_set(st, old)
+        by_id = {tr.id: tr for tr in self.s.store.all()}
+        paths = {tk.id: by_id[tk.id].path for tk in st.tracks if tk.id in by_id}
+        # 素材表里写上文件名：另存出来的谱换个地方也能按文件名找到曲子
+        names = {legacy._aid(tid): Path(path).name for tid, path in paths.items()}
+        p = p.model_copy(update={"assets": [a.model_copy(update={"file": a.file or names.get(a.id, "")}) for a in p.assets]})
+        table = legacy.asset_infos(old, paths)
+        new = compile_project(p, lambda a: table.get(a.id), BUILTIN)
+        return p, new, (legacy.check(old, new) if new.ok else [str(i) for i in new.errors])
+
     # ------------------------------------------------------------ 采样
 
     def samples_dir(self, pid: str) -> Path:

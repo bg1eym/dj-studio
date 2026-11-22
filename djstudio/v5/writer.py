@@ -73,13 +73,16 @@ def _fx_params(f: Fx) -> str:
     for name, raw in (("送出", f.send), ("返回", f.wet)):
         if not raw:
             continue
-        pts = [raw[0]] + [b for a, b in zip(raw, raw[1:]) if abs(b.value - a.value) > 1e-9]  # 值没变的点不用写
-        if len(pts) == 1 and pts[0].at == f.start:
-            parts.append(f"{name} {_amount(pts[0].value)}")
-        elif len(pts) == 2 and pts[0].at == f.start and pts[1].at == f.end and not pts[1].step:
-            parts.append(f"{name} {_amount(pts[0].value)} → {_amount(pts[1].value)}")
-        else:
-            raise NotExpressible(f"效果 {f.id} 的{name}曲线有 {len(pts)} 个点，表里的一格只能写一个值或者「a → b」")
+        # 值没变、后面也不再变的点不用写（保持到底）；中间的「停一段再变」要留着
+        pts = [x for i, x in enumerate(raw) if i == 0 or abs(x.value - raw[i - 1].value) > 1e-9
+               or (i + 1 < len(raw) and abs(raw[i + 1].value - x.value) > 1e-9)]
+        if pts[0].at != f.start:
+            raise NotExpressible(f"效果 {f.id} 的{name}曲线不是从效果开始那一拍写起的")
+        cells = []
+        for i, x in enumerate(pts):
+            at = "" if i == 0 or (i == len(pts) - 1 and x.at == f.end) else f"@{fmt_pos(x.at)}"
+            cells.append(("跳 " if x.step and i else "") + _amount(x.value) + at)
+        parts.append(f"{name} {' → '.join(cells)}")
     if f.tail is not None:
         parts.append(f"尾音 {fmt_dur(f.tail)}")
     return "；".join(parts)

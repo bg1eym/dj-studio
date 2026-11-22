@@ -164,6 +164,7 @@ class _Parser:
         self.clip_ids: dict[str, int] = {}  # 片段 ID → 行号
         self.tempo: list[dict[str, Any]] = []
         self.lanes: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self.spans: dict[tuple[str, str], list[tuple[Any, Any, int]]] = {}  # 每个旋钮已经被哪几张表管了哪一段
         self.loops: list[dict[str, Any]] = []
         self.jumps: list[dict[str, Any]] = []
         self.fx: list[dict[str, Any]] = []
@@ -494,10 +495,16 @@ class _Parser:
                 self.err(t.line, "structure", "参数表少了「位置」这一列", what)
                 continue
             anchors: dict[str, int] = {}  # 这张表里每个旋钮上一次写了东西的行
+            span: dict[str, list[Any]] = {}  # 这张表里每个旋钮管的那一段：[第一行的位置, 最后一行的位置, 第一行的行号]
+            last_at = None
             for no, r in t.rows:
                 at = self.pos(r["位置"], no, what)
                 if at is None:
                     continue
+                if last_at is not None and at < last_at:
+                    self.err(no, "param_order", f"{fmt_pos(at)} 排在 {fmt_pos(last_at)} 后面：参数表按位置从前往后写", what)
+                    continue
+                last_at = at
                 self._in_scene(at, no, what)
                 wrote = False
                 for col, param in PARAM_OF.items():
@@ -528,6 +535,7 @@ class _Parser:
                                     continue
                                 pts.append({"at": at, "value": knob_value(param, txt), "step": False, "line": no})
                         anchors[param] = no
+                        span.setdefault(param, [at, at, no])[1] = at
                         wrote = True
                     except (PlanError, ValueError) as e:
                         self.err(no, "knob", f"{col}：{e}", what)
@@ -536,6 +544,16 @@ class _Parser:
                     self.marks.append({"at": at, "clip": cid, "text": note, "line": no})
                 elif not wrote:
                     self.hint(no, "empty_row", "这一行什么也没写", what)
+            # 同一个旋钮写在几张表里：各管各的一段，两段不能叠着（首尾相接可以）
+            zh = {v: k for k, v in PARAM_OF.items()}
+            for param, (a, b, no) in span.items():
+                for a0, b0, no0 in self.spans.setdefault((cid, param), []):
+                    if a < b0 and a0 < b:
+                        self.err(no, "lane_overlap", f"{zh[param]} 在 {fmt_pos(a)} – {fmt_pos(b)} 这一段，和第 {no0} 行那张表里的"
+                                 f"（{fmt_pos(a0)} – {fmt_pos(b0)}）叠在一起了", what, "同一个旋钮同一段时间只写在一张表里")
+                        break
+                else:
+                    self.spans[(cid, param)].append((a, b, no))
         # 「保持」写在第一个点上：值 = 片段的初始值
         clip = next((c for c in self.clips if c["id"] == cid), None)
         for (c, param), pts in self.lanes.items():
@@ -679,13 +697,27 @@ class _Parser:
                     params[name] = val
                     continue
                 if name in ("送出", "返回"):
+                    # 「送出 1/2」一直是它；「送出 0 → 1/2」在开着的这一段里匀速变过去；中间要停、要拐弯的，在值后面写位置：
+                    # 「返回 0 → 1/2@144.4」= 到 144.4 走到 1/2，之后保持；「跳 0@146.1」= 那一拍一下到
                     pts = send if name == "送出" else wet
-                    ends = re.split(r"\s*(?:→|->)\s*", val)
-                    if len(ends) == 2:  # 「送出 0 → 1/2」：在开着的这一段里匀速变过去
-                        pts += [{"at": start, "value": _amount(ends[0]), "step": True, "line": no},
-                                {"at": end, "value": _amount(ends[1]), "step": False, "line": no}]
-                    else:
-                        pts.append({"at": start, "value": _amount(val), "step": True, "line": no})
+                    stages = [x for x in re.split(r"\s*(?:→|->)\s*", val) if x]
+                    prev_at = start
+                    for i, st in enumerate(stages):
+                        ms = re.fullmatch(r"(跳\s*)?(.+?)(?:\s*[@＠]\s*([0-9.+/\s]+))?", st.strip())
+                        if not ms:
+                            raise ValueError(f"「{st}」看不懂")
+                        if ms.group(3):
+                            at_i = parse_pos(ms.group(3).strip())
+                        elif i == 0:
+                            at_i = start
+                        elif i == len(stages) - 1:
+                            at_i = end
+                        else:
+                            raise ValueError(f"中间的「{st}」要写到哪一拍为止（{st}@位置）")
+                        if at_i < prev_at or at_i > end or (i == 0 and at_i != start):
+                            raise ValueError(f"「{st}」的位置要在效果开着的这一段里、从前往后写")
+                        prev_at = at_i
+                        pts.append({"at": at_i, "value": _amount(ms.group(2)), "step": bool(ms.group(1)) or i == 0, "line": no})
                 elif name == "尾音":
                     tail = parse_dur(val)
                 elif name == "拍长":
