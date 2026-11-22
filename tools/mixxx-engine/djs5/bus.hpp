@@ -674,7 +674,8 @@ class BusRt {
             }
             u.stage = 1;
         }
-        const double back = s.back ? s.end : s.until;
+        // 淡回现场要 kXfadeMs：提前这么久开始，到「回来」的那一拍现场已经是满的（那一拍上的鼓头不被淡入削掉）
+        const double back = (s.back ? s.end : s.until) - dspd::msToFrames(kXfadeMs, m_sr) * std::max(dg, 0.0);
         if (u.stage == 1 && g1 > back) {
             u.bs->resume(frameOf(back, g0, dg));
             u.stage = 2;

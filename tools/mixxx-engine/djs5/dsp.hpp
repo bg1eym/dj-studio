@@ -12,6 +12,8 @@
 // - 引擎用 -ffast-math 编：不用 NaN / inf 当标记，不用 std::isnan / isfinite；只用标准库。
 // - 开 / 关 / 回绕处都有短的平滑或交叉淡化，不出爆音。下面这些毫秒数是「版本化的行为」：
 //   改了算法或这些数就把 kDspVersion 加一（谱保存时记下版本，升级后同一份谱不会悄悄变声）。
+// - TransGate 的沿、Roll 的交叉淡化都在音乐上的那一点（周期起点 / 关的那一点 / 每一遍的格点 / 松开点）之前走完，
+//   不是从那一点才开始（和 engine5 的门同一个习惯）：正好落在那一点上的鼓，要么完整出来，要么完全没有。
 // - 只有 BandSplit3 有延迟（latency()）；别的块都是零延迟。分频之后再跟拍处理的那几路，
 //   传进来的 beat0 要是「缓冲里这段声音」的拍（= 现在的拍减去分频器的延迟）。
 // 验收：test_dsp.cpp（独立程序，逐项打 PASS / FAIL；g++ / g++ -ffast-math / clang++ 三种编法都要全过）。
@@ -349,7 +351,20 @@ class BandSplit3 {
 
 // Trans / Gate：跟拍的门，乘在某一段（或整路）上。
 // 一个周期（period 拍）里前 duty 这一段开着（增益 1），其余关着（增益 1 - depth）。沿是 kGateEdgeMs 的升余弦，
-// 和 engine5 的门同一个习惯：开门的沿提前走完（到周期起点 = 拍点时已经全开，不削鼓头），关门的沿从关的那一点往后走。
+// 和 engine5 的门同一个习惯：沿在那一点之前走完，不是从那一点才开始走——正好落在那一点上的鼓，要么完整出来，要么完全没有。
+// 记 u = 在这个周期里走了多少拍，on = duty × period（关的那一点），沿 = kGateEdgeMs 换成拍：
+//   [0, on - 沿)            全开，增益 1（u = 0 即周期起点 = 拍点，已经全开，不削鼓头）
+//   [on - 沿, on)           关门的沿：1 → 1 - depth；on - 沿/2 处正好一半
+//   [on, period - 沿)       关到底，增益 1 - depth（u = on 那个采样已经完全关上，不漏鼓头）
+//   [period - 沿, period)   开门的沿：1 - depth → 1，到下一个周期起点走完
+// 开着的 / 关着的那一段比一个沿还短时两条沿会叠在一起，增益仍然连续、不超过 1：
+//   - on < 沿：开门的沿没走完，关门的沿就开始了 → 取两条沿里小的那个：一个开不到 1 的尖（尖顶在周期起点之前
+//     (沿 - on) / 2 处），u = on 时照样关到底。
+//   - period - on < 沿：关门的沿没走完，下一次开门的沿就开始了 → 两条沿相加（各自「开了多少」加起来，恒 ≤ 1）：
+//     一个关不到底的凹口，周期起点照样全开；关着的那一段越短凹得越浅，duty → 1 时平滑地变成不关（接得上 duty ≥ 1）。
+//     这种情况下 u = on 处不是 1 - depth（来不及关死再打开）。这里不取小的那个：取小的话开门的沿一开始就从
+//     「还开着」跳到 0，不连续。
+// duty ≥ 1 或 depth ≤ 0：增益恒为 1；duty ≤ 0：一直关着（恒为 1 - depth）。全场没在走（沿 = 0 拍）：方的，[0, on) 开。
 // gain() 是绝对拍的纯函数。process() 另外给增益加了一道斜率限制（每个采样最多变 2 / 沿的帧数；正常的沿最陡
 // 才 π/2 / 沿的帧数，不受影响）：周期 / 占空 / 深度 / 相位在块边界上一下改了，门的状态可能当场翻转，这样也不出爆音。
 class TransGate {
@@ -381,14 +396,20 @@ class TransGate {
         }
         double open = 0.0; // 开了多少：0 = 关死，1 = 全开
         if (duty > 0.0) {
-            double u = (beat - phase) / period;
-            u = (u - std::floor(u)) * period; // 在这个周期里走了多少拍
+            const double x = beat - phase;
             const double on = duty * period;
-            if (u <= on) {
-                open = 1.0;
+            if (edgeBeats > 0.0) {
+                // 一个周期的「窗」= 开门的沿 + 开着的那一段：从周期起点前一个沿升起，[0, on - 沿] 平着，到 on 降完；
+                // 窗的正中在 (on - 沿) / 2。取正中不晚于这一拍的最近一个窗，v = 这一拍离它的周期起点多远
+                // （(on - 沿) / 2 ≤ v < (on - 沿) / 2 + period）：这一拍在这个窗的后半边（看它关门的沿），
+                // 同时在下一个窗（起点在 v = period）的前半边（看它开门的沿）。两项相加：关着的那一段不比沿短时
+                // 两项不会同时非零（= 上面那张表）；和 ≤ 1（两个升余弦的自变量加起来 = 1 - 关着的长度 / 沿 ≤ 1）。
+                // 换窗的地方（v 从正中 + period 跳回正中）两边的值相同，所以对任何参数都连续。
+                const double v = x - std::floor((x + 0.5 * (edgeBeats - on)) / period) * period;
+                const double inv = 1.0 / edgeBeats;
+                open = std::min(1.0, dspd::raisedCos((on - v) * inv) + dspd::raisedCos((v - period) * inv + 1.0));
             } else {
-                const double d = std::min(u - on, period - u); // 离最近的「开着的那一段」多远
-                open = d >= edgeBeats ? 0.0 : 0.5 + 0.5 * std::cos(dspd::kPi * d / edgeBeats);
+                open = x - std::floor(x / period) * period < on ? 1.0 : 0.0;
             }
         }
         return 1.0 - depth * (1.0 - open);
@@ -422,23 +443,46 @@ class TransGate {
 };
 
 // Roll：抓一小段，原地反复放。
-// arm(captureBeat, lengthBeats)：从 captureBeat 起录 lengthBeats 拍（录的时候照常直通），录完就一遍一遍重放这一段，
-// 每一遍的起点都对在 captureBeat + n × 长度 上。setLength(atBeat, 新长度)：从 atBeat 起改放这一段的前「新长度」拍
-// （1 → 1/2 → 1/4 拍那种越切越碎），起点仍然对在 captureBeat + n × 新长度 上。release(atBeat)：交叉淡化回现场。
+// arm(captureBeat, lengthBeats)：从 captureBeat 起录 lengthBeats 拍，录完就一遍一遍重放这一段，每一遍的起点
+// （下面叫「格点」）都对在 captureBeat + n × 长度 上。setLength(atBeat, 新长度)：从 atBeat 起改放这一段的前「新长度」拍
+// （1 → 1/2 → 1/4 拍那种越切越碎），格点仍然对在 captureBeat + n × 新长度 上。release(atBeat)：回现场。
 // mix：0 = 只有现场（和输入逐位相同），1 = 只有 roll。
+// 用法：reset(); setMix(); arm(); setLength()…; release(); 在抓取点之前一次排好，之后每一块调 process()
+// （beat0 = 这一块第一个采样的全场拍）。
 //
-// 读的位置从绝对拍算（不是自己往前数）：录完的那一刻定下一张「帧格」（θ = (拍 - g0) / 录制时的 dbeat，
-// 第 θ 帧 = 录下来的第 θ 帧），之后每个采样由它的拍算出 θ，再算出在第几遍、这一遍里的第几帧。
-// 每一遍的起点取整到帧（第一个「拍 ≥ 起点」的采样），所以速度不变时读的都是整数帧 = 原样拷贝，没有插值损失；
-// 起点是每一遍各自从拍算的：对拍的误差 < 1 帧，放多少遍都不累积。
-// 变速（dbeat 在块之间变了）：θ 每个采样走 dbeat / 录制时的 dbeat 帧，按这个比例变速读（Lagrange 插值），
+// 每一遍从格点那个采样起就是满音量；交叉淡化在那一点之前走完（和门同一个习惯：抓在拍点上的底鼓，每一遍的鼓头都完整）：
+// - 速度不变、mix = 1 时，每一遍的第一个采样和录下来的第一个采样逐位相同，往后一直到下一个交叉淡化区之前都是原样拷贝。
+// - 不连续点 = 格点、改长度生效的那一点、松开点。交叉淡化在每个不连续点之前的 kXfadeMs 里：
+//       输出 = 原来在放的 × (1 - t) + 引入段 × t        t = 升余弦，0 → 1，到那一点正好走完
+//   「原来在放的」= 上一段接着往下放（上一遍的尾巴）；第一遍开始之前 = 现场，所以录制的最后 kXfadeMs 里
+//   输出已经不是纯直通，而是现场淡到引入段。
+//   「引入段」= 新的一段往回接出去的那一截：新的一段在那一点上读录音的第 p 帧，引入段就是第 p - kXfadeMs .. p 帧。
+//   格点上 p = 0，引入段 = 第 -kXfadeMs .. -1 帧 = 抓取点之前的那 kXfadeMs（「预卷」）：淡进来的是这段录音本来的前文，
+//   接到第 0 帧是天然连续的。改长度的那一点不在格点上时 p > 0，引入段是录音里紧挨着的前一截（不够的部分接预卷）。
+//   松开点的引入段 = 现场：atBeat 那个采样起输出和输入逐位相同，从 roll 回现场的淡化在它之前的 kXfadeMs 里。
+// - 预卷：arm 之后等抓取点的时候一直记着最近 kXfadeMs 的输入（全场没在走时也记），开始录的那一刻它就是预卷。
+//   抓取点之前没调过 process()（没有历史）= 预卷是静音；调过但不够 kXfadeMs = 缺的那一截是静音。
+// - 两个不连续点挨得比 kXfadeMs 还近（改长度的那一点不在格点上又紧挨着格点、刚开始放就松开）：一层套一层地淡——
+//   先淡到前一个点的引入段，再把这个结果淡到后一个点的引入段，仍然连续。
+// 淡化长度按帧格上的帧算，变速时略有伸缩。一遍不会短于 2 × kXfadeMs（太短的长度按这个算），所以从一个格点到下一个
+// 格点，至少前 kXfadeMs 是原样的（除非中间紧跟着一个不在格点上的改长度 / 松开点）。
+//
+// 读的位置从绝对拍算（不是自己往前数）：录到离结尾还有 2 × kXfadeMs 时（第一遍的引入段开始之前）定下一张「帧格」
+// （θ = (拍 - g0) / 当时的 dbeat，第 θ 帧 = 录下来的第 θ 帧），之后每个采样由它的拍算出 θ，再算出在第几遍、这一遍里的第几帧。
+// 格点取整到帧（第一个「拍 ≥ 格点」的采样），所以速度不变时读的都是整数帧 = 原样拷贝，没有插值损失
+// （离整数帧不到 kBeatEps 帧的都按整数帧读：拍是浮点数，算出来的位置带着 1e-8 帧量级的零头）；
+// 格点是每一遍各自从拍算的：对拍的误差 < 1 帧，放多少遍都不累积。
+// 变速（dbeat 在块之间变了）：θ 每个采样走 dbeat / 定帧格时的 dbeat 帧，按这个比例变速读（Lagrange 插值），
 // 所以 roll 一直对在拍上；音高跟着速度变，和没开 keylock 的 deck 一样。录制中途变速：照常一帧一帧录，
-// 录完时按当时的速度定帧格（之前录的那一点点速度差不管）。
-// 每个不连续的地方（回绕、改长度、进 roll）：新的一段开头 kXfadeMs 里，从「上一段接着往下放」交叉淡化过来
-// （进 roll 时上一段 = 现场；所以多录 kXfadeMs 的尾巴）。淡化长度按录下来的帧算，变速时略有伸缩。
-// 一段不会短于 2 × kXfadeMs（太短的长度按这个算）。两个不连续点挨得比 kXfadeMs 还近时只淡化最近的一个。
+// 按定帧格时的速度算（之前、之后录的那一点点速度差不管）。
+// 录完之后还接着录一小段尾巴，录到「一遍按拍算有多少帧」+ 8 帧为止。交叉淡化用不着它（引入段在录音前面，不在后面）；
+// 留着是因为：格点取整后某一遍可能比录的那一遍多 1 帧，变速时插值要多读 2 帧；录制中途慢下来时，按定帧格时的速度算
+// 一遍比实际录到的帧数长（慢了 3% 就长 3%），多出来的这一截就接着录现场补上。缓冲装不下的（录了快 4 秒又慢下来
+// 超过 1/64）和没录到的帧 = 静音。
 // 最长 4 拍 @ 60 BPM = 4 秒，超过的按 4 秒录。全场没在走（dbeat ≤ 0）时直通。
-// 定位到中间重新开始：从 captureBeat 之前预跑过来，状态完全一样；从录制中途开始，没录到的部分是静音。
+// 松开点不晚于第一遍的格点（还没开始放）= 取消，全程直通。
+// 定位到中间重新开始：从 captureBeat 之前至少 kXfadeMs 预跑过来，状态完全一样；从录制中途开始，没录到的部分
+// （连同预卷）是静音。
 class Roll {
   public:
     static constexpr int kMaxSeconds = 4;
@@ -447,8 +491,8 @@ class Roll {
     void init(int sampleRate) {
         m_xf = dspd::msToFrames(kXfadeMs, sampleRate);
         m_maxFrames = static_cast<long long>(kMaxSeconds) * sampleRate;
-        m_cap = m_maxFrames + m_maxFrames / 64 + m_xf + 8;
-        m_buf.assign(static_cast<size_t>(m_cap) * 2, 0.0f);
+        m_cap = m_maxFrames + m_maxFrames / 64 + 8;
+        m_buf.assign(static_cast<size_t>(m_xf + m_cap) * 2, 0.0f); // 预卷 m_xf 帧 + 录音（含尾巴）
         m_mix.init(sampleRate, kParamSmoothMs);
         m_mix.set(1.0f);
         reset();
@@ -458,6 +502,8 @@ class Roll {
         m_nEvt = 0;
         m_hasRel = false;
         m_recFrom = m_recTo = 0;
+        m_histPos = m_histN = 0;
+        m_started = false;
         m_segValid = false;
         m_nextBeat = -dspd::kHuge;
         m_mix.snap();
@@ -471,15 +517,18 @@ class Roll {
         m_nEvt = 0;
         m_hasRel = false;
         m_recFrom = m_recTo = 0;
+        m_histPos = m_histN = 0;
+        m_started = false;
         m_segValid = false;
     }
-    // 新长度 ≤ 录下来的长度（长了按录下来的算）；atBeat 早于录完的那一拍 = 录完起生效。最多 kMaxLenEvents 次
+    // 新长度 ≤ 录下来的长度（长了按录下来的算）；atBeat 早于录完的那一拍 = 录完起生效。最多 kMaxLenEvents 次。
+    // 帧格定了以后才调、而 atBeat 已经过去或者离现在不到 kXfadeMs：推迟到「现在 + kXfadeMs」（淡化要在那一点之前走完）
     void setLength(double atBeat, double newLengthBeats) {
         if (m_phase == Idle || m_nEvt >= kMaxLenEvents || !(newLengthBeats > 0.0)) {
             return;
         }
-        if (m_phase == Rolling && atBeat < m_nextBeat) {
-            atBeat = m_nextBeat; // 已经过去的拍：从下一个采样起（照样有交叉淡化）
+        if (m_phase == Rolling) {
+            atBeat = std::max(atBeat, m_nextBeat + m_xf * m_capDbeat);
         }
         int i = m_nEvt;
         while (i > 0 && m_evt[i - 1].atBeat > atBeat) {
@@ -493,13 +542,13 @@ class Roll {
             grid();
         }
     }
-    // 还没开始放（等着 / 录着）就到了 atBeat = 取消
+    // atBeat 不晚于第一遍的格点（还没开始放）= 取消。帧格定了以后才调：同 setLength，最早「现在 + kXfadeMs」
     void release(double atBeat) {
         if (m_phase == Idle) {
             return;
         }
-        if (m_phase == Rolling && atBeat < m_nextBeat) {
-            atBeat = m_nextBeat;
+        if (m_phase == Rolling) {
+            atBeat = std::max(atBeat, m_nextBeat + m_xf * m_capDbeat);
         }
         m_hasRel = true;
         m_relBeat = atBeat;
@@ -507,10 +556,12 @@ class Roll {
             grid();
         }
     }
-    bool active() const { return m_phase != Idle; }     // arm 了，还没 release 完
-    bool rolling() const { return m_phase == Rolling; } // 录完了，在重放
+    bool active() const { return m_phase != Idle; }                  // arm 了，还没 release 完
+    bool rolling() const { return m_phase == Rolling && m_started; } // 录完了，在重放
 
     void process(const float* in, float* out, int frames, double beat0, double dbeat) {
+        const double xf = m_xf;
+        const double fixAhead = 2.0 * m_xf; // 离录完还有这么多帧时定帧格（也是一段最短的长度）
         for (int i = 0; i < frames; ++i) {
             const float l = in[2 * i], r = in[2 * i + 1];
             float ol = l, orr = r;
@@ -527,72 +578,121 @@ class Roll {
                         }
                         // 正常是 0；从录制中途才开始处理时 = 已经错过的帧数（那一段是静音）
                         const double k0 = std::min(std::floor(x + kBeatEps), static_cast<double>(m_cap));
-                        m_recFrom = m_recTo = static_cast<long long>(k0);
-                        m_phase = Capture;
+                        beginCapture(static_cast<long long>(k0));
                     }
                 }
                 if (m_phase == Capture) {
-                    const double y = (b - (m_capBeat + m_len0)) / dbeat;
+                    // y = 按现在的速度，离录完还差多少帧（负的）
+                    const double y = (b - m_capBeat) / dbeat - std::max(m_len0 / dbeat, fixAhead);
                     if (m_hasRel && (b - m_relBeat) / dbeat >= -kBeatEps) {
                         m_phase = Idle;
-                    } else if (y >= -kBeatEps || m_recTo >= m_maxFrames) {
-                        if (y < -kBeatEps) {
-                            m_len0 = b - m_capBeat; // 录制中途慢下来、缓冲满了：录到哪算哪
+                    } else if (y >= -fixAhead - kBeatEps || m_recTo >= m_maxFrames - 2 * m_xf) {
+                        if (y < -fixAhead - kBeatEps) {
+                            m_len0 = (b - m_capBeat) + fixAhead * dbeat; // 录制中途慢下来、缓冲快满了：再录 2 × kXfadeMs 就收
                         }
-                        // 这个采样是重放的第一帧：帧格定在这里（它的 θ = 已经录的帧数）
+                        // 帧格定在这里：这个采样的 θ = 已经录的帧数。第一遍的格点还在 2 × kXfadeMs 之后，
+                        // 它的引入段（最后 kXfadeMs）开始时帧格已经有了；这之后再变速，读的位置也是连续的。
                         m_capDbeat = dbeat;
                         m_g0 = b - static_cast<double>(m_recTo) * dbeat;
                         m_phase = Rolling;
-                        grid();
+                        m_started = false;
+                        grid(); // 松开点不晚于第一遍的格点时在这里取消（→ Idle）
                     }
                 }
                 if (m_phase == Capture || m_phase == Rolling) {
-                    const long long limit =
-                            m_phase == Capture ? m_cap : std::min(m_cap, m_capFrames + m_capFrames / 64 + m_xf + 8);
+                    const long long limit = m_phase == Capture ? m_cap : m_recLimit;
                     if (m_recTo < limit) {
-                        m_buf[static_cast<size_t>(m_recTo) * 2] = l;
-                        m_buf[static_cast<size_t>(m_recTo) * 2 + 1] = r;
+                        float* d = frame(m_recTo);
+                        d[0] = l;
+                        d[1] = r;
                         ++m_recTo;
                     }
                 }
                 if (m_phase == Rolling) {
-                    rolled = true;
                     const double th = (b - m_g0) / m_capDbeat;
                     const double the = th + kBeatEps;
-                    float w = m_mix.next();
-                    if (m_hasRel && the >= m_relC) {
-                        const double since = th - m_relC;
-                        if (since >= m_xf) {
-                            m_phase = Idle;
-                            w = 0.0f;
-                        } else {
-                            w *= static_cast<float>(1.0 - dspd::raisedCos(since / m_xf));
+                    if (m_hasRel && the >= m_relTheta) {
+                        m_phase = Idle; // 松开点（第一个「拍 ≥ atBeat」的采样）：从这个采样起就是现场
+                    } else {
+                        rolled = true;
+                        if (the >= static_cast<double>(m_capFrames)) {
+                            m_started = true;
                         }
-                    }
-                    if (w > 0.0f) {
-                        if (!m_segValid || the < m_seg.jd || the >= m_seg.end) {
-                            findSeg(the, m_seg);
-                            m_segValid = true;
-                        }
-                        float rl, rr;
-                        readSlice(th - m_seg.R, rl, rr);
-                        const double since = th - m_seg.jd;
-                        if (since < m_xf) {
-                            const float f = static_cast<float>(dspd::raisedCos(since / m_xf));
-                            float pl = l, pr = r;
-                            if (!m_seg.prevLive) {
-                                readSlice(th - m_seg.prevR, pl, pr);
+                        const float w = m_mix.next();
+                        if (w > 0.0f) {
+                            if (!m_segValid || the < m_seg.jd || the >= m_seg.end) {
+                                findSeg(the, m_seg);
+                                m_segValid = true;
+                                m_leadValid = false;
                             }
-                            rl = pl * (1.0f - f) + rl * f;
-                            rr = pr * (1.0f - f) + rr * f;
+                            // v = 这个采样上 roll 这一路出什么。先是这一段本身（第一遍之前 = 现场）
+                            bool wet = !m_seg.live;
+                            float vl = l, vr = r;
+                            if (wet) {
+                                readSlice(th - m_seg.R, vl, vr);
+                            }
+                            // 再看后面的不连续点 J：进了它之前的 kXfadeMs，就往它的引入段淡。
+                            // 通常只有一个；挨得很近时接着看再后面的一个（那一段不缓存，现算）。
+                            double J = m_seg.end;
+                            if (the >= J - xf) {
+                                wet = true;
+                                const Seg* nx = nullptr;
+                                Seg deep;
+                                for (;;) {
+                                    const float t = static_cast<float>(dspd::raisedCos((th - J) / xf + 1.0));
+                                    const bool rel = m_hasRel && J >= m_relC;
+                                    float pl = l, pr = r; // 松开点的引入段 = 现场
+                                    if (!rel) {
+                                        if (nx == nullptr) {
+                                            if (!m_leadValid) {
+                                                findSeg(J, m_lead);
+                                                m_leadValid = true;
+                                            }
+                                            nx = &m_lead;
+                                        } else {
+                                            findSeg(J, deep);
+                                            nx = &deep;
+                                        }
+                                        readSlice(th - nx->R, pl, pr);
+                                    }
+                                    vl = vl * (1.0f - t) + pl * t;
+                                    vr = vr * (1.0f - t) + pr * t;
+                                    if (rel) {
+                                        break;
+                                    }
+                                    J = nx->end;
+                                    if (the < J - xf) {
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!wet) {
+                                // 还是纯现场（第一遍的引入段之前）：原样
+                            } else if (w >= 1.0f) {
+                                ol = vl; // 不写成 l × 0 + v × 1：-ffast-math 下那样不保证逐位相同
+                                orr = vr;
+                            } else {
+                                ol = l * (1.0f - w) + vl * w;
+                                orr = r * (1.0f - w) + vr * w;
+                            }
                         }
-                        ol = l * (1.0f - w) + rl * w;
-                        orr = r * (1.0f - w) + rr * w;
                     }
                 }
             }
+            if (m_phase == Wait) {
+                // 还在等抓取点：把这一帧记进预卷的环（开始录的那个采样不进来，它是第 0 帧）
+                float* d = &m_buf[static_cast<size_t>(m_histPos) * 2];
+                d[0] = l;
+                d[1] = r;
+                if (++m_histPos == m_xf) {
+                    m_histPos = 0;
+                }
+                if (m_histN < m_xf) {
+                    ++m_histN;
+                }
+            }
             if (!rolled) {
-                m_mix.snap(); // 没在放的时候 mix 听不见，不用滑
+                m_mix.snap(); // 帧格还没定 / 已经松开：mix 听不见，不用滑
             }
             out[2 * i] = ol;
             out[2 * i + 1] = orr;
@@ -601,35 +701,60 @@ class Roll {
     }
 
   private:
-    enum Phase { Idle, Wait, Capture, Rolling };
+    enum Phase { Idle, Wait, Capture, Rolling }; // Rolling = 帧格定了（第一遍开始之前 2 × kXfadeMs 起）
     struct Evt {
         double atBeat = 0.0, len = 0.0;
         double c = 0.0; // 从帧格的第几帧起生效
         double l = 0.0; // 长度（帧格上的帧数，可以带小数）
     };
-    // 一段连续的重放：θ 在 [jd, end) 里读第 θ - R 帧（R = 这一遍的起点）
+    // 一段连续的重放：θ 在 [jd, end) 里读第 θ - R 帧（R = 这一遍的格点）。end = 下一个不连续点。
+    // 它的引入段 = θ 在 [jd - kXfadeMs, jd) 里也读第 θ - R 帧。
     struct Seg {
         double jd = 0.0, end = 0.0, R = 0.0;
-        bool prevLive = true; // 上一段是现场（刚进 roll）
-        double prevR = 0.0;   // 上一段那一遍的起点（接着往下放 = 读 θ - prevR）
+        bool live = false; // 第一遍开始之前：这一段 = 现场
     };
 
-    // 第 n 遍的起点：第一个「拍 ≥ captureBeat + n × 长度」的帧
+    // 第 n 遍的格点：第一个「拍 ≥ captureBeat + n × 长度」的帧
     double passStart(double n, double len) const { return std::ceil(m_rho0 + n * len - kBeatEps); }
 
-    // 录完 / 改了长度 / 定了松开点之后：把拍换成帧格上的帧
+    // 录音的第 j 帧（-m_xf ≤ j < m_cap；负的 = 预卷）
+    float* frame(long long j) { return &m_buf[static_cast<size_t>(j + m_xf) * 2]; }
+    const float* frame(long long j) const { return &m_buf[static_cast<size_t>(j + m_xf) * 2]; }
+
+    // 开始录：k0 = 已经错过的帧数（正常是 0）。等的时候预卷记在缓冲最前面 m_xf 帧里，当环用；
+    // 这里把它按时间顺序摆好（最新的一帧 = 第 -1 帧）。原地转，不分配。
+    void beginCapture(long long k0) {
+        if (k0 == 0) {
+            std::rotate(m_buf.begin(), m_buf.begin() + 2 * m_histPos, m_buf.begin() + 2 * m_xf);
+            m_recFrom = -static_cast<long long>(m_histN);
+        } else {
+            m_recFrom = k0; // 中间缺了一截：之前记的不是紧挨着的前文，不用
+        }
+        m_recTo = k0;
+        m_phase = Capture;
+    }
+
+    // 定帧格 / 改了长度 / 定了松开点之后：把拍换成帧格上的帧
     void grid() {
         const double minLen = 2.0 * m_xf;
         m_rho0 = (m_capBeat - m_g0) / m_capDbeat;
         m_len0Theta = std::max(m_len0 / m_capDbeat, minLen);
         m_capFrames = static_cast<long long>(passStart(1.0, m_len0Theta));
+        // 录到哪为止：一遍最多读到第 ceil(长度) - 1 帧，插值再往后 2 帧
+        m_recLimit = std::min(m_cap, std::max(m_capFrames, static_cast<long long>(std::ceil(m_len0Theta))) + 8);
         for (int i = 0; i < m_nEvt; ++i) {
             Evt& e = m_evt[i];
             e.c = std::max(static_cast<double>(m_capFrames), std::ceil((e.atBeat - m_g0) / m_capDbeat - kBeatEps));
             e.l = std::min(std::max(e.len / m_capDbeat, minLen), m_len0Theta);
         }
         if (m_hasRel) {
-            m_relC = std::ceil((m_relBeat - m_g0) / m_capDbeat - kBeatEps);
+            // 松开点在帧格上的位置。淡化按取整到帧的 m_relC 算（速度不变时采样都在整数帧上，两个数是一回事）；
+            // 回现场按不取整的 m_relTheta 判：变速后采样落在帧和帧之间，也是第一个到了 atBeat 的采样就回，不多等一帧
+            m_relTheta = (m_relBeat - m_g0) / m_capDbeat;
+            m_relC = std::ceil(m_relTheta - kBeatEps);
+            if (m_relC <= static_cast<double>(m_capFrames)) {
+                m_phase = Idle; // 还没开始放就松开 = 取消（这时输出还是纯现场：引入段最早从格点前 kXfadeMs 开始）
+            }
         }
         m_segValid = false;
     }
@@ -656,50 +781,75 @@ class Roll {
         jd = std::max(r, c);
         end = std::min(rn, nextC);
     }
+    // θ = the 所在的那一段（the < 松开点）。传不连续点 J 本身 = 从 J 开始的那一段
     void findSeg(double the, Seg& s) const {
-        findCore(the, s.R, s.jd, s.end);
-        s.prevLive = s.jd <= static_cast<double>(m_capFrames);
-        if (!s.prevLive) {
-            double jd, end;
-            findCore(s.jd - 0.5, s.prevR, jd, end);
+        if (the < static_cast<double>(m_capFrames)) {
+            s.live = true;
+            s.R = 0.0;
+            s.jd = -dspd::kHuge;
+            s.end = static_cast<double>(m_capFrames);
+        } else {
+            s.live = false;
+            findCore(the, s.R, s.jd, s.end);
+        }
+        if (m_hasRel) {
+            s.end = std::min(s.end, m_relC);
         }
     }
-    // 读录下来的第 p 帧（可以带小数）；没录到的帧 = 0
+    // 读录音的第 p 帧（可以带小数；负的 = 预卷）；没录到的帧 = 0。
+    // 小数部分离整数不到 kBeatEps 的按整数帧读（原样拷贝，不过插值）；中间的小数相应拉开一点，位置仍然连续。
     void readSlice(double p, float& l, float& r) const {
-        if (p < 0.0) {
-            p = 0.0;
-        }
         const double fl = std::floor(p);
-        const long long i = static_cast<long long>(fl);
+        long long i = static_cast<long long>(fl);
+        double t = p - fl;
+        if (t <= kBeatEps || t >= 1.0 - kBeatEps) {
+            if (t > 0.5) {
+                ++i;
+            }
+            if (i >= m_recFrom && i < m_recTo) {
+                const float* s = frame(i);
+                l = s[0];
+                r = s[1];
+            } else {
+                l = 0.0f;
+                r = 0.0f;
+            }
+            return;
+        }
+        t = (t - kBeatEps) / (1.0 - 2.0 * kBeatEps);
         float w[4];
-        dspd::lagrange4(p - fl, w);
+        dspd::lagrange4(t, w);
         float sl = 0.0f, sr = 0.0f;
         for (int k = 0; k < 4; ++k) {
             const long long j = i - 1 + k;
             if (j >= m_recFrom && j < m_recTo) {
-                sl += w[k] * m_buf[static_cast<size_t>(j) * 2];
-                sr += w[k] * m_buf[static_cast<size_t>(j) * 2 + 1];
+                const float* s = frame(j);
+                sl += w[k] * s[0];
+                sr += w[k] * s[1];
             }
         }
         l = sl;
         r = sr;
     }
 
-    std::vector<float> m_buf;
+    std::vector<float> m_buf; // [0, m_xf) = 预卷（第 -m_xf .. -1 帧），后面 = 录音的第 0 帧起
     int m_xf = 88;
-    long long m_maxFrames = 0, m_cap = 0;
+    long long m_maxFrames = 0, m_cap = 0; // m_cap = 最多录多少帧（不算预卷）
     Phase m_phase = Idle;
     double m_capBeat = 0.0, m_len0 = 0.0;
     Evt m_evt[kMaxLenEvents];
     int m_nEvt = 0;
     bool m_hasRel = false;
-    double m_relBeat = 0.0, m_relC = 0.0;
-    long long m_recFrom = 0, m_recTo = 0; // 已经录了 [m_recFrom, m_recTo) 这些帧
-    // 帧格（录完时定）
+    double m_relBeat = 0.0, m_relTheta = 0.0, m_relC = 0.0;
+    long long m_recFrom = 0, m_recTo = 0; // 已经有了 [m_recFrom, m_recTo) 这些帧（m_recFrom < 0 = 带着预卷）
+    int m_histPos = 0, m_histN = 0;       // 等抓取点时的预卷环：下一帧写在哪、已经有几帧
+    // 帧格
     double m_g0 = 0.0, m_capDbeat = 1.0, m_rho0 = 0.0, m_len0Theta = 1.0;
-    long long m_capFrames = 0;
-    Seg m_seg;
-    bool m_segValid = false;
+    long long m_capFrames = 0; // 第一遍的格点 = 录的那一遍有多少帧
+    long long m_recLimit = 0;  // 连尾巴一共录到第几帧为止
+    bool m_started = false;    // 过了第一遍的格点
+    Seg m_seg, m_lead;         // 现在这一段；它后面那一段（进了引入段才算）
+    bool m_segValid = false, m_leadValid = false;
     double m_nextBeat = 0.0;
     dspd::Slew m_mix;
 };

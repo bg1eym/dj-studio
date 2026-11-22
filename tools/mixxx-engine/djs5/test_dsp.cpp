@@ -480,11 +480,27 @@ void testAlignDelay() {
 
 // ================================================================ TransGate
 
+// 独立写一遍 TransGate 注释里那张表（开着 / 关着的那一段都不比一个沿短时）：u = 在周期里走了多少拍
+double gateTable(double u, double edge, double period, double on, double depth) {
+    double open;
+    if (u < on - edge) {
+        open = 1.0;
+    } else if (u < on) {
+        open = 0.5 - 0.5 * std::cos(kPi * (on - u) / edge); // 关门的沿：到 on 走完
+    } else if (u < period - edge) {
+        open = 0.0;
+    } else {
+        open = 0.5 - 0.5 * std::cos(kPi * (u - (period - edge)) / edge); // 开门的沿：到周期起点走完
+    }
+    return 1.0 - depth * (1.0 - open);
+}
+
 void testTransGate() {
     const std::string p = "transgate.";
     const int sr = 44100;
     const double dbeat = 128.0 / 60.0 / sr;
     const double edgeFrames = kExpGateEdgeMs * sr / 1000.0;
+    const double edge = edgeFrames * dbeat;    // 沿的长度（拍）
     const double stepLimit = 2.0 / edgeFrames; // 斜率限制：每个采样最多这么多
     const int total = static_cast<int>(8.0 / dbeat);
     const Buf wn = noise(total, 0.25, 11u);
@@ -502,17 +518,131 @@ void testTransGate() {
         g.set(0.5, 0.5, 0.0);
         check(p + "depth0_identity_diff", maxDiff(run(g, wn, {512}), wn), "==", 0.0);
     }
-    // 纯函数：开着 = 1，关着 = 1 - depth
+    // 纯函数：开着 = 1，关着 = 1 - depth；两条沿都在那一点之前走完
     {
         TransGate g;
         g.init(sr);
         g.set(0.5, 0.5, 0.8);
+        const double on = 0.25;
+        check(p + "edge_beats_err", std::fabs(TransGate::edgeBeats(dbeat, sr) - edge), "<=", 1e-15);
         check(p + "gain_open", g.gain(0.1, dbeat), "==", 1.0);
         check(p + "gain_at_beat", g.gain(1.0, dbeat), "==", 1.0);
+        // u = 0（周期起点）：已经全开
+        check(p + "gain_at_period_start", std::min(g.gain(0.0, dbeat), std::min(g.gain(0.5, dbeat), g.gain(3.5, dbeat))),
+                "==", 1.0);
         check(p + "gain_closed_err", std::fabs(g.gain(0.4, dbeat) - 0.2), "<=", 1e-12);
+        // u = on（关的那一点）：已经关到底 = 1 - depth；之后一直到开门的沿之前都是
+        check(p + "gain_at_close_point_err",
+                std::max(std::fabs(g.gain(on, dbeat) - 0.2), std::fabs(g.gain(3.0 + on, dbeat) - 0.2)), "<=", 1e-9);
+        check(p + "gain_after_close_point_err", std::fabs(g.gain(on + 0.5 * edge, dbeat) - 0.2), "<=", 1e-12);
+        check(p + "gain_before_open_edge_err", std::fabs(g.gain(0.5 - edge, dbeat) - 0.2), "<=", 1e-9);
+        // 关门的沿 = [on - 沿, on)：起点还是 1，正中是一半
+        check(p + "gain_close_edge_start_err", std::fabs(g.gain(on - edge, dbeat) - 1.0), "<=", 1e-9);
+        check(p + "gain_close_edge_half_err", std::fabs(g.gain(on - 0.5 * edge, dbeat) - 0.6), "<=", 1e-9);
+        check(p + "gain_open_edge_half_err", std::fabs(g.gain(0.5 - 0.5 * edge, dbeat) - 0.6), "<=", 1e-9);
         check(p + "gain_static_err",
                 std::fabs(TransGate::gainAt(0.4, TransGate::edgeBeats(dbeat, sr), 0.5, 0.5, 0.8, 0.0) - g.gain(0.4, dbeat)),
                 "==", 0.0);
+        // 带相位：周期起点 = phase + n × period
+        g.set(0.75, 0.3, 0.9, 0.123);
+        check(p + "phase_period_start", g.gain(0.123 + 3 * 0.75, dbeat), "==", 1.0);
+        check(p + "phase_close_point_err", std::fabs(g.gain(0.123 + 2 * 0.75 + 0.3 * 0.75, dbeat) - 0.1), "<=", 1e-9);
+    }
+    // 和那张表逐点比（几组周期 / 占空 / 深度 / 相位，每组扫 3 个周期）；顺带看每一步的变化（连续）和上下界
+    // 一步 = 沿的 1/400：升余弦最陡 π/2 / 沿，所以一步最多变 depth × π/2 / 400
+    auto scan = [&](double period, double duty, double depth, double phase, bool table, double& tableErr, double& lo,
+                        double& hi) {
+        const double on = duty * period, d = edge / 400.0;
+        double worstStep = 0.0, prev = TransGate::gainAt(phase - period, edge, period, duty, depth, phase);
+        lo = hi = prev;
+        tableErr = 0.0;
+        for (double x = -period + d; x < 2.0 * period; x += d) {
+            const double g = TransGate::gainAt(phase + x, edge, period, duty, depth, phase);
+            worstStep = std::max(worstStep, std::fabs(g - prev));
+            prev = g;
+            lo = std::min(lo, g);
+            hi = std::max(hi, g);
+            if (table) {
+                const double u = x - std::floor(x / period) * period;
+                tableErr = std::max(tableErr, std::fabs(g - gateTable(u, edge, period, on, depth)));
+            }
+        }
+        return worstStep / (depth * 0.5 * kPi / 400.0); // 1 = 正好是升余弦最陡的地方
+    };
+    {
+        const double sets[5][4] = {
+                {0.5, 0.5, 1.0, 0.0}, {0.75, 0.3, 0.9, 0.123}, {0.25, 0.75, 0.5, -3.3}, {1.0, 0.0625, 0.8, 17.0},
+                {0.125, 0.9, 1.0, 0.01}};
+        double tableErr = 0.0, slope = 0.0, over = 0.0, under = 0.0;
+        for (const auto& s : sets) {
+            double e, lo, hi;
+            slope = std::max(slope, scan(s[0], s[1], s[2], s[3], true, e, lo, hi));
+            tableErr = std::max(tableErr, e);
+            over = std::max(over, hi - 1.0);
+            under = std::max(under, (1.0 - s[2]) - lo);
+        }
+        check(p + "table_err", tableErr, "<=", 1e-9);
+        check(p + "table_max_slope_ratio", slope, "<=", 1.001);
+        check(p + "table_over_1", over, "<=", 0.0);
+        check(p + "table_under_closed", under, "<=", 1e-12);
+    }
+    // 开着的那一段比一个沿短（on = 0.4 × 沿）：取两条沿里小的那个 = 一个开不到 1 的尖，仍然连续；关的那一点照样关到底
+    {
+        const double period = 0.5, depth = 0.8, on = 0.4 * edge, duty = on / period;
+        auto g = [&](double u) { return TransGate::gainAt(7.0 + u, edge, period, duty, depth, 0.0); };
+        auto rc = [](double x) { return 0.5 - 0.5 * std::cos(kPi * x); };
+        double e, lo, hi;
+        check(p + "short_on_max_slope_ratio", scan(period, duty, depth, 0.0, false, e, lo, hi), "<=", 1.001);
+        const double peak = 1.0 - depth * (1.0 - rc(0.7)); // 尖顶：两条沿相交处，在周期起点之前 (沿 - on) / 2
+        check(p + "short_on_peak_err", std::fabs(g(-0.5 * (edge - on)) - peak), "<=", 1e-9);
+        check(p + "short_on_never_above_peak", hi - peak, "<=", 1e-9);
+        check(p + "short_on_floor_err", std::fabs(lo - (1.0 - depth)), "<=", 1e-12);
+        check(p + "short_on_close_point_err", std::fabs(g(on) - (1.0 - depth)), "<=", 1e-9);
+        // 周期起点：开门的沿走完了（1），关门的沿已经走了 0.6 → 取小的
+        check(p + "short_on_period_start_err", std::fabs(g(0.0) - (1.0 - depth * (1.0 - rc(0.4)))), "<=", 1e-9);
+        // 起点前 0.1 个沿：开门的沿 rc(0.9)、关门的沿 rc(0.5) → 0.5；起点前 0.8 个沿：rc(0.2) 和 1 → rc(0.2)
+        check(p + "short_on_min_of_edges_err",
+                std::max(std::fabs(g(-0.1 * edge) - (1.0 - depth * 0.5)),
+                        std::fabs(g(-0.8 * edge) - (1.0 - depth * (1.0 - rc(0.2))))),
+                "<=", 1e-9);
+    }
+    // 关着的那一段比一个沿短（off = 0.3 × 沿）：两条沿相加 = 一个关不到底的凹口，仍然连续、不超过 1；周期起点照样全开
+    {
+        const double period = 0.5, depth = 0.8, off = 0.3 * edge, on = period - off, duty = on / period;
+        auto g = [&](double u) { return TransGate::gainAt(7.0 + u, edge, period, duty, depth, 0.0); };
+        auto rc = [](double x) { return 0.5 - 0.5 * std::cos(kPi * x); };
+        double e, lo, hi;
+        check(p + "short_off_max_slope_ratio", scan(period, duty, depth, 0.0, false, e, lo, hi), "<=", 1.001);
+        check(p + "short_off_over_1", hi - 1.0, "<=", 0.0);
+        check(p + "short_off_period_start", g(0.0), "==", 1.0);
+        // 凹口最深处在两条沿的正中：开了 1 - sin(π/2 × off / 沿)
+        const double dip = 1.0 - depth * std::sin(0.5 * kPi * 0.3);
+        check(p + "short_off_dip_err", std::fabs(g(on - 0.5 * (edge - off)) - dip), "<=", 1e-9);
+        check(p + "short_off_floor_err", std::fabs(lo - dip), "<=", 1e-6);
+        // 关的那一点：关门的沿走完了（0），开门的沿已经走了 0.7
+        check(p + "short_off_close_point_err", std::fabs(g(on) - (1.0 - depth * (1.0 - rc(0.7)))), "<=", 1e-9);
+        // 关着的那一段 → 0：平滑地变成不关（接得上 duty ≥ 1 的恒 1）
+        scan(period, 1.0 - 1e-3 * edge / period, depth, 0.0, false, e, lo, hi);
+        check(p + "short_off_vanishes", 1.0 - lo, "<=", 2e-3);
+    }
+    // 周期比沿还短（听不出门了，只要求连续、有界）；duty = 0 一直关着，duty = 1 / depth = 0 恒 1；全场没在走 = 方的
+    {
+        double e, lo, hi, slope = 0.0, over = 0.0, under = 0.0;
+        const double sets[4][2] = {{0.3 * edge, 0.5}, {0.9 * edge, 0.2}, {1.7 * edge, 0.8}, {0.05 * edge, 0.37}};
+        for (const auto& s : sets) {
+            slope = std::max(slope, scan(s[0], s[1], 0.9, 0.2, false, e, lo, hi));
+            over = std::max(over, hi - 1.0);
+            under = std::max(under, 0.1 - lo);
+        }
+        check(p + "tiny_period_max_slope_ratio", slope, "<=", 1.001);
+        check(p + "tiny_period_over_1", over, "<=", 0.0);
+        check(p + "tiny_period_under_closed", under, "<=", 1e-12);
+        scan(0.5, 0.0, 0.8, 0.0, false, e, lo, hi);
+        check(p + "duty0_always_closed_err", std::max(std::fabs(lo - 0.2), std::fabs(hi - 0.2)), "<=", 1e-15);
+        scan(0.5, 1.0, 0.8, 0.0, false, e, lo, hi);
+        check(p + "duty1_always_open", lo, "==", 1.0);
+        check(p + "stopped_square_open", TransGate::gainAt(1.2, 0.0, 0.5, 0.5, 0.8, 0.0), "==", 1.0);
+        check(p + "stopped_square_closed_err", std::fabs(TransGate::gainAt(1.25, 0.0, 0.5, 0.5, 0.8, 0.0) - 0.2), "<=", 1e-15);
     }
     // 直流过门 = 增益本身：和纯函数一致；沿的长度 1–2 ms；每个采样的变化有界
     {
@@ -529,10 +659,14 @@ void testTransGate() {
         check(p + "process_vs_pure_gain", e, "<=", 1e-6);
         // 第一个周期：0.25 拍处关、0.5 拍处开
         const int closeAt = static_cast<int>(0.25 / dbeat), openAt = static_cast<int>(0.5 / dbeat);
-        int nClose = 0, nOpen = 0;
-        for (int i = closeAt - 200; i < closeAt + 400; ++i) {
+        int nClose = 0, nOpen = 0, firstMoving = -1, lastMoving = -1;
+        for (int i = closeAt - 400; i < closeAt + 400; ++i) {
             const float v = y[static_cast<size_t>(i) * 2];
-            nClose += (v > 1e-6f && v < 1.0f - 1e-6f) ? 1 : 0;
+            if (v > 1e-6f && v < 1.0f - 1e-6f) {
+                ++nClose;
+                firstMoving = firstMoving < 0 ? i : firstMoving;
+                lastMoving = i;
+            }
         }
         for (int i = openAt - 400; i < openAt + 200; ++i) {
             const float v = y[static_cast<size_t>(i) * 2];
@@ -540,13 +674,64 @@ void testTransGate() {
         }
         checkRange(p + "edge_close_ms", nClose * 1000.0 / sr, 1.0, 2.0);
         checkRange(p + "edge_open_ms", nOpen * 1000.0 / sr, 1.0, 2.0);
+        // 关门的沿整个在关的那一点之前：沿上最后一个采样在那一点之前不到 1 帧，第一个采样在那一点之前一个沿
+        checkRange(p + "edge_close_ends_before_point_frames", 0.25 / dbeat - lastMoving, 0.0, 1.0);
+        checkRange(p + "edge_close_starts_before_point_frames", 0.25 / dbeat - firstMoving, edgeFrames - 2.0, edgeFrames);
+        // 那一点上的采样（第一个「拍 ≥ 关的那一点」的）已经关到底
+        check(p + "closed_at_point", y[static_cast<size_t>(std::ceil(0.25 / dbeat)) * 2], "==", 0.0);
         // 开门的沿在拍点之前走完：拍点那个采样已经全开
         check(p + "open_at_beat", y[static_cast<size_t>(std::ceil(0.5 / dbeat)) * 2], "==", 1.0);
         check(p + "max_step", maxStep(y, 0, total), "<=", stepLimit);
-        // 占空比：增益 > 0.5 的时间 = duty + 一个沿（关的沿的前一半 + 开的沿的后一半）
-        const double expectDuty = 0.5 + edgeFrames * dbeat / 0.5;
-        check(p + "duty_err", std::fabs(static_cast<double>(openCount) / total - expectDuty), "<=", 0.002);
+        // 占空比：增益 > 0.5 的时间 = duty（开门的沿的后一半算进来，关门的沿的后一半算出去，正好抵消）
+        check(p + "duty_err", std::fabs(static_cast<double>(openCount) / total - 0.5), "<=", 0.002);
         check(p + "bounded_gain", maxAbs(y, 0, total), "<=", 1.0);
+    }
+    // 正好落在点上的鼓（120 BPM：一拍 22050 帧，周期起点和关的那一点都正好是采样）：
+    // 关的那一点上的脉冲出来只剩 (1 - depth) 倍，周期起点上的脉冲原样；沿的位置用沿中间的脉冲钉住
+    {
+        const double db120 = 120.0 / 60.0 / sr;
+        const int per = 22050, onF = 11025, half = 33, n = 4 * per + 512;
+        Buf x(static_cast<size_t>(n) * 2, 0.0f);
+        auto put = [&](int f) {
+            x[static_cast<size_t>(f) * 2] = 1.0f;
+            x[static_cast<size_t>(f) * 2 + 1] = -0.5f;
+        };
+        for (int k = 0; k < 4; ++k) {
+            put(k * per);                              // 周期起点
+            put(k * per + onF);                        // 关的那一点
+            put(k * per + onF - half);                 // 关门的沿中间
+            put(k * per + onF - 67);                   // 关门的沿开始之前（沿 = 66.15 帧）
+            put(k * per + onF + 1);                    // 关的那一点之后
+            put(k * per + per - half);                 // 开门的沿中间
+        }
+        const double depth = 0.8;
+        const double mid = 1.0 - depth * (0.5 + 0.5 * std::cos(kPi * half / edgeFrames));
+        double eStart = 0.0, eClose = 0.0, eMid = 0.0, eBefore = 0.0, eAfter = 0.0, eOpenMid = 0.0;
+        for (const std::vector<int>& pattern : {std::vector<int>{512}, std::vector<int>{1 << 30}, kIrregular}) {
+            TransGate g;
+            g.init(sr);
+            g.set(1.0, 0.5, depth);
+            const Buf y = runBlocks(x, pattern,
+                    [&](int start, int m, const float* i, float* o) { g.process(i, o, m, start * db120, db120); });
+            auto err = [&](int f, double gain) {
+                return std::max(std::fabs(y[static_cast<size_t>(f) * 2] - gain),
+                        std::fabs(y[static_cast<size_t>(f) * 2 + 1] + 0.5 * gain));
+            };
+            for (int k = 0; k < 4; ++k) {
+                eStart = std::max(eStart, err(k * per, 1.0));
+                eClose = std::max(eClose, err(k * per + onF, 1.0 - depth));
+                eMid = std::max(eMid, err(k * per + onF - half, mid));
+                eBefore = std::max(eBefore, err(k * per + onF - 67, 1.0));
+                eAfter = std::max(eAfter, err(k * per + onF + 1, 1.0 - depth));
+                eOpenMid = std::max(eOpenMid, err(k * per + per - half, 2.0 - depth - mid));
+            }
+        }
+        check(p + "impulse_on_period_start_diff", eStart, "==", 0.0);
+        check(p + "impulse_on_close_point_err", eClose, "<=", 1e-7);
+        check(p + "impulse_mid_close_edge_err", eMid, "<=", 1e-6);
+        check(p + "impulse_before_close_edge_diff", eBefore, "==", 0.0);
+        check(p + "impulse_after_close_point_err", eAfter, "<=", 1e-7);
+        check(p + "impulse_mid_open_edge_err", eOpenMid, "<=", 1e-6);
     }
     // 参数在块边界上一下改了（深度 0 → 1 时正好在关着的那一段；周期 / 相位改了门当场翻转）：不出爆音
     {
@@ -568,7 +753,7 @@ void testTransGate() {
                 {f1, f2, f3});
         check(p + "param_jump_max_step", maxStep(y, 0, total), "<=", stepLimit * 1.000001);
     }
-    // 块大小无关；从中间开始 = 一路放过来（相位只看绝对拍）
+    // 块大小无关（含开着 / 关着的那一段比沿短的）；从中间开始 = 一路放过来（相位只看绝对拍）
     auto mk = [&](TransGate& g) {
         g.init(sr);
         g.set(0.75, 0.3, 0.9, 0.123);
@@ -576,6 +761,18 @@ void testTransGate() {
     checkBlockIndep("transgate", [&](const std::vector<int>& pattern) {
         TransGate g;
         mk(g);
+        return run(g, wn, pattern, 17.3);
+    });
+    checkBlockIndep("transgate.short_on", [&](const std::vector<int>& pattern) {
+        TransGate g;
+        g.init(sr);
+        g.set(0.25, 0.4 * edge / 0.25, 0.9, 0.05);
+        return run(g, wn, pattern, 17.3);
+    });
+    checkBlockIndep("transgate.short_off", [&](const std::vector<int>& pattern) {
+        TransGate g;
+        g.init(sr);
+        g.set(0.25, 1.0 - 0.3 * edge / 0.25, 0.9, 0.05);
         return run(g, wn, pattern, 17.3);
     });
     {
@@ -604,15 +801,19 @@ void testTransGate() {
 
 // ================================================================ Roll
 
-// 独立算一遍「第 j 帧该读录音的第几帧」：只用拍和取整，不看实现（全场从 0 拍起，第 j 帧 = j × dbeat 拍）
+// 独立算一遍「速度不变、mix = 1 时每一帧该出什么」：只用拍和取整，不看实现（全场从 0 拍起，第 j 帧 = j × dbeat 拍）
 struct RollRef {
     double dbeat = 0.0, capBeat = 0.0, len0 = 0.0;
     std::vector<std::pair<double, double>> lens; // (从哪一拍起, 新长度)，按拍排好
+    double relBeat = -1.0;                       // 松开的那一拍；< 0 = 不松开
+    long long heardFrom = 0;                     // process() 从第几帧才开始调：更早的输入 Roll 没见过 = 静音
 
-    long long frameOf(double beat) const { return static_cast<long long>(std::ceil(beat / dbeat - 1e-6)); }
+    // 第一个「到了这一拍」的帧；余量 1e-4 帧（= kBeatEps：拍正好落在采样上时，浮点误差不能让它晚一帧）
+    long long frameOf(double beat) const { return static_cast<long long>(std::ceil(beat / dbeat - 1e-4)); }
     long long f0() const { return frameOf(capBeat); }
-    long long rollStart() const { return frameOf(capBeat + len0); }
-    // j ≥ rollStart()：u = 读录音的第几帧；since = 离上一个不连续点（回绕 / 改长度 / 进 roll）多少帧
+    long long rollStart() const { return frameOf(capBeat + len0); } // 第一遍的格点
+    long long relFrame() const { return relBeat < 0.0 ? (1LL << 60) : frameOf(relBeat); }
+    // j ≥ rollStart()：u = 读录音的第几帧；since = 离上一个不连续点（格点 / 改长度的那一点）多少帧
     void at(long long j, long long& u, long long& since) const {
         double len = len0;
         long long c = rollStart();
@@ -634,15 +835,79 @@ struct RollRef {
         u = j - r;
         since = j - std::max(r, c);
     }
+    // 录音的第 k 帧 = 输入的第 f0 + k 帧；k < 0 = 预卷（抓取点之前的输入，最多往回 xf 帧）
+    double rec(const Buf& in, long long k, int ch, int xf) const {
+        const long long j = f0() + k;
+        if (k < -xf || j < heardFrom || j >= framesOf(in)) {
+            return 0.0;
+        }
+        return in[static_cast<size_t>(j) * 2 + static_cast<size_t>(ch)];
+    }
+    // 每一帧该出什么。每个不连续点 J（格点、改长度的那一点、松开点）之前的 xf 帧里：
+    //   出 = 原来在放的 × (1 - t) + 引入段 × t，t = 升余弦，J - xf 处 0，J 处 1（J 那一帧已经是新的一段，满音量）
+    // 引入段 = 新的一段往回接出去的那一截（格点上 = 预卷）；松开点的引入段 = 现场。挨得近的点按先后一层套一层。
+    // xfade[j] = 第 j 帧在某个点之前的 xf 帧里；points = 各个格点 / 改长度的点（不含松开点）
+    Buf render(const Buf& in, int xf, std::vector<char>& xfade, std::vector<long long>* points = nullptr) const {
+        const long long total = framesOf(in), rs = rollStart(), rel = relFrame();
+        Buf out = in;
+        xfade.assign(static_cast<size_t>(total), 0);
+        if (rel <= rs) {
+            return out; // 还没开始放就松开 = 取消
+        }
+        struct Pt {
+            long long at, off; // 这一点在第几帧；新的一段在这一点上读录音的第几帧
+        };
+        std::vector<Pt> pts;
+        for (long long j = rs; j < std::min(rel, total + xf); ++j) {
+            long long u, since;
+            at(j, u, since);
+            if (since == 0) {
+                pts.push_back({j, u});
+                if (points != nullptr && j < total) {
+                    points->push_back(j);
+                }
+            }
+        }
+        auto fade = [&](long long j, long long J) { return 0.5 - 0.5 * std::cos(kPi * static_cast<double>(j - (J - xf)) / xf); };
+        size_t next = 0; // pts[next] = 还没到的第一个点
+        for (long long j = std::max(0LL, rs - xf); j < std::min(rel, total); ++j) {
+            while (next < pts.size() && pts[next].at <= j) {
+                ++next;
+            }
+            for (int ch = 0; ch < 2; ++ch) {
+                double v = in[static_cast<size_t>(j) * 2 + static_cast<size_t>(ch)]; // 第一遍之前 = 现场
+                if (j >= rs) {
+                    long long u, since;
+                    at(j, u, since);
+                    v = rec(in, u, ch, xf);
+                }
+                for (size_t k = next; k < pts.size() && pts[k].at - xf <= j; ++k) {
+                    const double t = fade(j, pts[k].at);
+                    v = v * (1.0 - t) + rec(in, pts[k].off - (pts[k].at - j), ch, xf) * t;
+                    xfade[static_cast<size_t>(j)] = 1;
+                }
+                if (j >= rel - xf) {
+                    const double t = fade(j, rel);
+                    v = v * (1.0 - t) + in[static_cast<size_t>(j) * 2 + static_cast<size_t>(ch)] * t;
+                    xfade[static_cast<size_t>(j)] = 1;
+                }
+                out[static_cast<size_t>(j) * 2 + static_cast<size_t>(ch)] = static_cast<float>(v);
+            }
+        }
+        return out;
+    }
 };
 
 void testRoll() {
     const std::string p = "roll.";
     const int sr = 44100;
     const int xf = static_cast<int>(std::lround(kExpXfadeMs * sr / 1000.0));
-    const double dbeat = 128.0 / 60.0 / sr; // 一拍 = 20671.875 帧：每一遍的起点都落在不同的小数上
+    const double dbeat = 128.0 / 60.0 / sr; // 一拍 = 20671.875 帧：每一遍的格点都落在不同的小数上
+    const double db120 = 120.0 / 60.0 / sr; // 一拍 = 22050 帧：抓取点 / 格点 / 松开点全都正好是采样
     const int total = static_cast<int>(11.0 / dbeat);
+    const int total120 = 11 * 22050;
     const Buf wn = noise(total, 0.25, 21u);
+    const Buf wn120 = noise(total120, 0.25, 22u);
 
     auto run = [&](Roll& r, const Buf& in, const std::vector<int>& pattern, double db, const ProcFn& pre = nullptr,
                        const std::vector<int>& splits = {}) {
@@ -655,26 +920,30 @@ void testRoll() {
                 },
                 splits);
     };
-    // 输出和「照参考读录音」差多少（只看离不连续点 ≥ xf 的帧）；passThrough = 进 roll 之前和输入差多少
-    auto contentDiff = [&](const Buf& in, const Buf& out, const RollRef& ref, long long until, double& passThrough) {
-        const long long rs = ref.rollStart(), f0 = ref.f0();
-        passThrough = maxDiff(in, out, 0, static_cast<int>(rs));
-        double d = 0.0;
-        for (long long j = rs; j < until; ++j) {
-            long long u, since;
-            ref.at(j, u, since);
-            if (since < xf) {
-                continue;
-            }
-            for (int c = 0; c < 2; ++c) {
-                d = std::max(d, std::fabs(static_cast<double>(out[static_cast<size_t>(j) * 2 + c]) -
-                                        in[static_cast<size_t>(f0 + u) * 2 + c]));
+    // 和参考逐帧比：交叉淡化区之外必须逐位相同（直通 / 原样拷贝），区里差 ≤ 1e-6（float 的舍入）
+    auto cmpRef = [&](const std::string& name, const Buf& in, const Buf& y, const RollRef& ref) {
+        std::vector<char> xfade;
+        const Buf e = ref.render(in, xf, xfade);
+        double dOut = 0.0, dIn = 0.0;
+        int nIn = 0; // 一共多少帧在淡化
+        for (int j = 0; j < framesOf(in); ++j) {
+            const double d = maxDiff(y, e, j, j + 1);
+            if (xfade[static_cast<size_t>(j)]) {
+                dIn = std::max(dIn, d);
+                ++nIn;
+            } else {
+                dOut = std::max(dOut, d);
             }
         }
-        return d;
+        check(p + name + ".outside_xfade_diff", y.size() == e.size() ? dOut : 1e9, "==", 0.0);
+        check(p + name + ".inside_xfade_diff", dIn, "<=", 1e-6);
+        return nIn;
+    };
+    auto sample = [](const Buf& b, long long j, int ch = 0) {
+        return static_cast<double>(b[static_cast<size_t>(j) * 2 + static_cast<size_t>(ch)]);
     };
 
-    // 录 1 拍、原样重放 6 遍：录的时候直通，之后每一遍都是录下来的那一段，起点对在拍上
+    // 录 1 拍、原样重放 6 遍：每一遍从格点起就是录下来的那一段（逐位相同），交叉淡化在格点之前的 2 ms 里
     {
         Roll r;
         r.init(sr);
@@ -684,25 +953,39 @@ void testRoll() {
         ref.dbeat = dbeat;
         ref.capBeat = 4.0;
         ref.len0 = 1.0;
-        double pass = 0.0;
-        const double d = contentDiff(wn, y, ref, total, pass);
-        check(p + "capture_passthrough_diff", pass, "==", 0.0);
-        check(p + "repeat_content_diff", d, "<=", 1e-6);
-        check(p + "bounded_excess", maxAbs(y, 0, total) - maxAbs(wn, 0, total), "<=", 1e-6);
-        // 回绕处的交叉淡化：第一帧还是「上一遍接着往下放」，之后 2 ms 里换到这一遍的开头
+        // 淡化的帧数：5 … 10 拍 6 个格点各 2 ms；11 拍的格点落在这段输入结束之后 1 帧，它的淡化还有 87 帧在里面
+        check(p + "repeat.xfade_frames", cmpRef("repeat", wn, y, ref), "==", 6 * xf + (xf - 1));
         const long long f0 = ref.f0(), r1 = ref.rollStart(), r2 = ref.frameOf(6.0);
-        check(p + "wrap_first_frame_continues_prev",
-                std::fabs(static_cast<double>(y[static_cast<size_t>(r2) * 2]) - wn[static_cast<size_t>(f0 + r2 - r1) * 2]),
-                "<=", 1e-6);
-        long long lastDiff = r2 - 1;
-        for (long long j = r2; j < r2 + 400; ++j) {
-            if (std::fabs(static_cast<double>(y[static_cast<size_t>(j) * 2]) - wn[static_cast<size_t>(f0 + j - r2) * 2]) > 1e-6) {
-                lastDiff = j;
+        // 录的时候直通，一直到第一遍的格点之前 2 ms（之后现场淡到预卷）
+        check(p + "capture_passthrough_diff", maxDiff(wn, y, 0, static_cast<int>(r1) - xf), "==", 0.0);
+        check(p + "bounded_excess", maxAbs(y, 0, total) - maxAbs(wn, 0, total), "<=", 1e-6);
+        // 每一遍：格点那一帧 = 录下来的第一帧，逐位相同；一直到下一个格点之前 2 ms 都是原样
+        double first = 0.0, body = 0.0;
+        for (int n = 1; n <= 6; ++n) {
+            const long long g = ref.frameOf(4.0 + n), gNext = ref.frameOf(5.0 + n);
+            first = std::max(first, std::max(std::fabs(sample(y, g, 0) - sample(wn, f0, 0)),
+                                            std::fabs(sample(y, g, 1) - sample(wn, f0, 1))));
+            for (long long j = g; j < std::min<long long>(gNext - xf, total); ++j) {
+                body = std::max(body, std::fabs(sample(y, j) - sample(wn, f0 + j - g)));
             }
         }
-        checkRange(p + "wrap_xfade_ms", (lastDiff - r2 + 1) * 1000.0 / sr, 1.8, 2.1);
+        check(p + "pass_first_sample_diff", first, "==", 0.0);
+        check(p + "pass_body_diff", body, "==", 0.0);
+        // 第一次回绕（6.0 拍，第一遍 → 第二遍）：淡化从格点前 2 ms 开始（再往前还是第一遍接着放），
+        // 格点前最后一帧已经几乎全是预卷，正中间两路各一半
+        long long firstDiff = r2;
+        for (long long j = r2 - 1; j >= r2 - 400; --j) {
+            if (std::fabs(sample(y, j) - sample(wn, f0 + j - r1)) > 1e-6) {
+                firstDiff = j;
+            }
+        }
+        checkRange(p + "wrap_xfade_before_point_ms", (r2 - firstDiff) * 1000.0 / sr, 1.8, 2.1);
+        check(p + "wrap_last_frame_is_preroll_err", std::fabs(sample(y, r2 - 1) - sample(wn, f0 - 1)), "<=", 1e-3);
+        check(p + "wrap_midpoint_is_half_err",
+                std::fabs(sample(y, r2 - xf / 2) - 0.5 * (sample(wn, f0 + r2 - xf / 2 - r1) + sample(wn, f0 - xf / 2))), "<=",
+                1e-6);
     }
-    // 1 → 1/2 → 1/4 → 1/8 拍，然后松开：每一段都读对，松开 2 ms 之后和输入逐位相同
+    // 1 → 1/2 → 1/4 → 1/8 拍，然后松开：每一段都读对；松开点那一帧起和输入逐位相同，淡化在它之前的 2 ms 里
     {
         Roll r;
         r.init(sr);
@@ -717,20 +1000,77 @@ void testRoll() {
         ref.capBeat = 4.0;
         ref.len0 = 1.0;
         ref.lens = {{6.0, 0.5}, {7.0, 0.25}, {7.75, 0.125}};
-        const long long rel = ref.frameOf(9.0);
-        double pass = 0.0;
-        check(p + "setlength_content_diff", contentDiff(wn, y, ref, rel, pass), "<=", 1e-6);
-        check(p + "release_passthrough_diff", maxDiff(wn, y, static_cast<int>(rel) + xf, total), "==", 0.0);
-        long long lastDiff = rel - 1;
-        for (long long j = rel; j < rel + 400; ++j) {
-            if (y[static_cast<size_t>(j) * 2] != wn[static_cast<size_t>(j) * 2]) {
-                lastDiff = j;
+        ref.relBeat = 9.0;
+        cmpRef("setlength", wn, y, ref);
+        const long long rel = ref.relFrame();
+        check(p + "release_passthrough_diff", maxDiff(wn, y, static_cast<int>(rel), total), "==", 0.0);
+        // 松开点之前：最后一帧已经几乎全是现场；淡化从 2 ms 之前开始（再往前是纯 roll）
+        check(p + "release_last_frame_is_live_err", std::fabs(sample(y, rel - 1) - sample(wn, rel - 1)), "<=", 1e-3);
+        long long firstDiff = rel;
+        for (long long j = rel - 1; j >= rel - 400; --j) {
+            long long u, since;
+            ref.at(j, u, since);
+            if (std::fabs(sample(y, j) - sample(wn, ref.f0() + u)) > 1e-6) {
+                firstDiff = j;
             }
         }
-        checkRange(p + "release_xfade_ms", (lastDiff - rel + 1) * 1000.0 / sr, 1.8, 2.1);
+        checkRange(p + "release_xfade_before_point_ms", (rel - firstDiff) * 1000.0 / sr, 1.8, 2.1);
         check(p + "release_done_active", r.active() ? 1.0 : 0.0, "==", 0.0);
     }
-    // mix = 0：全程和输入逐位相同
+    // 抓在拍点上的底鼓（120 BPM 正好在采样上；128 BPM 落在两个采样之间，抓的是拍点后的第一个采样）：
+    // 1 拍 → 1/2 → 1/4，每一遍的第一个采样都和录下来的第一个采样逐位相同（鼓头不被淡入削掉），
+    // 格点前一帧（淡化的最后一帧）不比在换的两路里大的那一路响
+    for (int k = 0; k < 2; ++k) {
+        const double db = k == 0 ? db120 : dbeat;
+        const std::string name = k == 0 ? "kick120." : "kick128.";
+        RollRef ref;
+        ref.dbeat = db;
+        ref.capBeat = 4.0;
+        ref.len0 = 1.0;
+        ref.lens = {{6.0, 0.5}, {7.0, 0.25}};
+        ref.relBeat = 8.0;
+        const long long f0 = ref.f0();
+        // 底噪（预卷 / 每一遍的尾巴都不是 0）+ 每拍一个底鼓：第一个采样就是峰值，后面是衰减的 60 Hz
+        Buf x = noise(static_cast<int>(9.0 / db), 0.02, 23u);
+        for (int beat = 0; beat < 9; ++beat) {
+            const long long at = ref.frameOf(beat);
+            for (int j = 0; j < 4000 && at + j < framesOf(x); ++j) {
+                const float v = static_cast<float>(0.9 * std::exp(-j / 600.0) * std::cos(2.0 * kPi * 60.0 * j / sr));
+                x[static_cast<size_t>(at + j) * 2] += v;
+                x[static_cast<size_t>(at + j) * 2 + 1] += 0.8f * v;
+            }
+        }
+        Roll r;
+        r.init(sr);
+        r.arm(4.0, 1.0);
+        r.setLength(6.0, 0.5);
+        r.setLength(7.0, 0.25);
+        r.release(8.0);
+        const Buf y = run(r, x, {512}, db);
+        cmpRef(name + "ref", x, y, ref);
+        std::vector<char> xfade;
+        std::vector<long long> points;
+        ref.render(x, xf, xfade, &points);
+        check(p + name + "grid_points", static_cast<double>(points.size()), "==", 1 + 2 + 4); // 5, 6, 6.5, 7, 7.25, 7.5, 7.75
+        double first = 0.0, louder = -1.0, onsetLevel = 1e9;
+        long long prev = -1;
+        for (long long g : points) {
+            for (int ch = 0; ch < 2; ++ch) {
+                first = std::max(first, std::fabs(sample(y, g, ch) - sample(x, f0, ch)));
+                // 淡化的最后一帧：原来在放的（上一遍接着放；第一遍之前 = 现场）和引入段（预卷的最后一帧）
+                const double was = prev < 0 ? sample(x, g - 1, ch) : sample(x, f0 + (g - 1 - prev), ch);
+                const double lead = sample(x, f0 - 1, ch);
+                louder = std::max(louder, std::fabs(sample(y, g - 1, ch)) - std::max(std::fabs(was), std::fabs(lead)));
+            }
+            onsetLevel = std::min(onsetLevel, std::fabs(sample(y, g)));
+            prev = g;
+        }
+        check(p + name + "pass_first_sample_diff", first, "==", 0.0);
+        check(p + name + "before_point_not_louder", louder, "<=", 1e-7);
+        check(p + name + "onset_level", onsetLevel, ">=", 0.8); // 鼓头 0.9 上下：每一遍都是满的
+        check(p + name + "release_passthrough_diff", maxDiff(x, y, static_cast<int>(ref.relFrame()), framesOf(x)), "==", 0.0);
+    }
+    // mix = 0：全程和输入逐位相同；mix = 0.5：第一遍的引入段之前逐位相同（还是纯现场）
     {
         Roll r;
         r.init(sr);
@@ -738,8 +1078,44 @@ void testRoll() {
         r.arm(4.0, 1.0);
         r.setLength(6.0, 0.25);
         check(p + "mix0_identity_diff", maxDiff(run(r, wn, {512}, dbeat), wn), "==", 0.0);
+        Roll h;
+        h.init(sr);
+        h.setMix(0.5f);
+        h.arm(4.0, 1.0);
+        const Buf y = run(h, wn, {512}, dbeat);
+        RollRef ref;
+        ref.dbeat = dbeat;
+        ref.capBeat = 4.0;
+        ref.len0 = 1.0;
+        std::vector<char> xfade;
+        const Buf e = ref.render(wn, xf, xfade);
+        check(p + "mix_half_capture_passthrough_diff", maxDiff(wn, y, 0, static_cast<int>(ref.rollStart()) - xf), "==", 0.0);
+        double d = 0.0;
+        for (size_t i = 0; i < y.size(); ++i) {
+            d = std::max(d, std::fabs(static_cast<double>(y[i]) - 0.5 * (static_cast<double>(wn[i]) + e[i])));
+        }
+        check(p + "mix_half_diff", d, "<=", 1e-6);
     }
-    // 不出爆音：111.3 Hz 正弦（一拍不是整数个周期，硬回绕会跳），回绕 / 改长度（含不在回绕点上的）/ mix 跳变 / 松开
+    // 不出爆音：稳态正弦过录制 / 回绕 / 改长度（含不在格点上的）/ 松开，相邻两个采样的跳变不超过正弦自己的 1.5 倍。
+    // 333.3 Hz：一拍、1/2、1/4、1/8 拍都不是整数个周期（1/8 拍差半个周期 = 最坏的相位），硬回绕 / 硬切会一下跳到 ~1.0。
+    // 2 ms 的升余弦在两路之间换，每个采样最多多出 两路之差 × π/2 / 88；两路反相时合起来是自己的
+    // √(1 + (sr / (2 × 88 × f))²) = 1.25 倍。频率低于 ~225 Hz 时这个比值会超过 1.5（淡化比周期短得多），见下一项。
+    {
+        const Buf s = sine(total, 333.3, 0.5, sr);
+        Roll r;
+        r.init(sr);
+        r.arm(4.0, 1.0);
+        r.setLength(7.0, 0.5);
+        r.setLength(8.0, 0.25);
+        r.setLength(8.6, 0.125);
+        r.release(10.3);
+        const Buf y = run(r, s, {512}, dbeat);
+        const double own = maxStep(s, 0, total);
+        std::printf("INFO %ssine333 input_max_step %.5f output_max_step %.5f\n", p.c_str(), own, maxStep(y, 0, total));
+        check(p + "sine_max_step", maxStep(y, 0, total), "<=", 1.5 * own + 1e-4);
+        check(p + "sine_release_passthrough_diff", maxDiff(s, y, static_cast<int>(std::ceil(10.3 / dbeat)), total), "==", 0.0);
+    }
+    // 111.3 Hz 正弦，再加上 mix 跳变：限值是绝对的
     {
         const Buf s = sine(total, 111.3, 0.5, sr);
         Roll r;
@@ -764,6 +1140,195 @@ void testRoll() {
         std::printf("INFO %sinput_max_step %.5f (hard wrap would step up to ~1.0)\n", p.c_str(), maxStep(s, 0, total));
         check(p + "click_max_step", maxStep(y, 0, total), "<=", 0.04);
     }
+    // 两个不连续点挨得比 2 ms 还近（120 BPM）：改长度的那一点在格点前 30 帧 / 格点后 20 帧（后一种的引入段
+    // 一半在录音里、一半在预卷里）；刚过格点 40 帧就松开。一层套一层地淡：和参考一致，正弦不出爆音
+    for (int k = 0; k < 2; ++k) {
+        const double atLen = (6.0 * 22050 + (k == 0 ? -30 : 20)) / 22050.0, atRel = (7.0 * 22050 + 40) / 22050.0;
+        const std::string name = k == 0 ? "nested_before_point" : "nested_after_point";
+        auto mk = [&](Roll& r) {
+            r.init(sr);
+            r.arm(4.0, 1.0);
+            r.setLength(atLen, 0.5);
+            r.release(atRel);
+        };
+        RollRef ref;
+        ref.dbeat = db120;
+        ref.capBeat = 4.0;
+        ref.len0 = 1.0;
+        ref.lens = {{atLen, 0.5}};
+        ref.relBeat = atRel;
+        Roll r;
+        mk(r);
+        const Buf y = run(r, wn120, {512}, db120);
+        cmpRef(name, wn120, y, ref);
+        check(p + name + ".release_passthrough_diff", maxDiff(wn120, y, 7 * 22050 + 40, total120), "==", 0.0);
+        const Buf s = sine(total120, 333.3, 0.5, sr);
+        Roll q;
+        mk(q);
+        const Buf ys = run(q, s, {512}, db120);
+        check(p + name + ".sine_max_step", maxStep(ys, 0, total120), "<=", 2.0 * maxStep(s, 0, total120));
+    }
+    // 随机摆 120 组（种子固定）：速度、抓取点、长度、改长度的点（任意 / 在格点上 / 紧挨着格点 / 录制中）、松开点
+    // （同样几种）、块大小都随机，逐帧和参考比——不连续点挨在一起的各种摆法都要对
+    {
+        Rng g{20260601u};
+        auto uni = [&]() { return 0.5 + 0.5 * static_cast<double>(g.next()); }; // 0..1
+        auto pick = [&](int n) { return std::min(n - 1, static_cast<int>(uni() * n)); };
+        const double lengths[8] = {1.0, 0.5, 0.25, 0.125, 0.0625, 0.375, 0.3, 0.75};
+        const int blocks[6] = {1, 7, 64, 512, 333, 4096};
+        double dOut = 0.0, dIn = 0.0;
+        for (int iter = 0; iter < 120; ++iter) {
+            const double bpms[5] = {120.0, 128.0, 174.0, 60.0 + 120.0 * uni(), 100.0};
+            RollRef ref;
+            ref.dbeat = bpms[pick(5)] / 60.0 / sr;
+            ref.capBeat = 1.0 + (pick(2) ? uni() : pick(8) / 8.0);
+            ref.len0 = lengths[pick(8)];
+            const double first = ref.capBeat + ref.len0, endBeat = first + 2.0 + uni();
+            auto point = [&]() { // 一个改长度 / 松开的拍
+                switch (pick(4)) {
+                case 0:
+                    return ref.capBeat + uni() * (endBeat - ref.capBeat);
+                case 1:
+                    return first + pick(12) * 0.25;
+                case 2: { // 两次取随机数分开写：同一个表达式里谁先谁后，各家编译器不一样
+                    const double grid = first + pick(6) * 0.5;
+                    return grid + (uni() - 0.5) * 200.0 * ref.dbeat;
+                }
+                default:
+                    return ref.capBeat + ref.len0 * uni();
+                }
+            };
+            Roll r;
+            r.init(sr);
+            r.arm(ref.capBeat, ref.len0);
+            for (int k = pick(5); k > 0; --k) {
+                const double at = point(), len = std::min(lengths[pick(8)], ref.len0);
+                r.setLength(at, len);
+                ref.lens.push_back({at, len});
+            }
+            std::stable_sort(ref.lens.begin(), ref.lens.end(),
+                    [](const std::pair<double, double>& a, const std::pair<double, double>& b) { return a.first < b.first; });
+            if (pick(4) > 0) {
+                ref.relBeat = point();
+                r.release(ref.relBeat);
+            }
+            const Buf in = noise(static_cast<int>(endBeat / ref.dbeat), 0.25, 1000u + static_cast<uint32_t>(iter));
+            const Buf y = run(r, in, {blocks[pick(6)], 1 + pick(700), 1 + pick(90)}, ref.dbeat);
+            std::vector<char> xfade;
+            const Buf e = ref.render(in, xf, xfade);
+            for (int j = 0; j < framesOf(in); ++j) {
+                double& d = xfade[static_cast<size_t>(j)] ? dIn : dOut;
+                d = std::max(d, maxDiff(y, e, j, j + 1));
+            }
+        }
+        check(p + "random_setups.outside_xfade_diff", dOut, "==", 0.0);
+        check(p + "random_setups.inside_xfade_diff", dIn, "<=", 1e-6);
+    }
+    // 松开点不晚于第一遍的格点 = 取消：全程和输入逐位相同。刚过格点 20 帧就松开：和参考一致
+    {
+        for (int k = 0; k < 2; ++k) {
+            Roll r;
+            r.init(sr);
+            r.arm(4.0, 1.0);
+            r.release(k == 0 ? 4.5 : 5.0);
+            const Buf y = run(r, wn120, {512}, db120);
+            check(p + (k == 0 ? "cancel_in_capture_diff" : "cancel_at_first_point_diff"), maxDiff(y, wn120), "==", 0.0);
+            check(p + (k == 0 ? "cancel_in_capture_active" : "cancel_at_first_point_active"), r.active() ? 1.0 : 0.0, "==", 0.0);
+        }
+        const double atRel = (5.0 * 22050 + 20) / 22050.0;
+        Roll r;
+        r.init(sr);
+        r.arm(4.0, 1.0);
+        r.release(atRel);
+        RollRef ref;
+        ref.dbeat = db120;
+        ref.capBeat = 4.0;
+        ref.len0 = 1.0;
+        ref.relBeat = atRel;
+        cmpRef("release_right_after_first_point", wn120, run(r, wn120, {512}, db120), ref);
+    }
+    // rolling()：过了第一遍的格点才是（录制的最后 2 ms 在淡化，但还没开始重放）
+    {
+        Roll r;
+        r.init(sr);
+        r.arm(4.0, 1.0);
+        Buf o(wn120.size());
+        const int g = 5 * 22050;
+        r.process(wn120.data(), o.data(), g, 0.0, db120);
+        check(p + "rolling_before_first_point", (r.rolling() ? 1.0 : 0.0) + (r.active() ? 0.0 : 1.0), "==", 0.0);
+        r.process(&wn120[static_cast<size_t>(g) * 2], &o[static_cast<size_t>(g) * 2], 1, g * db120, db120);
+        check(p + "rolling_at_first_point", r.rolling() ? 1.0 : 0.0, "==", 1.0);
+    }
+    // 全场没在走（dbeat ≤ 0）：直通（等着 / 录着 / 放着都一样），之后接着走还是原来的 roll
+    {
+        Roll r;
+        r.init(sr);
+        r.arm(4.0, 1.0);
+        Buf y(wn120.size(), 0.0f);
+        const int stops[3] = {3 * 22050 + 100, 4 * 22050 + 9000, 6 * 22050 + 700}; // 各停 300 帧
+        double d = 0.0;
+        int pos = 0;
+        for (int stop : stops) {
+            r.process(&wn120[static_cast<size_t>(pos) * 2], &y[static_cast<size_t>(pos) * 2], stop - pos, pos * db120, db120);
+            Buf held(600, 0.0f);
+            const Buf live = noise(300, 0.25, 77u);
+            r.process(live.data(), held.data(), 150, stop * db120, 0.0);
+            r.process(&live[300], &held[300], 150, stop * db120, -db120);
+            d = std::max(d, maxDiff(held, live));
+            pos = stop;
+        }
+        r.process(&wn120[static_cast<size_t>(pos) * 2], &y[static_cast<size_t>(pos) * 2], total120 - pos, pos * db120, db120);
+        check(p + "stopped_passthrough_diff", d, "==", 0.0);
+        // 停在抓取点之前的那一次不在预卷的 2 ms 里（之后又走了 22050 - 100 帧），所以整段和没停过的一样
+        Roll q;
+        q.init(sr);
+        q.arm(4.0, 1.0);
+        check(p + "stopped_then_same_diff", maxDiff(y, run(q, wn120, {512}, db120)), "<=", 1e-6);
+    }
+    // 正在放的时候才调 setLength / release，那一拍已经过去：推迟到「现在 + 2 ms」，淡化照样在那一点之前走完
+    {
+        const int m1 = 6 * 22050 + 5000, m2 = 8 * 22050 + 777;
+        auto mk = [&](Roll& r, const Buf& in) {
+            r.init(sr);
+            r.arm(4.0, 1.0);
+            return run(r, in, {512}, db120,
+                    [&](int start, int, const float*, float*) {
+                        if (start == m1) {
+                            r.setLength(5.5, 0.25);
+                        } else if (start == m2) {
+                            r.release(7.0);
+                        }
+                    },
+                    {m1, m2});
+        };
+        RollRef ref;
+        ref.dbeat = db120;
+        ref.capBeat = 4.0;
+        ref.len0 = 1.0;
+        ref.lens = {{(m1 + xf) * db120, 0.25}};
+        ref.relBeat = (m2 + xf) * db120;
+        Roll r, q;
+        const Buf y = mk(r, wn120);
+        cmpRef("late_calls", wn120, y, ref);
+        check(p + "late_calls.release_passthrough_diff", maxDiff(wn120, y, m2 + xf, total120), "==", 0.0);
+        const Buf s = sine(total120, 333.3, 0.5, sr);
+        check(p + "late_calls.sine_max_step", maxStep(mk(q, s), 0, total120), "<=", 1.5 * maxStep(s, 0, total120) + 1e-4);
+    }
+    // 太短的长度按 2 × 2 ms 算：每一遍前一半原样，后一半淡到预卷
+    {
+        Roll r;
+        r.init(sr);
+        r.arm(4.0, 1e-9);
+        RollRef ref;
+        ref.dbeat = db120;
+        ref.capBeat = 4.0;
+        ref.len0 = 2.0 * xf * db120;
+        ref.relBeat = 4.5;
+        r.release(4.5);
+        const Buf y = run(r, wn120, {512}, db120);
+        // 4 → 4.5 拍 = 11025 帧 = 62 遍 176 帧的 + 113 帧：62 个格点 + 松开点，各 2 ms 淡化，互不重叠
+        check(p + "min_length.xfade_frames", cmpRef("min_length", wn120, y, ref), "==", 63 * xf);
+    }
     // 块大小无关（含改长度、松开、mix < 1）；全场拍从 1000.123 起、速度不是整数
     {
         const double db2 = 133.33 / 60.0 / sr, b0 = 1000.123;
@@ -779,10 +1344,9 @@ void testRoll() {
                     [&](int start, int n, const float* i, float* o) { r.process(i, o, n, b0 + start * db2, db2); });
         });
     }
-    // 120 BPM：一拍正好 22050 帧，录制起点 / 每一遍的起点 / 改长度 / 松开全都正好落在采样上——
+    // 120 BPM：一拍正好 22050 帧，录制起点 / 每一遍的格点 / 改长度 / 松开全都正好落在采样上——
     // 拍从不同的块起点算过来会差最后几位，「到没到这一拍」不能因此早晚一个采样
     {
-        const double db3 = 120.0 / 60.0 / sr;
         auto mk = [&](Roll& r) {
             r.init(sr);
             r.setMix(0.9f);
@@ -795,21 +1359,71 @@ void testRoll() {
             Roll r;
             mk(r);
             return runBlocks(wn, pattern,
-                    [&](int start, int n, const float* i, float* o) { r.process(i, o, n, start * db3, db3); });
+                    [&](int start, int n, const float* i, float* o) { r.process(i, o, n, start * db120, db120); });
         });
         // 引擎的算法：每一块的 beat0 / dbeat 都从速度图（秒 → 拍）重新算，块和块之间差着浮点误差
         Roll a, b;
         mk(a);
         mk(b);
         const Buf ref = runBlocks(wn, kOneCall,
-                [&](int start, int n, const float* i, float* o) { a.process(i, o, n, start * db3, db3); });
+                [&](int start, int n, const float* i, float* o) { a.process(i, o, n, start * db120, db120); });
         auto beatAt = [&](int frame) { return (static_cast<double>(frame) / sr) * (120.0 / 60.0); };
         const Buf eng = runBlocks(wn, {512}, [&](int start, int n, const float* i, float* o) {
             b.process(i, o, n, beatAt(start), (beatAt(start + n) - beatAt(start)) / n);
         });
         check(p + "engine_style_beats_diff", maxDiff(eng, ref), "<=", 1e-6);
     }
-    // 从中间（录之前）开始 = 一路放过来
+    // 块的边界正好切在要紧的地方（抓取点、预卷里、定帧格的那一帧、引入段的头 / 中间 / 最后一帧、格点、松开点的前后），
+    // 以及一帧一块：和一次处理完一样（mix = 1 时淡化区之外逐位相同）
+    for (int k = 0; k < 2; ++k) {
+        const double db = k == 0 ? db120 : dbeat;
+        const Buf& in = k == 0 ? wn120 : wn;
+        RollRef ref;
+        ref.dbeat = db;
+        ref.capBeat = 4.0;
+        ref.len0 = 1.0;
+        ref.lens = {{6.0, 0.5}, {7.0, 0.25}};
+        ref.relBeat = 8.0;
+        auto go = [&](const std::vector<int>& pattern, const std::vector<int>& splits) {
+            Roll r;
+            r.init(sr);
+            r.arm(4.0, 1.0);
+            r.setLength(6.0, 0.5);
+            r.setLength(7.0, 0.25);
+            r.release(8.0);
+            return run(r, in, pattern, db, nullptr, splits);
+        };
+        std::vector<int> splits;
+        const int f0 = static_cast<int>(ref.f0()), rel = static_cast<int>(ref.relFrame());
+        for (int d : {-xf - 1, -xf, -xf / 2, -1, 0, 1}) {
+            splits.push_back(f0 + d);
+            splits.push_back(rel + d);
+        }
+        std::vector<char> xfade;
+        std::vector<long long> points;
+        ref.render(in, xf, xfade, &points);
+        for (long long g : points) {
+            for (int d : {-2 * xf - 1, -2 * xf, -xf - 1, -xf, -xf + 1, -xf / 2, -1, 0, 1}) {
+                splits.push_back(static_cast<int>(g) + d);
+            }
+        }
+        std::sort(splits.begin(), splits.end());
+        const Buf one = go(kOneCall, {});
+        const std::string name = k == 0 ? "splits120" : "splits128";
+        cmpRef(name, in, one, ref);
+        const Buf cut = go({4096}, splits), single = go({1}, {});
+        double dOut = 0.0;
+        for (int j = 0; j < framesOf(in); ++j) {
+            if (!xfade[static_cast<size_t>(j)]) {
+                dOut = std::max(dOut, std::max(maxDiff(one, cut, j, j + 1), maxDiff(one, single, j, j + 1)));
+            }
+        }
+        check(p + name + ".cut_at_points_diff", maxDiff(one, cut), "<=", 1e-6);
+        check(p + name + ".one_frame_blocks_diff", maxDiff(one, single), "<=", 1e-6);
+        check(p + name + ".blocks_outside_xfade_diff", dOut, "==", 0.0);
+    }
+    // 从中间开始 = 一路放过来：只要在抓取点之前至少 2 ms 开始（预卷是满的），块怎么对不上都一样。
+    // 不够 2 ms / 正好从抓取点开始 / 从录制中途开始：没见过的那一截（预卷、录音的前一段）是静音，别的不变
     {
         auto mk = [&](Roll& r) {
             r.init(sr);
@@ -817,16 +1431,44 @@ void testRoll() {
             r.setLength(7.0, 0.5);
             r.release(9.3);
         };
-        Roll a, b;
+        RollRef ref;
+        ref.dbeat = dbeat;
+        ref.capBeat = 4.0;
+        ref.len0 = 1.0;
+        ref.lens = {{7.0, 0.5}};
+        ref.relBeat = 9.3;
+        const int f0 = static_cast<int>(ref.f0());
+        Roll a;
         mk(a);
-        mk(b);
         const Buf full = run(a, wn, {512}, dbeat);
-        const int m = static_cast<int>(3.2 / dbeat);
-        const Buf tail(wn.begin() + m * 2, wn.end());
-        const Buf part = runBlocks(tail, {512},
-                [&](int start, int n, const float* i, float* o) { b.process(i, o, n, (m + start) * dbeat, dbeat); });
-        const Buf fullTail(full.begin() + m * 2, full.end());
-        check(p + "restore_at_beat_diff", maxDiff(part, fullTail), "<=", 1e-6);
+        // 从第 m 帧开始调 process()；输出前面补上输入，好和整段的对齐
+        auto from = [&](int m, const std::vector<int>& pattern) {
+            Roll b;
+            mk(b);
+            const Buf tail(wn.begin() + m * 2, wn.end());
+            const Buf part = runBlocks(tail, pattern,
+                    [&](int start, int n, const float* i, float* o) { b.process(i, o, n, (m + start) * dbeat, dbeat); });
+            Buf y(wn.begin(), wn.begin() + m * 2);
+            y.insert(y.end(), part.begin(), part.end());
+            return y;
+        };
+        double d = 0.0;
+        for (int m : {static_cast<int>(3.2 / dbeat), f0 - 5000, f0 - 513, f0 - xf - 1, f0 - xf}) {
+            d = std::max(d, maxDiff(from(m, {512}), full));
+            d = std::max(d, maxDiff(from(m, {64}), full));
+            d = std::max(d, maxDiff(from(m, kIrregular), full));
+        }
+        check(p + "restore_at_beat_diff", d, "<=", 1e-6);
+        ref.heardFrom = f0 - 10;
+        cmpRef("restore_short_preroll", wn, from(f0 - 10, {512}), ref);
+        ref.heardFrom = f0;
+        cmpRef("restore_no_preroll", wn, from(f0, {512}), ref);
+        ref.heardFrom = f0 + 5000;
+        cmpRef("restore_mid_capture", wn, from(f0 + 5000, {512}), ref);
+        // 预卷听得出来：没有预卷时，格点前半个淡化处只剩「原来在放的」的一半
+        const long long g2 = ref.frameOf(6.0);
+        const Buf none = from(f0, {512});
+        check(p + "preroll_is_heard", std::fabs(sample(full, g2 - xf / 2) - sample(none, g2 - xf / 2)), ">=", 1e-3);
     }
     // 录完之后全场变速（+3%）：roll 仍然对在拍上，放多少遍都不漂
     {
@@ -872,10 +1514,43 @@ void testRoll() {
             worst = std::max(worst, std::fabs(err));
             last = err;
         }
-        // 每一遍的起点取整到帧：对拍的误差 < 1 帧，而且不随遍数累积
+        // 每一遍的格点取整到帧：对拍的误差 < 1 帧，而且不随遍数累积
         std::printf("INFO %stempo_change last_pass_offset_frames %.3f\n", p.c_str(), last);
         check(p + "tempo_change_beat_align_frames", worst, "<=", 1.0);
         check(p + "tempo_change_bounded", maxAbs(y, 0, totalT), "<=", 1.0);
+    }
+    // 变速（±3%）落在各种地方——录制中途、定帧格的前后、第一遍的引入段里、格点上、重放中途、松开的淡化里：
+    // 正弦都不出爆音（变速后读得快 / 慢 3%，正弦自己的跳变也跟着变 3%）；松开点（按拍算）起和输入逐位相同
+    {
+        const Buf s = sine(total, 333.3, 0.5, sr);
+        const double own = maxStep(s, 0, total);
+        const int rs = static_cast<int>(std::ceil(5.0 / dbeat)), g6 = static_cast<int>(std::ceil(6.0 / dbeat));
+        double worst = 0.0, relDiff = 0.0;
+        for (double ratio : {1.03, 0.97}) {
+            for (int fc : {rs - 9000, rs - 2 * xf - 3, rs - 2 * xf, rs - xf - 20, rs - xf / 2, rs - 1, rs, rs + 5000,
+                         g6 - xf / 2, g6 + 30}) {
+                const double db2 = dbeat * ratio;
+                auto beatOf = [&](int j) { return j < fc ? j * dbeat : fc * dbeat + (j - fc) * db2; };
+                const double relBeat = 6.0 + 0.5 * 1.25; // 第二遍放到一半多一点
+                Roll r;
+                r.init(sr);
+                r.arm(4.0, 1.0);
+                r.release(relBeat);
+                const Buf y = runBlocks(s, {512},
+                        [&](int start, int n, const float* i, float* o) {
+                            r.process(i, o, n, beatOf(start), start < fc ? dbeat : db2);
+                        },
+                        {fc});
+                worst = std::max(worst, maxStep(y, 0, total));
+                int rel = fc;
+                while (rel < total && beatOf(rel) < relBeat - 1e-9) {
+                    ++rel;
+                }
+                relDiff = std::max(relDiff, maxDiff(s, y, rel, total));
+            }
+        }
+        check(p + "tempo_change_sine_max_step", worst, "<=", 1.5 * 1.03 * own + 1e-4);
+        check(p + "tempo_change_release_passthrough_diff", relDiff, "==", 0.0);
     }
     // 最长 4 拍 @ 60 BPM；要 8 拍的按 4 拍录
     {
@@ -891,9 +1566,7 @@ void testRoll() {
             ref.dbeat = db60;
             ref.capBeat = 1.0;
             ref.len0 = 4.0;
-            double pass = 0.0;
-            const double d = contentDiff(in, y, ref, t60, pass);
-            check(p + (k == 0 ? "max_length_4beats_60bpm_diff" : "over_length_clamped_diff"), std::max(d, pass), "<=", 1e-6);
+            cmpRef(k == 0 ? "max_length_4beats_60bpm" : "over_length_clamped", in, y, ref);
         }
     }
     {
