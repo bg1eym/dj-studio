@@ -12,6 +12,9 @@
 // - 引擎用 -ffast-math 编：不用 NaN / inf 当标记，不用 std::isnan / isfinite；只用标准库。
 // - 开 / 关 / 回绕处都有短的平滑或交叉淡化，不出爆音。下面这些毫秒数是「版本化的行为」：
 //   改了算法或这些数就把 kDspVersion 加一（谱保存时记下版本，升级后同一份谱不会悄悄变声）。
+// - 只有 BandSplit3 有延迟（latency()）；别的块都是零延迟。分频之后再跟拍处理的那几路，
+//   传进来的 beat0 要是「缓冲里这段声音」的拍（= 现在的拍减去分频器的延迟）。
+// 验收：test_dsp.cpp（独立程序，逐项打 PASS / FAIL；g++ / g++ -ffast-math / clang++ 三种编法都要全过）。
 #pragma once
 
 #include <algorithm>
@@ -1126,6 +1129,7 @@ class BrakeSpin {
     void resume(int frameOffsetInBlock = 0) { push(Resume, frameOffsetInBlock, 0); }
     int maxBrakeFrames() const { return static_cast<int>(2.0 * m_maxLag); }
     int maxSpinFrames() const { return static_cast<int>(2.0 * m_maxLag / (1.0 + kSpinMaxSpeed)); }
+    // Live = 直通（含刚恢复完）；Braking / Spinning = 效果在放（含正在淡回现场）；Silent = 放完了，等 resume()
     State state() const {
         if (m_fx == None) {
             return Live;

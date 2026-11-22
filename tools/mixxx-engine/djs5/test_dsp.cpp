@@ -6,11 +6,16 @@
 // 再加 -ffast-math 编一遍、用 clang++ 编一遍，三种都要全过。
 #include "dsp.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace djs5;
 using std::int32_t;
@@ -23,6 +28,15 @@ using Buf = std::vector<float>; // 交错立体声
 constexpr double kPi = 3.14159265358979323846;
 
 int g_checks = 0, g_fail = 0;
+
+// 版本化的固定参数在这里按数字再写一遍，下面的限值都用这几个数、不引用头文件里的常数：
+// 头文件里改了数（没同步改这里、没加 kDspVersion），测试就红。
+constexpr double kExpXfadeMs = 2.0;
+constexpr double kExpGateEdgeMs = 1.5;
+constexpr double kExpParamSmoothMs = 2.0;
+constexpr double kExpFbClamp = 2.0;
+constexpr double kExpSpinMaxSpeed = 3.0;
+constexpr double kExpReleaseFadePart = 0.2;
 
 // -ffast-math 下 isfinite 不可靠：直接看位（指数全 1 = inf / NaN）
 bool finiteBits(double v) {
@@ -241,6 +255,37 @@ double sineGainDb(int sr, double hz, int frames, int settle, F&& proc) {
     return db(rms(y, settle, frames)) - db(rms(x, settle, frames));
 }
 
+// ================================================================ 版本化的常数
+
+void testConstants() {
+    const std::string p = "constants.";
+    check(p + "kDspVersion", kDspVersion, "==", 1);
+    check(p + "kXfadeMs", kXfadeMs, "==", kExpXfadeMs);
+    check(p + "kGateEdgeMs", kGateEdgeMs, "==", kExpGateEdgeMs);
+    check(p + "kParamSmoothMs", kParamSmoothMs, "==", kExpParamSmoothMs);
+    check(p + "kSvfSmoothMs", kSvfSmoothMs, "==", 10.0);
+    check(p + "kModSmoothMs", kModSmoothMs, "==", 5.0);
+    check(p + "kSpiralSmoothMs", kSpiralSmoothMs, "==", 30.0);
+    check(p + "kFbClamp", kFbClamp, "==", kExpFbClamp);
+    check(p + "kSplitLowDelayMs", kSplitLowDelayMs, "==", 6.0);
+    check(p + "kSplitHighDelayMs", kSplitHighDelayMs, "==", 1.0);
+    check(p + "kSplitKaiserBeta", kSplitKaiserBeta, "==", 5.653);
+    check(p + "kFlangerMinMs", kFlangerMinMs, "==", 0.25);
+    check(p + "kFlangerMaxMs", kFlangerMaxMs, "==", 8.0);
+    check(p + "kFlangerMaxFeedback", kFlangerMaxFeedback, "==", static_cast<double>(0.95f));
+    check(p + "kPhaserStages", kPhaserStages, "==", 6);
+    check(p + "kPhaserMinHz", kPhaserMinHz, "==", 200.0);
+    check(p + "kPhaserMaxHz", kPhaserMaxHz, "==", 4000.0);
+    check(p + "kPhaserMaxFeedback", kPhaserMaxFeedback, "==", static_cast<double>(0.9f));
+    check(p + "kSpiralMaxFeedback", kSpiralMaxFeedback, "==", static_cast<double>(0.98f));
+    check(p + "kSpinMaxSpeed", kSpinMaxSpeed, "==", kExpSpinMaxSpeed);
+    check(p + "kReleaseFadePart", kReleaseFadePart, "==", kExpReleaseFadePart);
+    check(p + "Roll.kMaxSeconds", Roll::kMaxSeconds, "==", 4);
+    check(p + "BrakeSpin.kSeconds", BrakeSpin::kSeconds, "==", 4);
+    check(p + "Sampler.kVoices", Sampler::kVoices, "==", 4);
+    check(p + "Sampler.kSlots", Sampler::kSlots, "==", 8);
+}
+
 // ================================================================ BandSplit3 / AlignDelay
 
 struct Bands {
@@ -439,7 +484,7 @@ void testTransGate() {
     const std::string p = "transgate.";
     const int sr = 44100;
     const double dbeat = 128.0 / 60.0 / sr;
-    const double edgeFrames = kGateEdgeMs * sr / 1000.0;
+    const double edgeFrames = kExpGateEdgeMs * sr / 1000.0;
     const double stepLimit = 2.0 / edgeFrames; // 斜率限制：每个采样最多这么多
     const int total = static_cast<int>(8.0 / dbeat);
     const Buf wn = noise(total, 0.25, 11u);
@@ -594,7 +639,7 @@ struct RollRef {
 void testRoll() {
     const std::string p = "roll.";
     const int sr = 44100;
-    const int xf = static_cast<int>(std::lround(kXfadeMs * sr / 1000.0));
+    const int xf = static_cast<int>(std::lround(kExpXfadeMs * sr / 1000.0));
     const double dbeat = 128.0 / 60.0 / sr; // 一拍 = 20671.875 帧：每一遍的起点都落在不同的小数上
     const int total = static_cast<int>(11.0 / dbeat);
     const Buf wn = noise(total, 0.25, 21u);
@@ -644,6 +689,18 @@ void testRoll() {
         check(p + "capture_passthrough_diff", pass, "==", 0.0);
         check(p + "repeat_content_diff", d, "<=", 1e-6);
         check(p + "bounded_excess", maxAbs(y, 0, total) - maxAbs(wn, 0, total), "<=", 1e-6);
+        // 回绕处的交叉淡化：第一帧还是「上一遍接着往下放」，之后 2 ms 里换到这一遍的开头
+        const long long f0 = ref.f0(), r1 = ref.rollStart(), r2 = ref.frameOf(6.0);
+        check(p + "wrap_first_frame_continues_prev",
+                std::fabs(static_cast<double>(y[static_cast<size_t>(r2) * 2]) - wn[static_cast<size_t>(f0 + r2 - r1) * 2]),
+                "<=", 1e-6);
+        long long lastDiff = r2 - 1;
+        for (long long j = r2; j < r2 + 400; ++j) {
+            if (std::fabs(static_cast<double>(y[static_cast<size_t>(j) * 2]) - wn[static_cast<size_t>(f0 + j - r2) * 2]) > 1e-6) {
+                lastDiff = j;
+            }
+        }
+        checkRange(p + "wrap_xfade_ms", (lastDiff - r2 + 1) * 1000.0 / sr, 1.8, 2.1);
     }
     // 1 → 1/2 → 1/4 → 1/8 拍，然后松开：每一段都读对，松开 2 ms 之后和输入逐位相同
     {
@@ -664,6 +721,13 @@ void testRoll() {
         double pass = 0.0;
         check(p + "setlength_content_diff", contentDiff(wn, y, ref, rel, pass), "<=", 1e-6);
         check(p + "release_passthrough_diff", maxDiff(wn, y, static_cast<int>(rel) + xf, total), "==", 0.0);
+        long long lastDiff = rel - 1;
+        for (long long j = rel; j < rel + 400; ++j) {
+            if (y[static_cast<size_t>(j) * 2] != wn[static_cast<size_t>(j) * 2]) {
+                lastDiff = j;
+            }
+        }
+        checkRange(p + "release_xfade_ms", (lastDiff - rel + 1) * 1000.0 / sr, 1.8, 2.1);
         check(p + "release_done_active", r.active() ? 1.0 : 0.0, "==", 0.0);
     }
     // mix = 0：全程和输入逐位相同
@@ -1071,7 +1135,7 @@ void testSpiral() {
         const Buf y = run(s, x, {512});
         // 干声 ≤ 1，回声 ≤ kFbClamp × 插值的最大过冲 1.25
         check(p + (k == 0 ? "max_feedback_peak_mix0.5" : "max_feedback_peak_glide_mix1"),
-                finiteBuf(y) ? maxAbs(y, 0, 30 * sr) : 1e9, "<=", (k == 0 ? 1.0 : 0.0) + 1.25 * kFbClamp);
+                finiteBuf(y) ? maxAbs(y, 0, 30 * sr) : 1e9, "<=", (k == 0 ? 1.0 : 0.0) + 1.25 * kExpFbClamp);
         if (k == 0) {
             const double early = rms(y, 21 * sr, 22 * sr), late = rms(y, 29 * sr, 30 * sr);
             check(p + "max_feedback_tail_decay_ratio", late / early, "<=", 0.6);
@@ -1189,7 +1253,7 @@ void testNoise() {
         Buf of(static_cast<size_t>(4096) * 2, 0.0f);
         full.process(of.data(), 1024, 0.0, dbeat);
         full.process(of.data() + 2048, 1024, 1024 * dbeat, dbeat);
-        const int ramp = static_cast<int>(std::ceil(kParamSmoothMs * sr / 1000.0));
+        const int ramp = static_cast<int>(std::ceil(kExpParamSmoothMs * sr / 1000.0));
         check(p + "level_on_first_samples_ratio", maxAbs(o, 1024, 1032) / maxAbs(of, 1024, 1032), "<=", 8.0 / (ramp - 1));
         check(p + "level_on_full_after_ramp_diff", maxDiff(o, of, 1024 + ramp, 2048), "==", 0.0);
     }
@@ -1356,7 +1420,7 @@ void testMod(const std::string& name, double notchHz, double passHz, double boun
 void testBrakeSpin() {
     const std::string p = "brakespin.";
     const int sr = 44100;
-    const int xf = static_cast<int>(std::lround(kXfadeMs * sr / 1000.0));
+    const int xf = static_cast<int>(std::lround(kExpXfadeMs * sr / 1000.0));
     const double hz = 441.0, amp = 0.5;
     const int total = 150000;
     const Buf sn = sine(total, hz, amp, sr);
@@ -1390,7 +1454,7 @@ void testBrakeSpin() {
 
     // 预期：读的位置落后 c·n² / 2T 帧，最后 20% 升余弦淡出
     auto expectDiff = [&](int from, int T, double c) {
-        const int fade = std::max(xf, static_cast<int>(std::llround(kReleaseFadePart * T)));
+        const int fade = std::max(xf, static_cast<int>(std::llround(kExpReleaseFadePart * T)));
         double d = 0.0;
         for (int n = 0; n < T; ++n) {
             const double pos = from + n - c * n * static_cast<double>(n) / (2.0 * T);
@@ -1409,19 +1473,29 @@ void testBrakeSpin() {
     check(p + "brake_speed_ramp_err", expectDiff(f0, t1, 1.0), "<=", 1e-3);
     check(p + "brake_then_silence_peak", maxAbs(y, f0 + t1, f1), "==", 0.0);
     check(p + "resume_passthrough_diff", maxDiff(y, sn, f1 + xf, f2), "==", 0.0);
-    check(p + "backspin_reverse_ramp_err", expectDiff(f2, t2, 1.0 + kSpinMaxSpeed), "<=", 1e-3);
+    check(p + "backspin_reverse_ramp_err", expectDiff(f2, t2, 1.0 + kExpSpinMaxSpeed), "<=", 1e-3);
+    // 恢复：2 ms 淡回现场
+    {
+        int lastDiff = f1 - 1;
+        for (int j = f1; j < f1 + 400; ++j) {
+            if (y[static_cast<size_t>(j) * 2] != sn[static_cast<size_t>(j) * 2]) {
+                lastDiff = j;
+            }
+        }
+        checkRange(p + "resume_fade_in_ms", (lastDiff - f1 + 1) * 1000.0 / sr, 1.8, 2.1);
+    }
     check(p + "backspin_then_silence_peak", maxAbs(y, f2 + t2, f3), "==", 0.0);
     check(p + "resume2_passthrough_diff", maxDiff(y, sn, f3 + xf, total), "==", 0.0);
     // 回转真的在倒着读：中间那一点的读位置比开始时还早
     {
         const double n = 0.75 * t2;
-        check(p + "backspin_reads_backwards_frames", n - (1.0 + kSpinMaxSpeed) * n * n / (2.0 * t2), "<=", 0.0);
+        check(p + "backspin_reads_backwards_frames", n - (1.0 + kExpSpinMaxSpeed) * n * n / (2.0 * t2), "<=", 0.0);
     }
     // 不出爆音：刹车 / 恢复那一带每个采样的变化不超过正弦自己的（加淡化）；回转最快 3 倍速
     const double sineStep = maxStep(sn, 0, total);
     std::printf("INFO %sinput_max_step %.5f\n", p.c_str(), sineStep);
     check(p + "brake_click_max_step", maxStep(y, 0, f2), "<=", sineStep * 1.3);
-    check(p + "backspin_click_max_step", maxStep(y, f2, total), "<=", sineStep * (kSpinMaxSpeed + 0.3));
+    check(p + "backspin_click_max_step", maxStep(y, f2, total), "<=", sineStep * (kExpSpinMaxSpeed + 0.3));
 
     // 状态、上限、没放完就 resume、不在直通时的命令被忽略
     {
@@ -1488,7 +1562,7 @@ void testBrakeSpin() {
 void testSampler() {
     const std::string p = "sampler.";
     const int sr = 44100;
-    const int xf = static_cast<int>(std::lround(kXfadeMs * sr / 1000.0));
+    const int xf = static_cast<int>(std::lround(kExpXfadeMs * sr / 1000.0));
     const int len = 30000;
     // 采样位 k：(200 + 50k) Hz 的正弦，从 0 相位起，结尾 5 ms 淡出；7 号位是一个冲激
     std::vector<Buf> smp(8);
@@ -1609,6 +1683,14 @@ void testSampler() {
                 smp[0][static_cast<size_t>(peakAt) * 2]);
         check(p + "retrigger_click_max_step", maxStep(a, 0, 8000), "<=", 2.0 * sineStep + 0.3 * 0.5 * kPi / xf * 1.05);
         check(p + "stopall_click_max_step", maxStep(b, 0, 8000), "<=", sineStep + 0.3 * 0.5 * kPi / xf * 1.05);
+        // 淡出的长度：停了之后还有声音的帧数 = 2 ms
+        int lastSound = peakAt - 1;
+        for (int j = peakAt; j < 8000; ++j) {
+            if (b[static_cast<size_t>(j) * 2] != 0.0f) {
+                lastSound = j;
+            }
+        }
+        checkRange(p + "stopall_fade_ms", (lastSound - peakAt + 1) * 1000.0 / sr, 1.8, 2.1);
     }
     // 声音数：最多 4 个
     {
@@ -1643,6 +1725,7 @@ void testSampler() {
 
 int main() {
     std::printf("INFO dsp version %d\n", kDspVersion);
+    testConstants();
     testBandSplit(44100);
     testBandSplit(48000);
     testAlignDelay();
@@ -1652,10 +1735,10 @@ int main() {
     testSpiral();
     testNoise();
     // Flanger：depth 0 时延迟 0.25 ms → 第一个陷波在 2 kHz，4 kHz 是峰。上限：干 0.5 + 延迟 0.5 × kFbClamp × 插值过冲 1.25
-    testMod<Flanger>("flanger", 2000.0, 4000.0, 0.5 + 0.5 * 1.25 * kFbClamp);
+    testMod<Flanger>("flanger", 2000.0, 4000.0, 0.5 + 0.5 * 1.25 * kExpFbClamp);
     // Phaser：depth 0 时转折频率 = √(200 × 4000) = 894.43 Hz，那里正好是陷波；20 Hz 几乎不转相位
     // 上限：满幅正弦正好打在共振峰上的稳态值 = 干 0.5 + 全通链 0.5 / (1 - 反馈)
-    testMod<Phaser>("phaser", std::sqrt(kPhaserMinHz * kPhaserMaxHz), 20.0, 0.5 + 0.5 / (1.0 - kPhaserMaxFeedback));
+    testMod<Phaser>("phaser", std::sqrt(200.0 * 4000.0), 20.0, 0.5 + 0.5 / (1.0 - 0.9));
     testBrakeSpin();
     testSampler();
     std::printf("SUMMARY checks=%d failed=%d\n", g_checks, g_fail);
