@@ -10,7 +10,7 @@ const NS = "http://www.w3.org/2000/svg";
 const DECK_HEX = { 1: "#ff9a3c", 2: "#46c2ff" };
 // EQ 三段的颜色（旋钮、时间线曲线、EQ 操作）和波形同一套：LOW = 蓝、MID = 绿、HIGH = 白（Denon 三频段波形的颜色，
 // 看波形就知道哪个旋钮管哪一层）。蓝色在深色底上调亮一点，字看得清。
-const BAND_HEX = { lo: "#5b8cff", mid: WAVE_COLORS.mid, hi: "#f2f4f8" };
+export const BAND_HEX = { lo: "#5b8cff", mid: WAVE_COLORS.mid, hi: "#f2f4f8" };
 const SPAN_S = 7; // 波形窗口：播放头两侧各 7 秒（真实时间，两边 deck 同一比例，拍对齐时小节线上下对齐）
 const MIX = { hi: 0, mid: 1, lo: 2, filter: 3, echo: 4, reverb: 5, vu: 6 };
 const PARAM_ORDER = ["vol", "hi", "mid", "lo", "filter", "echo", "reverb"];
@@ -19,7 +19,7 @@ const PARAM_LABEL = { vol: "推子", hi: "HIGH", mid: "MID", lo: "LOW", filter: 
 const LANE_PARAMS = ["hi", "mid", "lo", "filter", "echo", "reverb", "vol"];
 const NEUTRAL_V = { hi: 1, mid: 1, lo: 1, filter: 0.5, echo: 0, reverb: 0, vol: 1 };
 const TECH_LABEL = { longhand: "长交接", instant: "瞬时切换", custom: "自定义" };
-const SECTION_TINT = {
+export const SECTION_TINT = {
   intro: "rgba(120,140,170,.10)", groove: "rgba(80,160,255,.06)", breakdown: "rgba(255,200,80,.12)",
   drop: "rgba(255,90,90,.11)", outro: "rgba(160,120,200,.12)",
 };
@@ -114,11 +114,11 @@ function laneY(param, v) {
   return (knobAngle(param, v) + 150) / 300;
 }
 
-const FX_HEX = "#f0c050";
+export const FX_HEX = "#f0c050";
 const paramColor = (param, d) => (isEq(param) ? BAND_HEX[param] : param === "filter" ? "#c9a6ff" : isFx(param) ? FX_HEX : DECK_HEX[d]);
 
 // 时间线每行左边的小旋钮：和混音台上的旋钮同一画法（推子画成 7 点～5 点的转角）
-class MiniKnob {
+export class MiniKnob {
   constructor(param, color) {
     const S = 22, c = 11, r = 8;
     this.param = param; this.c = c; this.r = r;
@@ -148,7 +148,7 @@ function arcPath(cx, cy, r, a0, a1) {
 
 // ------------------------------------------------------------------ 混音台部件
 
-class Knob {
+export class Knob {
   constructor(label, param, color, small = false, labelColor = null) {
     this.param = param;
     this.v = null;
@@ -193,7 +193,7 @@ function flash(target) {
 }
 Knob.prototype._flash = function () { flash(this); };
 
-class Fader {
+export class Fader {
   constructor(color) {
     this.cap = el("div", { class: "fader-cap", style: `border-color:${color}` });
     this.fill = el("div", { class: "fader-fill", style: `background:${color}` });
@@ -219,7 +219,7 @@ const meterIdx = (db) => Math.floor(((db - METER_LO) / (METER_HI - METER_LO)) * 
 // 真 Mixxx（没有 dBFS 电平）：vu_meter = log10(32767·平均绝对值/1000 + 1)（enginevumeter.cpp:53-56）反推，约等于 RMS
 const vuToDb = (v) => (v > 0 ? 20 * Math.log10(((10 ** v - 1) * 1000) / 32767) + 1 : -90);
 
-class Meter {
+export class Meter {
   constructor() {
     this.segs = [];
     this.clip = el("span", { class: "clip", title: "峰值到 0 dBFS：主输出会削波失真" });
@@ -245,7 +245,7 @@ class Meter {
 }
 
 // 刻度（和电平表同高，放在 MASTER 旁边）
-function meterScale() {
+export function meterScale() {
   const root = el("div", { class: "vu-scale" });
   for (const db of [0, -3, -6, -9, -12, -18, -24, -30, -36]) {
     const y = ((METER_HI - db) / (METER_HI - METER_LO)) * 100;
@@ -299,7 +299,7 @@ function seekHover(canvas, owner) {
   canvas.addEventListener("mouseleave", () => { owner.hoverX = null; });
 }
 
-function drawSeekHover(g, x, H, label) {
+export function drawSeekHover(g, x, H, label) {
   if (x === null || x === undefined) return;
   g.fillStyle = "rgba(255,255,255,.75)";
   g.fillRect(Math.round(x), 0, 1, H);

@@ -971,7 +971,9 @@ def chart(c: Compiled5) -> dict[str, Any]:
         clips.append({"id": k.id, "deck": k.deck, "asset": k.asset, "title": a.title or a.file or a.id, "role": k.role,
                       "track_id": cc.info.track_id, "bpm": cc.info.grid.bpm, "start": cc.start, "stop": cc.stop,
                       "load": cc.load, "gen": cc.gen, "segs": segs, "lanes": lanes, "line": k.line, "note": k.note,
-                      "keylock": k.keylock})
+                      "keylock": k.keylock,
+                      # 画波形用：原曲的 1.1 在文件的第几秒、文件多长（原曲第 s 拍 = t0 + s × 60 / bpm 秒）
+                      "t0": round(cc.info.beat_time(0.0), 4), "dur": round(cc.info.grid.duration, 3)})
     scenes = [{"no": s.no, "name": s.name, "start": float(s.start), "end": float(s.end), "draft": s.draft,
                "strategy": {"作用": s.purpose, "保留": s.keep, "前景": s.lead, "LOW": s.low, "MID/HIGH": s.midhigh},
                "missing": s.missing(), "roles": s.roles, "intent": s.intent, "line": s.line} for s in p.scenes]

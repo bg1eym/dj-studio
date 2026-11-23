@@ -627,6 +627,7 @@ function renderRecordPanel() {
   const el = $("#rec-panel");
   if (!el) return;
   const setId = el.dataset.set, dur = +el.dataset.dur || 0;
+  const v5 = el.dataset.v5 !== undefined; // 曲谱 v5（四 Deck）：20 倍速只是上限，实际多快看电脑（state 里的 rate）
   const rec = S.recording && S.recording.set === setId ? S.recording : null;
   const start = () => guard(async () => { S.recording = await api("POST", `/api/sets/${setId}/record`); renderRecordPanel(); });
   el.innerHTML = "";
@@ -637,12 +638,16 @@ function renderRecordPanel() {
       h("span", { class: "big-pct" }, `${pct}%`),
       h("button", { class: "small", onclick: () => guard(() => api("POST", "/api/recording/cancel")) }, "取消")),
       h("div", { class: "big-bar" }, h("div", { style: `width:${pct}%` })),
-      h("div", { class: "dim", style: "margin-top:6px" }, "不出声，在后台按 20 倍速放一遍，旋钮、推子、音量和演出时一模一样。录的时候不能开始演出。"));
+      h("div", { class: "dim", style: "margin-top:6px" }, v5
+        ? "不出声，在后台尽快放一遍（最快 20 倍速，实际多快看电脑），四台 Deck 的旋钮、推子、效果、音量和演出时一模一样。录的时候不能开始演出。"
+        : "不出声，在后台按 20 倍速放一遍，旋钮、推子、音量和演出时一模一样。录的时候不能开始演出。"));
     return;
   }
   const btn = h("button", { class: "rec-btn", onclick: start, title: "存到「音乐 / DJ Studio 录音」，MP3 320 kbps" },
     rec && rec.state === "ok" ? "● 再录一次" : "● 录成 MP3");
-  const est = dur ? `整套 ${fmtLen(dur)}，大约 ${Math.max(1, Math.ceil(dur / 20 / 60 + 0.3))} 分钟录好` : "";
+  // 估计要录多久：v1–v4 按 20 倍速；v5 按上一次实际录出来的倍速，没录过按 8 倍（示例谱在 Linux 测试机上实测 8–9 倍，Mac 上没量过）
+  const speed = v5 ? (rec && rec.rate) || 8 : 20;
+  const est = dur ? `整套 ${fmtLen(dur)}，大约 ${Math.max(1, Math.ceil(dur / speed / 60 + 0.3))} 分钟录好` : "";
   if (rec && rec.state === "ok") {
     const url = `/api/recordings/${encodeURIComponent(rec.file_name)}`;
     el.append(h("div", { class: "row" }, h("b", { class: "rec-ok" }, "✓ 录好了"),
@@ -722,8 +727,8 @@ function renderHomeJob() {
   el.append(h("details", { class: "job-log" }, h("summary", {}, "详细日志"), h("div", { class: "log" }, job.log.join("\n"))));
 }
 
-// 「可以演出了」那一屏，曲谱 v5：从头 / 从某个场景开始；规范、示例、另存为 v5、演出包、交接说明。
-// 没有 Hot Cue 表和「录成 MP3」：v5 不生成混音试听（那两个接口是 v1–v4 的）。
+// 「可以演出了」那一屏，曲谱 v5：从头 / 从某个场景开始；录成 MP3；规范、示例、另存为 v5、演出包、交接说明。
+// 「录成 MP3」和 v1–v4 是同一块面板、同一个接口（引擎按调度器模式录）。没有 Hot Cue 表：那个接口是 v1–v4 的。
 function renderReady5(el, r) {
   const scenes = r.scenes || [];
   const opts = h("div", { class: "row play-opts" },
@@ -736,6 +741,7 @@ function renderReady5(el, r) {
         (hasSound() ? "原速时从电脑的声音输出放出来；倍速时没有声音。" : "没有找到声音引擎：看得到每台 Deck 和旋钮怎么动，没有声音。")), opts),
     h("button", { class: "primary huge", onclick: (e) => busy(e, "启动中…", () =>
       startShow(r.set, { from: +$("#play-from").value, speed: +$("#play-speed").value })) }, "▶ 开始演出")));
+  if (hasSound()) { el.append(h("div", { id: "rec-panel", "data-set": r.set, "data-dur": r.duration, "data-v5": "" })); renderRecordPanel(); }
   const hints = (r.notes || []).filter((n) => n.level === "warn");
   if (hints.length) el.append(h("div", { class: "hint-box" }, h("b", {}, `提示（${hints.length}）`), hints.map((n) => h("div", {}, `${n.where}：${n.msg}`))));
   const ex = S.export5 && S.export5.set === r.set ? S.export5 : null;
@@ -1449,7 +1455,8 @@ const live = new LiveView(liveRoot, async (id) => {
 
 // 曲谱 v5 的演出画面（live5.js）：和上面一样只有一个实例，换页时搬过去
 const live5Root = h("div", { id: "live5" });
-const live5 = new Live5View(live5Root, { api, toast, onSeek: (beat) => guard(() => seekShow5(beat)) });
+const live5 = new Live5View(live5Root, { api, toast, onSeek: (beat) => guard(() => seekShow5(beat)),
+  loadTrack: (id) => api("GET", `/api/tracks/${id}/waveform`) }); // 每份素材的三频段波形（和两 Deck 的演出页同一份数据）
 
 // 整套时间表：独奏 / 过渡 / 终曲按时长排开，当前所在段高亮
 function setStrip(p) {

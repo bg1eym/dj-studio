@@ -36,7 +36,7 @@ Mixxx + DJStudio.js（控制器映射）
 | 编译 | `compiler.py` → 每段过渡一份程序 | `v5/compile.py` + `v5/livefx.py` → 一份执行计划 `djplan/1` + 图谱数据，绑定引擎的能力签名（`v5/caps.py`） |
 | 执行 | `DJStudio.js`（20 ms tick）+ AutoDJ + conductor | 引擎里的调度器 `tools/mixxx-engine/djs5/`（每个音频块，落在采样上）+ `v5/runner.py` |
 | 引擎 | 内置引擎、或本机的 Mixxx | 只有内置引擎（`DJSTUDIO_V5=1` 起成调度器模式）；没有声音引擎时用现编的模拟器 `sim5` |
-| 界面 | `live.js` | `live5.js`（四 Deck 共轴图）、`handover.html`（交接说明） |
+| 界面 | `live.js` | `live5.js`（和 `live.js` 同一套波形、旋钮、推子、电平表，排成四台 Deck：全场总览 + 每台的滚动波形 + 四路调音台 + 每台的 EQ 曲线）、`handover.html`（交接说明，画法在 `chart5.js`） |
 
 `Studio` 按谱的版本分到两条路上（`studio.v5 = Service5`）；v4 这条路的代码没有因为 v5 改动。旧 set 可以经适配器（`v5/legacy.py`）转成 v5 的项目，
 转换前后逐点比对（`legacy.check`，`djstudio v5check`），但默认仍走原来的路。调度器的结构、协议、混音链路见 [ENGINE5.md](ENGINE5.md)。
@@ -145,6 +145,12 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
   实测 20 / 40 / 60 倍速录出来和原速逐点相同（差别只在切点落在哪个 20ms tick 上，原速演出本身就有这么大的抖动）。
   读盘跟不上（Mixxx 放一块静音）由引擎数 Mixxx 的那条调试日志（`record_stop` 回 `cache_misses`），有就按 8、3 倍速重录。
   录完在 MP3 前面加 UTF-16 的 ID3v2.3（Mixxx 的编码器写标签只支持 Latin-1）。录音状态单独记（`Studio.recording`，SSE「recording」），不占任务槽。
+- 录成 MP3，v5 的项目：同一个 `Studio.record`、同一个接口和状态，录一遍的那一步在 `Service5.record_once`——引擎起成调度器模式、不出声
+  （`open_engine(audio=False)`），和演出同一份计划、同一个 `Runner5`，从第 0 拍放到引擎报 `done`；录音还是引擎的 `record`（`trim`、`.mp3`）。
+  调度按音频帧走，用不着引擎时钟那一套：倍速和原速录出来逐采样相同（[V5_G0.md](V5_G0.md)「录成 MP3」）。倍速只是上限（引擎连着出块时每块让读盘线程 150 µs），
+  实际多快看电脑，状态里另有 `rate`。效果的尾音在全场长度里（`Compiled5.length`），不另外等。这一遍不能用的两种情况：读盘没跟上
+  （`record_stop` 的 `cache_misses` 在调度器模式下是 −1，取 `v5.perf` 的）、动作没赶上（回执 `late` / `skipped` / `failed`：准备时间按音乐算，
+  放得快墙钟上就短）——一出就停下，按下一档倍速重录；录之前先看用到的原文件在不在。
 - 网格按谱定（`Studio._grid_from_score`，内置引擎）：谱上的原 BPM 和网格差 0.05 以上 → 带着谱上的 BPM 重新分析（`library.enqueue(bpm_hint=)`），`analysis.bpm_check` 按它在 ±0.1 里找网格，30 秒一段看低频起音离网格线多远（≤35ms 算对上；有没有 kick 按两个 BPM 里强的看）。有 kick 的段 ≥80% 对上、不比自估的差 → 存成这首的网格（`grid_from = "score"`，以后重新分析也按它）；对不上 → 还按音频的，结果在 `analysis.score_check`，转换时 BPM 不一致降成提示（两首对调了也提示）。曲库页手动定的网格不动。
 - **不要用 kick 相似度自动决定接法**（研究里 25 次实测相关性只有 +0.19）。
 
@@ -164,7 +170,8 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
   效果实例独立、手动接管、暂停、从中间开始、能力拒绝。模拟器 `sim5`（同一份调度器代码 + 假 Deck）上全跑，带「真引擎」的几项在声音引擎里再跑一遍。
 - `tests/test_v5_live.py`：现场效果——路由（插入没有重复的干声、组插入、总输出）、分频的旁路残差、Release、Roll / 采样的时间、每种效果从中间重建。
 - `tests/test_v5_score.py` / `test_v5_legacy.py` / `test_v5_service.py`：v5 的谱（含「规范文档里的表和代码对得上」）、旧谱转换的等价检查、
-  应用里的整条路（文件夹导入 → 分析 → 演出 → 演出包 → 换地方再导入）。
+  应用里的整条路（文件夹导入 → 分析 → 演出 → 演出包 → 换地方再导入）；整场录成 MP3（示例谱在声音引擎里录一遍、取消、尾音，要 `DJSTUDIO_ENGINE_BIN`；
+  状态和放慢重录那一半不用引擎也测）。
 - `tools/mixxx-engine/djs5/test_dsp.cpp`：DSP 模块自己的检查（独立编译运行）。`packaging/macos/smoke_v5.py`：真引擎里的冒烟 + 基准（CI 在 Mac 上跑）。
 
 ## 独立的 Mac 应用

@@ -288,6 +288,10 @@ def test_chart_has_everything_the_page_draws():
     assert ch["decks"] == 4 and ch["bars"] == 240 and len(ch["scenes"]) == 5 and ch["exec"] == c.plan["exec"]
     c3 = next(k for k in ch["clips"] if k["id"] == "C3")
     assert [s["kind"] for s in c3["segs"]] == ["loop", "exit"] and c3["segs"][0]["loop"] == 16
+    # 画波形用的：原曲第 s 拍在文件的第 t0 + s × 60 / bpm 秒（和编译器自己算的是同一个数）
+    info = c.clip("C3").info
+    assert c3["dur"] > 0 and c3["track_id"] == info.track_id
+    assert c3["t0"] + 16 * 60 / c3["bpm"] == pytest.approx(info.beat_time(16.0), abs=1e-3)
     assert ch["scenes"][2]["strategy"]["LOW"].startswith("第 97 小节") and ch["scenes"][2]["roles"] == {"D1": "出曲", "D2": "进曲"}
     st = c.state_at(450.0)  # 第 113 小节半：D1 在旧主题的 loop 里，D2 已经接管
     assert st["decks"][0]["state"] == "looping" and st["decks"][0]["loop"]["lap"] == 1 and st["decks"][1]["clip"] == "C2"

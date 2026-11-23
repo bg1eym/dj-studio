@@ -1565,7 +1565,8 @@ class Studio:
 
     # ------------------------------------------------------------ 整套 set 录成 MP3
 
-    # 先 20 倍速录（90 分钟的 set 约 4.5 分钟）；录完引擎报读盘跟不上（录音里有缺口）就放慢重录
+    # 先 20 倍速录（90 分钟的 set 约 4.5 分钟）；录完引擎报读盘跟不上（录音里有缺口）就放慢重录。
+    # v5 的项目也是这三档，不过那边是上限：四台 Deck 的调度器尽快出块，实际多快看电脑（Service5.record_once）
     RECORD_SPEEDS = (20.0, 8.0, 3.0)
 
     @property
@@ -1581,7 +1582,9 @@ class Studio:
 
     def record(self, set_id: str) -> dict[str, Any]:
         """把整套 set 录成 MP3：在 DJ Studio 声音引擎里不出声、倍速放一遍，和演出同一套 DJStudio.js、指挥、旋钮、音量统一，
-        引擎时钟（旋钮按音乐时间拧，倍速和原速放出来的一样），Mixxx 的 MP3 编码器（320 kbps）。后台跑，网页看进度。"""
+        引擎时钟（旋钮按音乐时间拧，倍速和原速放出来的一样），Mixxx 的 MP3 编码器（320 kbps）。后台跑，网页看进度。
+        v5 的项目（四 Deck）也从这里录：录一遍的那一步在 Service5.record_once（引擎起成调度器模式），
+        状态、放慢重录、文件名、标签是同一套。"""
         from .engine.bundled import engine_binary
 
         with self._record_lock:
@@ -1592,15 +1595,26 @@ class Studio:
             binary = engine_binary()
             if not binary:
                 raise StudioError("没有声音引擎，录不了（DJ Studio.app 里自带；开发环境先构建 tools/mixxx-engine）")
-            s = self.load(set_id)
-            c = self.compile(s)
-            if not c.ok:
-                raise StudioError("set 校验没通过")
-            self.recording = {"state": "running", "set": set_id, "title": s.name or s.id, "progress": 0.0,
-                              "detail": "启动引擎…", "started": time.time(), "duration": round(c.duration, 1),
-                              "cancel": threading.Event()}
+            rec: dict[str, Any] = {"state": "running", "set": set_id, "title": set_id, "progress": 0.0, "detail": "启动引擎…",
+                                   "started": time.time(), "duration": 0.0, "cancel": threading.Event()}
+            if self.v5.has(set_id) and not self.set_path(set_id).exists():
+                c5 = self.v5.recordable(set_id)
+                rec.update(title=c5.project.name or set_id, duration=round(c5.duration, 1))
+
+                def once(speed: float, part: Path, last: bool) -> dict[str, Any]:
+                    return self.v5.record_once(rec, c5, speed, part, last)
+            else:
+                s = self.load(set_id)
+                c = self.compile(s)
+                if not c.ok:
+                    raise StudioError("set 校验没通过")
+                rec.update(title=s.name or s.id, duration=round(c.duration, 1))
+
+                def once(speed: float, part: Path, last: bool) -> dict[str, Any]:
+                    return self._record_once(rec, s, c, self._sim_rows(s, c), binary, speed, part)
+            self.recording = rec
         self._emit_recording()
-        threading.Thread(target=self._record, args=(self.recording, s, c, binary), name="record", daemon=True).start()
+        threading.Thread(target=self._record, args=(rec, once), name="record", daemon=True).start()
         return self.recording_state()  # type: ignore[return-value]
 
     def cancel_recording(self) -> None:
@@ -1608,23 +1622,24 @@ class Studio:
         if r and r["state"] == "running":
             r["cancel"].set()
 
-    def _record(self, rec: dict[str, Any], s: SetFile, c: Compiled, binary: Path) -> None:
+    def _record(self, rec: dict[str, Any], once: Callable[[float, Path, bool], dict[str, Any]]) -> None:
+        """once(倍速, 临时文件, 是不是最慢的一档) = 录一遍，返回 seconds、cache_misses；v5 的还可能返回 redo（为什么要放慢重录）。"""
         out_dir = self.recordings_dir
         name = _safe_name(f"{rec['title']} {time.strftime('%Y-%m-%d %H%M')}") + ".mp3"
         part = out_dir / f".{name}.part.mp3"  # 引擎按扩展名选编码器
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
-            rows = self._sim_rows(s, c)
             for k, speed in enumerate(self.RECORD_SPEEDS):
-                res = self._record_once(rec, s, c, rows, binary, speed, part)
+                last = k + 1 == len(self.RECORD_SPEEDS)
+                res = once(speed, part, last)
                 if rec["cancel"].is_set():
                     rec.update(state="cancelled", detail="取消了")
                     part.unlink(missing_ok=True)
                     return
                 misses = int(res.get("cache_misses") or 0)
-                if misses > 0 and k + 1 < len(self.RECORD_SPEEDS):
-                    rec["detail"] = (f"电脑太忙，读盘跟不上 {misses} 次（录音里会有缺口），"
-                                     f"放慢到 {self.RECORD_SPEEDS[k + 1]:g} 倍重录")
+                redo = res.get("redo") or (f"电脑太忙，读盘跟不上 {misses} 次（录音里会有缺口）" if misses > 0 else "")
+                if redo and not last:
+                    rec["detail"] = f"{redo}，放慢到 {self.RECORD_SPEEDS[k + 1]:g} 倍重录"
                     self._emit_recording()
                     continue
                 break
@@ -1633,9 +1648,10 @@ class Studio:
                 f.write(_id3v2({"TIT2": rec["title"], "TPE1": "DJ Studio", "TYER": time.strftime("%Y")}))
                 shutil.copyfileobj(src, f, 1 << 20)
             part.unlink(missing_ok=True)
+            extra = {"rate": res["rate"]} if res.get("rate") else {}  # v5：实际录得多快（speed 是上限，多快看电脑）
             rec.update(state="ok", progress=1.0, file=str(final), file_name=name, seconds=round(res["seconds"], 1),
                        size=final.stat().st_size, speed=speed, cache_misses=misses,
-                       detail=f"录好了：{_mmss(res['seconds'])}，{final.stat().st_size / 1e6:.0f} MB")
+                       detail=f"录好了：{_mmss(res['seconds'])}，{final.stat().st_size / 1e6:.0f} MB", **extra)
         except Exception as e:  # noqa: BLE001
             rec.update(state="error", error=str(e), detail=f"没录成：{e}")
             part.unlink(missing_ok=True)
