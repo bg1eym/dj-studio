@@ -294,7 +294,7 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 /* ------------------------------------------------------------ 曲谱 v5：四 Deck 共轴演出界面（live5.js / chart5.js） */
 /* Deck 的身份固定：D1 蓝 实线、D2 橙 虚线、D3 绿 点线、D4 紫 点划线——颜色、编号、线型三样一起出现。
    图是 canvas，颜色从这里的变量读（chart5.js 的 themeFromCss），换主题只改变量。 */
-.live5 { --d1: #3d8bea; --d2: #dc7526; --d3: #27ae60; --d4: #9c7cec; --l5-plot: #0b0d11; --l5-chip-ink: #0b0d11; --l5-gutter: 208px;
+.live5 { --d1: #3d8bea; --d2: #dc7526; --d3: #27ae60; --d4: #9c7cec; --l5-plot: #0b0d11; --l5-chip-ink: #0b0d11; --l5-gutter: 230px;
   position: relative; display: flex; flex-direction: column; gap: 8px; }
 .live5 .panel { margin-bottom: 0; }
 .live5 button.on { border-color: var(--accent); color: var(--accent); }
@@ -321,15 +321,6 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .l5-head .l5-stat.grow { flex: 1 1 13em; } /* 当前场景：挤不下就换行，不缩成没有 */
 .l5-stage { font-size: 13px; padding: 1px 9px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
 .l5-stage.warn { color: var(--warn); border-color: var(--warn); }
-.l5-master { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
-.l5-meter { position: relative; width: 130px; height: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
-.l5-meter i { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, var(--ok) 0 96px, var(--warn) 96px 120px, var(--err) 120px) 0 0 / 130px 100% no-repeat; }
-.l5-meter u { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); }
-.l5-db { font: 12px var(--mono); min-width: 4.2em; text-align: right; font-variant-numeric: tabular-nums; }
-.l5-over { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 3px; border: 1px solid var(--line); color: var(--dim); }
-.l5-over.was { border-color: var(--err); color: var(--err); }
-.l5-over.on { background: var(--err); border-color: var(--err); color: #fff; box-shadow: 0 0 10px var(--err); }
-.l5-overn { font-size: 12px; color: var(--err); }
 .l5-late { font-size: 12px; color: var(--warn); }
 .l5-speed { font-size: 12px; margin-left: 6px; }
 .l5-rolerow { flex-wrap: nowrap; gap: 6px 24px; }
@@ -338,47 +329,44 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .l5-nextrow { font-size: 13px; display: flex; align-items: center; min-width: 0; flex: 1; }
 .l5-nextline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 @media (max-width: 1100px) { .l5-rolerow { flex-wrap: wrap; } .l5-roles { flex: 1 1 100%; } }
-.l5-scenes { gap: 6px; }
-.l5-scene { display: inline-flex; align-items: baseline; gap: 2px; white-space: nowrap; }
-.l5-scene.on { border-color: var(--warn); color: var(--warn); }
-.l5-scene .dim, .l5-scene .badge { font-size: 11px; margin-left: 4px; }
 
-/* 共轴图：左边行头（DOM），右边 canvas */
-.l5-chart { padding: 8px 10px 6px; }
-.l5-tools { margin-bottom: 6px; gap: 6px; }
-.l5-legend { display: inline-flex; gap: 4px 12px; flex-wrap: wrap; font-size: 11px; color: var(--dim); justify-content: flex-end; }
-.l5-leg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+/* 场景条：每个场景按长短占一格（像两 Deck 的整套时间表） */
+.l5-strip { position: relative; display: flex; gap: 2px; }
+.l5-strip.hidden { display: none; }
+.live5 button.l5-seg { min-width: 0; display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 7px; overflow: hidden; white-space: nowrap;
+  border-radius: 4px; background: #1b2740; border: 1px solid transparent; text-align: left; font-size: 12px; color: var(--text); }
+.live5 button.l5-seg:nth-child(even) { background: #2a2440; }
+.live5 button.l5-seg.on { border-color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
+.l5-segn { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.l5-segb { margin-left: auto; font: 10px var(--mono); padding-left: 4px; }
+.l5-stripcur { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 5px #fff; pointer-events: none; }
+
+/* 全场总览 / 曲线：左边行头（DOM），右边 canvas */
+.l5-ov { margin-bottom: 0; }
+.l5-ov .ho-head { align-items: center; margin-bottom: 6px; }
+.l5-tools { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .l5-grid { display: grid; grid-template-columns: var(--l5-gutter) minmax(0, 1fr); }
+.l5-lgrid { grid-template-columns: var(--tl-label) minmax(0, 1fr); }
 .l5-gutter { position: relative; }
-.l5-g { position: absolute; left: 0; right: 0; padding: 0 4px 0 2px; overflow: hidden; font-size: 12px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-.l5-g-deck { flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; border-top: 1px solid var(--line); }
-.l5-g1, .l5-g2 { display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden; }
-.l5-g1 b { font-size: 13px; }
-.l5-role { font-size: 12px; border: 1px solid var(--line); border-radius: 9px; padding: 0 7px; overflow: hidden; text-overflow: ellipsis; }
-.l5-g2 { font-size: 11px; line-height: 15px; }
-.l5-mark { width: 13px; text-align: center; flex: none; color: var(--dim); }
-.l5-st { overflow: hidden; text-overflow: ellipsis; }
-.st-play .l5-mark, .st-loop .l5-mark { color: var(--ok); }
-.st-ready .l5-mark::before { content: ""; display: inline-block; width: 7px; height: 7px; border: 2px dotted currentColor; border-radius: 50%; vertical-align: -1px; }
-.st-ready .l5-mark, .st-ready .l5-st, .st-tail .l5-mark, .st-tail .l5-st { color: var(--warn); }
-.st-error .l5-mark, .st-error .l5-st { color: var(--err); font-weight: 700; }
-.st-idle .l5-st, .st-stop .l5-st { color: var(--dim); }
+.l5-g { position: absolute; left: 0; right: 0; padding: 0 6px 0 2px; overflow: hidden; font-size: 12px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.l5-g-deck { flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; }
+.l5-g1, .l5-g2 { display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
+.l5-g1 .ho-name { font-size: 13px; font-weight: 600; }
+.l5-role { font-size: 11px; border: 1px solid var(--line); border-radius: 9px; padding: 0 7px; overflow: hidden; text-overflow: ellipsis; flex: none; max-width: 7em; }
+.l5-g2 { font-size: 12px; line-height: 15px; color: #c8cdd8; }
+.l5-g-deck.st-idle .l5-g2, .l5-g-deck.st-stop .l5-g2 { color: var(--dim); }
 .l5-quiet { flex: none; color: var(--warn); border: 1px solid var(--warn); border-radius: 3px; padding: 0 3px; font-size: 11px; line-height: 13px; }
 .l5-lv { height: 3px; background: var(--panel2); border-radius: 2px; overflow: hidden; margin-right: 4px; }
 .l5-lv i { display: block; height: 100%; width: 0; background: var(--ok); }
-.l5-g-param { border-top: 1px solid var(--line); padding-right: 30px; }
-.l5-pn { width: 40px; flex: none; }
-.l5-vals { display: grid; grid-template-columns: auto auto; gap: 3px 7px; justify-content: start; }
-.l5-val { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; line-height: 14px; white-space: nowrap; }
-.l5-val.off { opacity: .32; }
-.l5-val.manual .l5-vt { color: var(--warn); font-weight: 700; }
-.l5-vm { font-size: 11px; line-height: 13px; color: #1a1300; background: var(--warn); border-radius: 3px; padding: 0 2px; font-weight: 700; }
-.l5-ax { position: absolute; right: 4px; font-size: 11px; line-height: 14px; color: var(--dim); }
-.l5-g-fx, .l5-g-loop { align-items: flex-start; padding-top: 4px; border-top: 1px solid var(--line); }
-.l5-g-fx .dim { font-size: 11px; }
-.l5-plot { position: relative; overflow: hidden; border-radius: 6px; background: var(--l5-plot); }
+.l5-g-head { gap: 8px; font-size: 13px; }
+.l5-g-head b { font-weight: 700; flex: none; }
+.l5-lwho { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+.l5-g-param { font: 11px var(--mono); gap: 5px; }
+.l5-g-param.off { opacity: .5; }
+.l5-g-param.manual .tl-kv { color: var(--warn); font-weight: 700; }
+.l5-vm { font-size: 11px; line-height: 13px; color: #1a1300; background: var(--warn); border-radius: 3px; padding: 0 2px; font-weight: 700; font-family: inherit; }
+.l5-plot { position: relative; overflow: hidden; border-radius: 5px; }
 canvas.l5-canvas { display: block; width: 100%; touch-action: pan-y; cursor: grab; }
-.l5-hint { font-size: 11px; margin-top: 5px; }
 .l5-tip { position: absolute; z-index: 5; pointer-events: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
   padding: 6px 9px; font-size: 12px; line-height: 1.5; max-width: 360px; box-shadow: 0 4px 16px rgba(0, 0, 0, .45); }
 .l5-tip-h { font-weight: 700; }
@@ -387,19 +375,59 @@ canvas.l5-canvas { display: block; width: 100%; touch-action: pan-y; cursor: gra
   padding: 10px 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, .55); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
 .l5-bub-in input { width: 76px; }
 
-/* 策略 / 接下来 / 手动接管 */
-.l5-lower { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(340px, .85fr); gap: 8px; align-items: start; }
+/* 每台 Deck 的滚动波形（和两 Deck 的一样，矮一点，四台放得下） */
+.l5-deck { padding: 5px 10px 7px; }
+.l5-deck .deck-head { margin-bottom: 3px; }
+canvas.live-wave.l5-wave { height: 68px; }
+.l5-deck .deck-bar { font-size: 15px; min-width: 9em; }
+.l5-deck .deck-bpm { font-size: 17px; }
+.l5-deck .deck-title { font-size: 14px; max-width: 30vw; }
+.l5-dstate { font-size: 12px; color: var(--dim); white-space: nowrap; }
+.l5-dstate.st-play, .l5-dstate.st-loop { color: var(--ok); }
+.l5-dstate.st-ready, .l5-dstate.st-tail { color: var(--warn); }
+.l5-dstate.st-error { color: var(--err); font-weight: 700; }
+.l5-deck .dots i.on:first-child { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+
+/* 调音台（四路）+ 接下来 ｜ 曲线 + 策略 */
+.live-bottom.l5-bottom { grid-template-columns: minmax(430px, max-content) minmax(0, 1fr); }
+.l5-ch.off .knob, .l5-ch.off .fader { opacity: .6; } /* 没在放：照谱上这一拍的值摆着 */
+.l5-chs { column-gap: 8px; align-items: start; }
+.l5-ch .ch-body { gap: 7px; }
+.l5-ch .fx-row { gap: 2px; }
+.l5-ch .fader-row { gap: 6px; }
+.l5-ch .ch-name { display: flex; flex-direction: column; align-items: center; line-height: 1.25; }
+.l5-ch .ch-gain { min-height: 13px; }
+.l5-drag { touch-action: none; outline: none; }
+.l5-drag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.usable > .l5-drag, .knob.usable .knob-svg { cursor: ns-resize; }
+.fader.usable .fader-track { cursor: ns-resize; }
+.knob.manual .knob-cap { stroke: var(--warn); stroke-width: 2; }
+.knob.manual .kv { color: var(--warn); font-weight: 700; }
+.fader.manual .fader-cap { box-shadow: 0 0 0 2px var(--warn); }
+.fader.manual .kv { color: var(--warn); font-weight: 700; }
+.l5-chfx { display: flex; gap: 3px; flex-wrap: wrap; justify-content: center; min-height: 16px; }
+.l5-fxon { font-size: 10px; line-height: 14px; padding: 0 5px; border-radius: 7px; background: #f0c050; color: #1a1300; font-weight: 700; white-space: nowrap; }
+.l5-back { display: flex; flex-direction: column; align-items: stretch; gap: 3px; margin-top: 2px; }
+.l5-back.hidden { display: none; }
+.l5-backlab { font-size: 11px; color: var(--warn); text-align: center; }
+.l5-back button { padding: 1px 6px; font-size: 11px; }
+.l5-over { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 3px; border: 1px solid var(--line); color: var(--dim); }
+.l5-over.was { border-color: var(--err); color: var(--err); }
+.l5-over.on { background: var(--err); border-color: var(--err); color: #fff; box-shadow: 0 0 10px var(--err); }
+.l5-overn { font-size: 10px; color: var(--err); white-space: nowrap; }
+.l5-lanes { min-height: 0; }
+.l5-lanes .tl-head { margin-bottom: 6px; }
+.l5-lanes .tl-head .dim { font-size: 12px; }
 .l5-strategy dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: 13px; }
 .l5-strategy dt { color: var(--dim); white-space: nowrap; }
 .l5-strategy dd { margin: 0; }
 .l5-todo { color: var(--warn); }
-.l5-acts { max-height: 300px; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
-.l5-act { display: grid; grid-template-columns: 48px 14px minmax(0, 1fr) auto minmax(52px, auto); gap: 7px; align-items: baseline; font-size: 13px; padding: 2px 4px; border-radius: 4px; }
+.l5-acts { max-height: 260px; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+.l5-act { display: grid; grid-template-columns: 48px 14px minmax(0, 1fr) minmax(52px, auto); gap: 7px; align-items: baseline; font-size: 13px; padding: 2px 4px; border-radius: 4px; }
 .l5-act .l5-chip { align-self: center; }
 .l5-act.past { color: var(--dim); }
 .l5-act.now { background: var(--panel2); }
 .l5-apos { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.l5-aln { font-size: 11px; white-space: nowrap; }
 .l5-ast { text-align: right; font-size: 12px; white-space: nowrap; color: var(--dim); }
 .l5-act.s-ok .l5-ast { color: var(--ok); font-weight: 700; font-size: 14px; }
 .l5-act.s-late .l5-ast { color: var(--warn); font-weight: 700; }
@@ -410,29 +438,8 @@ canvas.l5-canvas { display: block; width: 100%; touch-action: pan-y; cursor: gra
 .l5-note { font-size: 11px; border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; margin-right: 3px; color: var(--dim); }
 .l5-nowline { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--warn); border-top: 1px solid var(--warn); margin: 4px 0 2px; padding-top: 2px; }
 .l5-nowpos { font-family: var(--mono); }
-.l5-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-bottom: 4px; }
-.l5-tab { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 3px 7px 4px; min-width: 0; }
-.l5-tab-1 { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.l5-tab.d1.on { box-shadow: inset 0 -3px 0 var(--d1); } .l5-tab.d2.on { box-shadow: inset 0 -3px 0 var(--d2); }
-.l5-tab.d3.on { box-shadow: inset 0 -3px 0 var(--d3); } .l5-tab.d4.on { box-shadow: inset 0 -3px 0 var(--d4); }
-.live5 .l5-tab.on { border-color: var(--text); color: var(--text); }
-.l5-tab-st { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-.l5-take-note { font-size: 12px; min-height: 4px; }
-.l5-sl { display: grid; grid-template-columns: 44px minmax(0, 1fr) 62px 40px; gap: 2px 8px; align-items: center; padding: 5px 0 4px; border-top: 1px solid var(--line); }
-.l5-sl input[type=range] { width: 100%; padding: 0; margin: 0; border: 0; background: none; accent-color: var(--accent); }
-.l5-take[data-deck="1"] input[type=range] { accent-color: var(--d1); } .l5-take[data-deck="2"] input[type=range] { accent-color: var(--d2); }
-.l5-take[data-deck="3"] input[type=range] { accent-color: var(--d3); } .l5-take[data-deck="4"] input[type=range] { accent-color: var(--d4); }
-.l5-sl-n { font-size: 12px; }
-.l5-sl-v { font: 700 13px var(--mono); text-align: right; white-space: nowrap; }
-.l5-sl-2 { grid-column: 2 / -1; display: flex; gap: 6px; align-items: center; font-size: 12px; min-height: 24px; }
-@media (max-width: 1180px) { .l5-lower { grid-template-columns: 1fr 1fr; } .l5-take { grid-column: 1 / -1; } }
-@media (max-width: 760px) {
-  .l5-lower { grid-template-columns: 1fr; }
-  .live5 { --l5-gutter: 158px; }
-  .l5-legend, .l5-ax { display: none; }
-  .l5-g-param { padding-right: 2px; }
-  .l5-pn { width: 36px; }
-}
+@media (max-width: 1100px) { .live-bottom.l5-bottom { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .live5 { --l5-gutter: 150px; } .l5-ov .ho-legend { display: none; } }
 
 /* 首页的 v5：演出画面顶上一行、谱里的提示 / 错误、可以演出那一屏的链接 */
 .show-status5 { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }

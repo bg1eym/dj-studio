@@ -1449,7 +1449,8 @@ const live = new LiveView(liveRoot, async (id) => {
 
 // 曲谱 v5 的演出画面（live5.js）：和上面一样只有一个实例，换页时搬过去
 const live5Root = h("div", { id: "live5" });
-const live5 = new Live5View(live5Root, { api, toast, onSeek: (beat) => guard(() => seekShow5(beat)) });
+const live5 = new Live5View(live5Root, { api, toast, onSeek: (beat) => guard(() => seekShow5(beat)),
+  loadTrack: (id) => api("GET", `/api/tracks/${id}/waveform`) }); // 每份素材的三频段波形（和两 Deck 的演出页同一份数据）
 
 // 整套时间表：独奏 / 过渡 / 终曲按时长排开，当前所在段高亮
 function setStrip(p) {
