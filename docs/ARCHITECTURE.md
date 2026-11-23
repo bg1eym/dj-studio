@@ -170,7 +170,8 @@ CH1 / MASTER / CH2 三条同高同刻度；真 Mixxx 没有这两项时按 `vu_m
   效果实例独立、手动接管、暂停、从中间开始、能力拒绝。模拟器 `sim5`（同一份调度器代码 + 假 Deck）上全跑，带「真引擎」的几项在声音引擎里再跑一遍。
 - `tests/test_v5_live.py`：现场效果——路由（插入没有重复的干声、组插入、总输出）、分频的旁路残差、Release、Roll / 采样的时间、每种效果从中间重建。
 - `tests/test_v5_score.py` / `test_v5_legacy.py` / `test_v5_service.py`：v5 的谱（含「规范文档里的表和代码对得上」）、旧谱转换的等价检查、
-  应用里的整条路（文件夹导入 → 分析 → 演出 → 演出包 → 换地方再导入）。
+  应用里的整条路（文件夹导入 → 分析 → 演出 → 演出包 → 换地方再导入）；整场录成 MP3（示例谱在声音引擎里录一遍、取消、尾音，要 `DJSTUDIO_ENGINE_BIN`；
+  状态和放慢重录那一半不用引擎也测）。
 - `tools/mixxx-engine/djs5/test_dsp.cpp`：DSP 模块自己的检查（独立编译运行）。`packaging/macos/smoke_v5.py`：真引擎里的冒烟 + 基准（CI 在 Mac 上跑）。
 
 ## 独立的 Mac 应用

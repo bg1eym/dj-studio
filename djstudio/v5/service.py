@@ -1,4 +1,4 @@
-"""v5 在应用里的那一层：读谱、把素材对上曲库里的文件、一键分析、存项目、演出（开始 / 停 / 跳 / 暂停 / 接管）、演出包。
+"""v5 在应用里的那一层：读谱、把素材对上曲库里的文件、一键分析、存项目、演出（开始 / 停 / 跳 / 暂停 / 接管）、整场录成 MP3、演出包。
 
 Studio（studio.py）是网页和命令行唯一的入口；它在遇到 v5 的谱 / 项目时转到这里。这里尽量用 Studio 现成的东西：
 托管曲库和分析队列、按文件名找曲子（plan/convert.match_tracks）、按谱上的 BPM / 第 1 小节对网格（convert.align）。
@@ -460,6 +460,110 @@ class Service5:
                 "rehearsal": True, "builtin": True, "speed": r["speed"], "set": r["project"], "from": 0, "track": 0, "bar": 1,
                 "audio": audio, "status": status, "at": round(link.status_wall * 1000 + lat, 1) if link.status_wall else None,
                 "receipts": dict(runner.receipts), "from_beat": runner.from_beat, "stage": runner.progress.stage}
+
+    # ------------------------------------------------------------ 整场录成 MP3
+
+    def recordable(self, pid: str) -> Compiled5:
+        """录之前：谱编得过、用到的原文件都还在（缺一个的话引擎照样放别的 Deck，录完才发现少了一路）。"""
+        from ..studio import StudioError
+
+        c = self.compiled(pid)
+        if not c.ok:
+            raise StudioError("曲谱没编过：" + "；".join(str(i) for i in c.errors[:5]))
+        gone = [f"{row['id']}（{row['path']}）" for row in c.library_rows() if not Path(row["path"] or "").is_file()]
+        if gone:
+            raise StudioError("这些素材的原文件不在了：" + "、".join(gone))
+        return c
+
+    def record_once(self, rec: dict[str, Any], c: Compiled5, speed: float, part: Path, last: bool) -> dict[str, Any]:
+        """把整场录一遍（Studio.record 的 v5 那一步；状态、放慢重录、文件名、标签在 Studio 里，和 v1–v4 共用）。
+
+        声音引擎起成调度器模式，不出声，和演出同一份计划、同一个 Runner5，从第 0 拍开始。调度按音频帧数走、不看墙钟，
+        放多快混出来的都是同一份声音；speed 只是上限，实际多快看电脑（每块之间引擎还要让读盘线程一下）。
+        引擎的 record 带 trim：装载和走带起点前那几块数字静音不录，结尾的静音丢掉。效果的尾音不用另外等：
+        它们算在全场长度里（Compiled5.length = 片段的停止、效果的结束 + 尾音里最晚的那个），引擎放到那里才报 done。
+
+        倍速时会出两种岔子，哪一种录出来都和原速演出不一样：读盘没跟上（某台 Deck 一块静音，引擎数得到）；
+        动作没赶上（片段的准备时间按音乐算，放得快墙钟上就只剩几分之一：回执 late / skipped / failed）。
+        一出就不往下录，返回 redo，Studio 放慢重录。已经是最慢的一档（last）：读盘的和 v4 一样照录、留着次数；
+        片段没装上的报错，不交一份缺了一路的录音。"""
+        from ..studio import StudioError, _mmss
+
+        try:
+            link = open_engine(c.library_rows(), speed=speed, audio=False)
+        except Engine5Error as e:
+            raise StudioError(str(e)) from e
+        bad: list[dict[str, Any]] = []  # 没按计划执行的动作（回执不是 ok 的）
+        link.listeners.append(lambda m: bad.append(m) if m.get("t") == "rc" and m.get("st") != "ok" and len(bad) < 100 else None)
+        try:
+            if link.name != "mixxx-engine":
+                raise StudioError("没有声音引擎，录不了")
+            if not link.wait(lambda: link.status is not None, 15):
+                raise StudioError("声音引擎没有启动起来")
+            runner = Runner5(c, link, beat=0.0, speed=speed, stop_fade_ms=50.0)
+
+            def trouble(misses: int) -> str:
+                if bad:
+                    m = bad[0]
+                    text = next((a["text"] for a in runner.actions if a["rc"] == m.get("id")), str(m.get("id")))
+                    text += f"：{m['msg']}" if m.get("msg") else ""
+                    more = f"，共 {len(bad)} 处" if len(bad) > 1 else ""
+                    if any(x.get("st") == "failed" for x in bad):
+                        return f"有片段没装上（{text}{more}）"
+                    return f"放得太快，有动作没赶上（{text}{more}）"
+                return f"电脑太忙，读盘跟不上 {misses} 次（录音里会有缺口）" if misses > 0 else ""
+
+            try:
+                link.call({"cmd": "record", "path": str(part), "trim": True})
+            except Engine5Error as e:
+                raise StudioError(f"录音文件打不开：{e}") from e
+            link.call({"cmd": "v5.perf"})  # 读盘没跟上的次数从这里重新数
+            runner.start()
+            t0: tuple[float, float] | None = None  # 开始走带时的（墙钟，音乐秒）
+            rate, last_emit = 0.0, 0.0
+            while runner.running and not rec["cancel"].is_set():
+                st = link.status or {}
+                if st.get("state") == "running":
+                    t = c.tempo.sec_at(max(0.0, float(st.get("beat", 0.0))))
+                    now = time.monotonic()
+                    if t0 is None:
+                        t0 = (now, t)
+                    if now - t0[0] > 0.5:
+                        rate = (t - t0[1]) / (now - t0[0])  # 实际的倍速（从开始走带算起）
+                    rec["progress"] = round(min(0.99, t / max(1.0, c.duration)), 4)
+                    rec["detail"] = (f"{rate:.0f} 倍速，" if rate >= 1.0 else "") + f"录到 {_mmss(t)} / {_mmss(c.duration)}"
+                if (bad or int(st.get("misses") or 0) > 0) and (not last or any(m.get("st") == "failed" for m in bad)):
+                    break  # 这一遍已经不能用了：不录到底
+                if time.monotonic() - last_emit > 1.0:
+                    last_emit = time.monotonic()
+                    self.s._emit_recording()
+                runner.join(0.2)
+            if runner.running:
+                runner.request_stop()
+            runner.join(30)
+            stop: dict[str, Any] = {}
+            misses = 0
+            try:
+                stop = link.call({"cmd": "record_stop"}, timeout=120)
+                misses = int(link.call({"cmd": "v5.perf"}).get("cache_misses") or 0)
+            except Engine5Error:
+                pass  # 引擎没了：下面按 Runner5 报的错说
+            if rec["cancel"].is_set():
+                return {}
+            why = trouble(misses)
+            if why and not last:
+                return {"redo": why, "cache_misses": misses}
+            if any(m.get("st") == "failed" for m in bad):
+                raise StudioError(f"{why}，录出来会缺这一段")
+            if runner.progress.stage != "done" or "seconds" not in stop:
+                raise StudioError(runner.progress.error or f"录到一半停了（{runner.progress.stage}）")
+            return {"seconds": float(stop["seconds"]), "cache_misses": misses, "late": len(bad), "rate": round(rate, 1)}
+        finally:
+            try:
+                link.call({"cmd": "quit"}, timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            link.close()
 
     # ------------------------------------------------------------ 文件夹导入 / 演出包
 

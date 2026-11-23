@@ -1,10 +1,13 @@
 """v5 在应用里的整条路：文件夹（谱 + 原曲）→ 导入 → 一键分析 → 演出（调度器）→ 停下 / 继续 → 演出包 → 换地方再导入。
 
 音频是合成的（已知 BPM / 第 1 小节）；引擎用独立模拟器 sim5（DJSTUDIO_ENGINE_BIN=none）。
+整场录成 MP3 要真的声音引擎（模拟器不出 MP3）：那几个测试只在设了 DJSTUDIO_ENGINE_BIN 时跑，Studio 那一半的流程另有不用引擎的测试。
 """
 import hashlib
 import json
 import shutil
+import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +23,8 @@ from djstudio.synth import techno, write_wav
 from djstudio.v5.link import SIM_DIR
 from djstudio.v5.service import MANIFEST
 from djstudio.web.app import create_app
+
+from .v5util import ENGINE_BIN, HAVE_ENGINE
 
 pytestmark = pytest.mark.skipif(
     not have_ffmpeg() or not (SIM_DIR / "sim5.cpp").is_file() or not (shutil.which("c++") or shutil.which("g++")),
@@ -270,6 +275,275 @@ def test_web_api_serves_the_chart_and_controls(ready):
     assert client.post("/api/v5/seek", json={"beat": 120}).status_code == 200
     assert client.post("/api/stop").status_code == 200
     wait_stage(studio, ("stopped", "done"))
+
+
+# ---------------------------------------------------------------- 整场录成 MP3
+
+
+def wait_recording(studio: Studio, timeout: float = 300.0) -> dict:
+    t0 = time.time()
+    while studio.recording and studio.recording["state"] == "running" and time.time() - t0 < timeout:
+        time.sleep(0.1)
+    return studio.recording_state() or {}
+
+
+def test_recording_needs_the_sound_engine(ready, monkeypatch):
+    """没有声音引擎（模拟器没有声音）：不录，原话说清楚；不留下一个「正在录」的状态。"""
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", "none")
+    studio, res, job = ready
+    before = studio.recording_state()
+    with pytest.raises(StudioError, match="没有声音引擎，录不了"):
+        studio.record(res["project"])
+    r = TestClient(create_app(studio)).post(f"/api/sets/{res['project']}/record")
+    assert r.status_code == 409 and "没有声音引擎，录不了" in r.json()["detail"]
+    assert studio.recording_state() == before
+
+
+def test_record_flow_of_a_v5_project_without_the_engine(ready, monkeypatch):
+    """Studio 那一半（录一遍的那一步换成假的，不用引擎）：v5 的项目转到 Service5.record_once；它说这一遍不能用（redo）
+    就按下一档倍速重录；录的时候不能开始演出、不能再录一份；录好的文件加上 ID3（标题 = 谱名），放进「DJ Studio 录音」。"""
+    studio, res, job = ready
+    pid = res["project"]
+    client = TestClient(create_app(studio))
+    monkeypatch.setattr("djstudio.engine.bundled.engine_binary", lambda: Path("/bin/sh"))
+    calls: list[tuple[float, bool]] = []
+    gate = threading.Event()
+
+    def fake_once(rec, c, speed, part, last):
+        calls.append((speed, last))
+        if len(calls) == 1:
+            gate.wait(20)
+            return {"redo": "放得太快，有动作没赶上（D2 起播 C2）", "cache_misses": 0}
+        part.write_bytes(b"\xff\xfb\x90\x00" + bytes(1000))
+        return {"seconds": c.duration, "cache_misses": 0, "late": 0, "rate": 7.5}
+
+    monkeypatch.setattr(studio.v5, "record_once", fake_once)
+    events: list[dict] = []
+
+    def listen(kind, payload):
+        if kind == "recording":
+            events.append(dict(payload))
+
+    studio.listeners.append(listen)
+    try:
+        r = client.post(f"/api/sets/{pid}/record")
+        assert r.status_code == 200, r.text
+        st = r.json()
+        c = studio.v5.compiled(pid)
+        assert st["state"] == "running" and st["set"] == pid and st["title"] == "服务测试" and "cancel" not in st
+        assert st["duration"] == round(c.duration, 1) and st["progress"] == 0.0
+        assert client.get("/api/state").json()["recording"]["state"] == "running"
+        # 录的时候：不能再录一份，不能开始演出（从头、从场景、继续都不行）
+        assert client.post(f"/api/sets/{pid}/record").status_code == 409
+        with pytest.raises(StudioError, match="正在录 MP3"):
+            studio.play(pid, speed=8)
+        r = client.post(f"/api/sets/{pid}/play", json={"speed": 8, "from": 1})
+        assert r.status_code >= 400 and "正在录 MP3" in r.text
+        assert studio.v5.run is None
+        gate.set()
+        rec = wait_recording(studio, 30)
+    finally:
+        gate.set()
+        studio.listeners.remove(listen)
+    assert rec["state"] == "ok", rec
+    assert calls == [(20.0, False), (8.0, False)]  # 第一遍不能用 → 放慢到第二档重录
+    assert any("有动作没赶上" in e["detail"] and "放慢到 8 倍重录" in e["detail"] for e in events), [e["detail"] for e in events]
+    assert events[0]["state"] == "running" and events[-1]["state"] == "ok"
+    assert rec["speed"] == 8.0 and rec["rate"] == 7.5 and rec["cache_misses"] == 0 and rec["progress"] == 1.0
+    assert rec["seconds"] == round(c.duration, 1) and rec["detail"].startswith("录好了")
+    f = Path(rec["file"])
+    assert f.parent == studio.recordings_dir and f.name == rec["file_name"] and f.name.startswith("服务测试 ") and f.suffix == ".mp3"
+    data = f.read_bytes()
+    assert data[:3] == b"ID3" and "服务测试".encode("utf-16-le") in data[:200] and rec["size"] == len(data)
+    assert data.endswith(b"\xff\xfb\x90\x00" + bytes(1000))  # 标签后面是引擎录的那一份，原样
+    assert [p.name for p in studio.recordings_dir.iterdir()] == [f.name]  # 临时文件没留下
+    assert [x["name"] for x in client.get("/api/recordings").json()] == [f.name]
+    # 录完了：演出照常能开始；反过来，演出的时候不能录
+    studio.play(pid, speed=4)
+    wait_stage(studio, ("running",))
+    with pytest.raises(StudioError, match="正在演出"):
+        studio.record(pid)
+    assert studio.recording_state()["state"] == "ok"  # 上一次录的结果还在
+    studio.stop()
+    wait_stage(studio, ("stopped",))
+
+
+def test_recording_is_refused_when_a_source_file_is_gone(ready, monkeypatch, tmp_path):
+    """用到的原文件不在了：录之前就说是哪一个（不等录完才发现少了一台 Deck）。"""
+    studio, res, job = ready
+    monkeypatch.setattr("djstudio.engine.bundled.engine_binary", lambda: Path("/bin/sh"))
+    c = studio.v5.compiled(res["project"])
+    rows = c.library_rows()
+    gone = [{**rows[0], "path": str(tmp_path / "搬走了.wav")}] + rows[1:]
+    monkeypatch.setattr(type(c), "library_rows", lambda self: gone)
+    before = studio.recording_state()
+    with pytest.raises(StudioError, match=r"原文件不在了.*A1.*搬走了\.wav"):
+        studio.record(res["project"])
+    assert studio.recording_state() == before
+
+
+@pytest.fixture(scope="module")
+def example(tmp_path_factory):
+    """示例谱（docs/score_v5_example.md）和按它的素材表合成的五份 MP3，在声音引擎上分析好。录音的测试用。"""
+    if not HAVE_ENGINE:
+        pytest.skip("要声音引擎（DJSTUDIO_ENGINE_BIN）")
+    from djstudio.v5.demo import make_folder
+
+    mp = pytest.MonkeyPatch()
+    mp.setenv("DJSTUDIO_ENGINE_BIN", ENGINE_BIN)
+    mp.setenv("DJSTUDIO_NO_UPDATE", "1")
+    mp.setenv("DJSTUDIO_FIND_DIRS", "")
+    root = tmp_path_factory.mktemp("example")
+    studio = make_studio(root)
+    try:
+        make_folder(root / "四 Deck 场景示例")
+        res = studio.v5.import_folder(root / "四 Deck 场景示例")
+        wait_job(studio)
+    finally:
+        mp.undo()  # 这个模块里别的测试用模拟器：环境变量不留着，用引擎的测试自己设
+    yield studio, res["project"]
+    studio.shutdown()
+
+
+def decode(path: Path) -> np.ndarray:
+    """MP3 → 立体声 float（44.1 kHz）。ffmpeg 按 LAME 的 Info 帧去掉编码器前后的补零：第 0 个采样就是录音的第 0 帧。"""
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "2", "-ar", "44100", "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype="<f4").reshape(-1, 2).astype(np.float64)
+
+
+def recorded_files(studio: Studio) -> set[str]:
+    d = studio.recordings_dir
+    return {p.name for p in d.iterdir()} if d.is_dir() else set()
+
+
+def test_record_the_example_to_mp3_in_the_sound_engine(example, monkeypatch):
+    """「录成 MP3」，曲谱 v5：示例谱整场（7 分多钟：四台 Deck、发送效果、现场效果、采样、变速）在声音引擎里不出声地尽快放一遍，
+    用 Mixxx 的 MP3 编码器录成 320 kbps。从第 0 拍录起（第一拍是完整的）、到全场结束；开头结尾没有多出来的静音；
+    读盘没有跟不上，没有晚到的动作；标签里是谱名。"""
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", ENGINE_BIN)
+    studio, pid = example
+    c = studio.v5.compiled(pid)
+    assert c.ok and 400 < c.duration < 460
+    had = recorded_files(studio)
+    events: list[dict] = []
+
+    def listen(kind, payload):
+        if kind == "recording":
+            events.append(dict(payload))
+
+    studio.listeners.append(listen)
+    t0 = time.time()
+    try:
+        st = studio.record(pid)
+        assert st["state"] == "running" and st["title"] == "四 Deck 场景示例" and st["duration"] == round(c.duration, 1)
+        with pytest.raises(StudioError, match="正在录 MP3"):
+            studio.play(pid, speed=1.0)  # 录的时候不能开始演出
+        rec = wait_recording(studio)
+    finally:
+        studio.listeners.remove(listen)
+    wall = time.time() - t0
+    assert rec["state"] == "ok", rec
+    assert rec["cache_misses"] == 0 and rec["speed"] == Studio.RECORD_SPEEDS[0], rec  # 第一遍就录成了，没有放慢重录
+    assert rec["rate"] > 3 and wall < c.duration / 3, f"{c.duration:.0f} 秒的一场录了 {wall:.1f} 秒（{rec['rate']} 倍速）"
+    prog = [e["progress"] for e in events if e["state"] == "running"]
+    assert len(prog) > 5 and prog == sorted(prog) and 0.3 < prog[-1] <= 0.99  # 网页上的进度一直往前走
+    assert any("倍速，录到" in e["detail"] for e in events)
+    f = Path(rec["file"])
+    assert f.parent == studio.recordings_dir and f.name.startswith("四 Deck 场景示例 ") and f.suffix == ".mp3"
+    assert recorded_files(studio) - had == {f.name}  # 只多了这一个：临时文件没留下
+    # 标签：ID3v2.3，标题是谱名（UTF-16）；320 kbps
+    head = f.read_bytes()[:200]
+    assert head[:3] == b"ID3" and "四 Deck 场景示例".encode("utf-16-le") in head
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration,bit_rate:format_tags=title",
+                            "-of", "json", str(f)], capture_output=True, text=True, check=True)
+    fmt = json.loads(probe.stdout)["format"]
+    assert fmt["tags"]["title"] == "四 Deck 场景示例" and 300_000 < float(fmt["bit_rate"]) < 340_000
+    assert abs(float(fmt["duration"]) - rec["seconds"]) < 0.1
+    # 长度 = 全场（第一个片段从 1.1 起播，最后一个片段在全场结束时停；效果的尾音都在全场长度以内）
+    assert c.clips and min(k.start for k in c.clips) == 0.0 and max(k.stop for k in c.clips) == c.length
+    assert c.duration - 0.5 < rec["seconds"] <= c.duration + 0.05, (rec["seconds"], c.duration)
+
+    x = decode(f)
+    sr = 44100
+    assert abs(len(x) / sr - rec["seconds"]) < 0.05
+    rms = float(np.sqrt((x ** 2).mean()))
+    assert 0.03 < rms < 0.5 and 0.5 < float(np.abs(x).max()) < 1.5, (rms, float(np.abs(x).max()))
+    # 第一拍没有被切掉：录音从第 0 拍所在的那一块（512 帧 = 11.6 ms）录起——开头是一小段静音，然后第 1 小节的重音从头响起；
+    # 它和第 5 小节那一下（合成素材里同样的一下，这时旋钮都还没动）一样大
+    env = np.abs(x).max(axis=1)
+    onset = int(np.flatnonzero(env > 0.01)[0])
+    assert onset < 512 and float(env[:256].max()) < 1e-3, (onset, float(env[:256].max()))
+    beat = 60.0 / c.tempo.bpm_at(0.0)
+    assert c.tempo.bpm_at(16.0) == c.tempo.bpm_at(0.0)
+    win = int(0.4 * sr)
+    bar1 = float(np.sqrt((x[:win] ** 2).mean()))
+    bar5 = float(np.sqrt((x[int(16 * beat * sr):int(16 * beat * sr) + win] ** 2).mean()))
+    assert bar1 > 0.01 and abs(bar1 - bar5) < 0.1 * bar5, (bar1, bar5)
+    # 结尾：停在全场结束，不是硬切在一个响的采样上
+    assert float(env[-64:].max()) < 0.02, float(env[-64:].max())
+    # 中间没有整段没声音的地方：按开头速度的 4 小节（7 秒多）一段，每一段都有声音
+    seg = int(16 * beat * sr)
+    quiet = [i for i in range(len(x) // seg) if float(np.sqrt((x[i * seg:(i + 1) * seg] ** 2).mean())) < 0.003]
+    assert not quiet, quiet
+
+
+def test_recording_can_be_cancelled_through_the_web_api(example, monkeypatch):
+    """网页上的那条路（v5 的项目用同一个接口）：开始录 → 状态里看得到 → 取消 → 不留下半截文件；之后演出照常能开始。"""
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", ENGINE_BIN)
+    studio, pid = example
+    client = TestClient(create_app(studio))
+    before = recorded_files(studio)
+    r = client.post(f"/api/sets/{pid}/record")
+    assert r.status_code == 200 and r.json()["state"] == "running", r.text
+    r = client.post(f"/api/sets/{pid}/record")
+    assert r.status_code == 409 and "已经在录了" in r.json()["detail"]
+    t0 = time.time()
+    while studio.recording["state"] == "running" and studio.recording["progress"] < 0.02 and time.time() - t0 < 60:
+        time.sleep(0.05)
+    st = client.get("/api/state").json()["recording"]
+    assert st["state"] == "running" and st["progress"] >= 0.02 and "录到" in st["detail"], st
+    assert any(name.endswith(".part.mp3") for name in recorded_files(studio) - before)  # 正在往临时文件里录
+    assert client.post("/api/recording/cancel").json() == {"ok": True}
+    rec = wait_recording(studio, 30)
+    assert rec["state"] == "cancelled" and "file" not in rec, rec
+    assert recorded_files(studio) == before
+    r = client.post(f"/api/sets/{pid}/play", json={"speed": 8})
+    assert r.status_code == 200, r.text
+    wait_stage(studio, ("running",))
+    assert studio.engine_state()["link"] == "mixxx-engine"
+    studio.stop()
+    wait_stage(studio, ("stopped",))
+
+
+def test_recording_keeps_the_effect_tail_after_the_last_clip(example, monkeypatch):
+    """最后一个片段停了以后还在响的尾音也录进去：尾音算在全场长度里，引擎放到那里才算放完（不是片段一停就收）。
+    一个片段 4 小节，最后一小节送进 Echo（1/2 拍、反馈 0.6）：片段在第 16 拍停，尾音再响 8 拍，一拍比一拍小，最后淡完。"""
+    from djstudio.v5.model import Project
+
+    monkeypatch.setenv("DJSTUDIO_ENGINE_BIN", ENGINE_BIN)
+    studio, pid = example
+    a1 = next(a for a in studio.v5.load(pid).assets if a.id == "A1")
+    studio.v5.save(Project.model_validate({
+        "schema": "djset/3", "id": "tail-test", "name": "尾音", "tempo": [{"at": "1.1", "bpm": 132}],
+        "assets": [json.loads(a1.model_dump_json())],
+        "clips": [{"id": "C1", "asset": "A1", "deck": 1, "src": "25.1", "start": "1.1", "stop": "5.1"}],  # 原曲第 25 小节起：有 kick 的一段
+        "fx": [{"id": "F1", "kind": "echo", "route": "send", "targets": ["C1"], "start": "4.1", "end": "5.1",
+                "params": {"beats": 0.5, "feedback": 0.6}, "send": [{"at": "4.1", "value": 1.0, "step": True}]}]}))
+    c = studio.v5.compiled("tail-test")
+    assert c.ok, [str(i) for i in c.issues]
+    assert max(k.stop for k in c.clips) == 16.0 and c.fx[0]["tail"] == 8.0 and c.length == 24.0
+    studio.record("tail-test")
+    rec = wait_recording(studio, 60)
+    assert rec["state"] == "ok" and rec["cache_misses"] == 0, rec
+    # 长度 = 片段 + 尾音（结尾淡到听不见的那一点点是数字静音，不录）
+    assert c.duration - 0.5 < rec["seconds"] <= c.duration + 0.05, (rec["seconds"], c.duration)
+    x = decode(Path(rec["file"]))
+    beat = int(44100 * 60 / 132)
+    db = [20 * np.log10(float(np.sqrt((x[b * beat:(b + 1) * beat] ** 2).mean())) + 1e-9) for b in range(23)]
+    assert all(v > -25 for v in db[:16]), db  # 片段在放
+    assert db[16] < db[15] - 5 and db[16] > -30, db  # 片段停了（干声没了），尾音还在
+    assert all(db[b + 1] < db[b] - 5 for b in range(16, 22)) and db[22] < -60, db  # 一拍比一拍小，到结尾已经很轻：不是硬切
 
 
 def sha(p: Path) -> str:

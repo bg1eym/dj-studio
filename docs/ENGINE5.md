@@ -124,3 +124,16 @@ Deck（Mixxx：解码 → 变速 → 增益 → EQ → Filter，推子前）
 涉及 Mixxx 行为的结论都在真引擎上另测过（[MIXXX_NOTES.md](MIXXX_NOTES.md)、[V5_G0.md](V5_G0.md)）。
 
 多出来的命令：`sim.record {path}`（主输出录成 float32 裸数据）、`sim.set {load_ms | fail | speed | nudge | wave}`（故障注入）、`sim.decks`。
+
+## 8 录成 MP3
+
+`Studio.record` 对 v5 的项目（`Service5.record_once`）：调度器模式的声音引擎，不出声（`DJSTUDIO_AUDIO=0`），`DJSTUDIO_SPEED` 是倍速的上限。
+
+- 顺序：`record {path: ….mp3, trim: true}` → `v5.perf`（把读盘的计数清零）→ `v5.plan` → `v5.start {beat: 0}` → 等 `done` → `record_stop` → `v5.perf`。
+  和演出一样由 Runner5 交计划、看回执；录的是主输出那一块（`outBuffer()`，只在不出声的那条路上录）。
+- `trim`：装载、走带起点前那几块数字静音不录——录音从第 0 拍所在的那一块开始；结尾的静音丢掉，中间的照录。
+- 尾音：发送效果的尾音、处理组里 Echo / Spiral 的尾音都算在计划的长度里（`len`），引擎放过 `len`、发送实例都收完才报 `done`（之后 `halt`，没有还在响的东西）。
+  所以录到 `done` 就是整场，不另外留时间。
+- 放多快都是同一份声音（调度按帧数走）。会让某一遍和原速不一样的只有两件事，都查得到：读盘没跟上（`v5.perf` 的 `cache_misses`；
+  `record_stop` 回的那个在调度器模式下是 −1，它只在 v4 的引擎时钟下数）、片段来不及装（回执 `late` / `skipped` / `failed`）。出了就按下一档倍速重录。
+- 模拟器 `sim5` 没有 `record`（只有 `sim.record` 录裸数据）：没有声音引擎时不录。
