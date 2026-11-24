@@ -404,6 +404,12 @@ canvas.l5-canvas { display: block; width: 100%; touch-action: pan-y; cursor: gra
 .l5-tip { position: absolute; z-index: 5; pointer-events: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
   padding: 6px 9px; font-size: 12px; line-height: 1.5; max-width: 360px; box-shadow: 0 4px 16px rgba(0, 0, 0, .45); }
 .l5-tip-h { font-weight: 700; }
+/* 安排图上的说明：一行一项（左边是这一项叫什么），色块上写不下的都在这里 */
+.l5-atip { z-index: 20; width: max-content; max-width: min(460px, calc(100% - 8px)); font-size: 13px; }
+.l5-atip .l5-tip-h { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 14px; margin-bottom: 3px; white-space: pre-wrap; }
+.l5-tip-r { display: grid; grid-template-columns: 4.6em minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.l5-tip-k { color: var(--dim); white-space: nowrap; }
+.l5-tip-go { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
 .l5-tip-v { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .l5-bubble { position: absolute; z-index: 15; width: 330px; max-width: calc(100% - 8px); background: var(--panel2); border: 1px solid var(--accent); border-radius: 8px;
   padding: 10px 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, .55); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }

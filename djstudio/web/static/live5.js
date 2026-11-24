@@ -345,8 +345,9 @@ export class Live5View {
     // 整套 set 的安排（一张小图）+ 主要的交接（一行字，定高、不换行：字变长变短画面不跟着跳）
     put(R, el("div", { class: "panel l5-head" },
       el("div", { class: "l5-row l5-toprow" }, posBox, timeBox, bpmBox, sceneBox, this.stageEl, this.lateEl, this.pauseBtn, this.jumpBtn),
-      this.arrEl = el("div", { class: "l5-arr", title: "整套 set 的安排：场景、主要的交接（橙色的一段，蓝线 = 换低频）、每台 Deck 放什么——粗的色块 = 主线（这一首歌），细的 = 工具（循环、人声…），浅一点的是 loop，底下的黄条是效果。点哪从哪放" },
-        this.arr = el("canvas", { class: "l5-arrc", role: "img", "aria-label": "整套 set 的安排：场景、主要的交接和每台 Deck 的片段" })),
+      this.arrEl = el("div", { class: "l5-arr" },
+        this.arr = el("canvas", { class: "l5-arrc", role: "img", "aria-label": "整套 set 的安排：场景、主要的交接和每台 Deck 的片段。鼠标放上去看那一段的说明，点一下从那里放" }),
+        this.atip = el("div", { class: "l5-tip l5-atip hidden" })),
       el("div", { class: "l5-horow" }, el("span", { class: "l5-kind main" }, "主要的交接"), this.hoEl = el("span", { class: "l5-ho" }))));
 
     // 整首曲子：每台 Deck 一行——它现在放的（或者下一段要放的）那首原曲的整首波形
@@ -396,8 +397,8 @@ export class Live5View {
       this.stratEl));
 
     this._bindPlot(this.lcanvas);
-    this.arr.addEventListener("mousemove", (ev) => { const r = this.arr.getBoundingClientRect(); this.arrHover = { x: ev.clientX - r.left, y: ev.clientY - r.top }; this._kick(true); });
-    this.arr.addEventListener("mouseleave", () => { this.arrHover = null; this._kick(true); });
+    this.arr.addEventListener("mousemove", (ev) => { const r = this.arr.getBoundingClientRect(); this.arrHover = { x: ev.clientX - r.left, y: ev.clientY - r.top }; this._showArrTip(); this._kick(true); });
+    this.arr.addEventListener("mouseleave", () => { this.arrHover = null; this.atip.classList.add("hidden"); this._kick(true); });
     this.arr.addEventListener("click", (ev) => {
       if (!this.chart || !this.onSeek) return;
       const r = this.arr.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
@@ -882,19 +883,95 @@ export class Live5View {
     g.fillRect(L, 0, Math.max(0, xp - L), H);
     g.fillStyle = "#fff";
     g.fillRect(Math.round(xp) - 1, 0, 2, H);
-    const hv = this.arrHover;
-    if (hv && this.onSeek) {
-      const hb = this._arrBeatAt(hv.x);
-      if (hb !== null) {
-        const sc = hv.y < ARR.scene ? sceneAt(ch, hb) : null;
-        const ho = !sc && hv.y < top ? this._handoverAt(hb) : null;
-        const row = Math.floor((hv.y - top) / (ARR.row + ARR.gap));
-        const k = !sc && !ho && row >= 0 && row < this.decks.length ? this._deckClipAt(this.decks[row], hb) : null;
-        drawSeekHover(g, hv.x, H, sc ? `▶ 从场景 ${sc.no} 的开头放（全场第 ${barOf(sc.start)} 小节）`
-          : ho ? `▶ 从交接 ${ho.n}（${ho.from} → ${ho.to}）开始的地方放（全场第 ${barOf(ho.start)} 小节${ho.swap !== null && ho.swap !== undefined ? `，第 ${barOf(ho.swap)} 小节换低频` : ""}）`
-            : `▶ 从全场第 ${barOf(hb)} 小节放${k ? `（${k.main ? "主线" : "工具"} ${k.id} ${k.title}，原曲第 ${Math.floor(srcAt(k, hb) / BEATS) + 1} 小节）` : ""}`);
-      }
+    const hv = this.arrHover; // 悬停：一条细线；鼠标底下那一段是什么写在旁边的说明里（_showArrTip）
+    if (hv && this._arrBeatAt(hv.x) !== null) { g.fillStyle = "rgba(255,255,255,.75)"; g.fillRect(Math.round(hv.x), 0, 1, H); }
+  }
+
+  // 安排图上鼠标底下是什么：场景 / 交接 / 哪台 Deck 的哪个片段（那台 Deck 这里没有片段 = deck；别的 = none）
+  _arrTarget(hv) {
+    const beat = this._arrBeatAt(hv.x);
+    if (beat === null) return null;
+    const top = ARR.scene + ARR.ho;
+    if (hv.y < ARR.scene) { const sc = sceneAt(this.chart, beat); return sc ? { kind: "scene", sc, beat, key: `s${sc.no}` } : { kind: "none", beat, key: "n" }; }
+    if (hv.y < top) { const ho = this._handoverAt(beat); return ho ? { kind: "ho", ho, beat, key: `h${ho.n}` } : { kind: "none", beat, key: "n" }; }
+    const row = Math.floor((hv.y - top) / (ARR.row + ARR.gap));
+    if (row < 0 || row >= this.decks.length) return { kind: "none", beat, key: "n" };
+    const d = this.decks[row], k = this._deckClipAt(d, beat);
+    return k ? { kind: "clip", d, k, beat, key: `c${k.id}` } : { kind: "deck", d, beat, key: `d${d}` };
+  }
+
+  // 安排图上的说明：色块上写不下的都在这里（这一段是哪首、什么角色、谱上的备注、全场哪几小节、用原曲哪一段、要哪些元素、挂了什么效果）
+  _showArrTip() {
+    const T = this.atip, hv = this.arrHover;
+    const t = hv && this.chart ? this._arrTarget(hv) : null;
+    if (!t) { T.classList.add("hidden"); return; }
+    const key = `${t.key}:${Math.floor(t.beat / BEATS)}`;
+    if (key !== this._atipKey) {
+      this._atipKey = key;
+      T.replaceChildren(...this._arrTipLines(t).filter(Boolean));
     }
+    T.classList.remove("hidden");
+    const w = this.arr.clientWidth, tw = T.offsetWidth;
+    T.style.left = `${Math.max(2, Math.min(w - tw - 2, hv.x + 14))}px`;
+    T.style.top = `${hv.y + 20}px`;
+  }
+
+  _arrTipLines(t) {
+    const ch = this.chart, B = BEATS;
+    const head = (...kids) => el("div", { class: "l5-tip-h" }, kids);
+    const row = (label, ...kids) => el("div", { class: "l5-tip-r" }, el("span", { class: "l5-tip-k" }, label), el("span", {}, kids));
+    const span = (a, b) => (b > a + 1e-6 ? `第 ${barOf(a)}–${barOf(b - 0.5)} 小节（${durText(b - a)}）· ${clock(secAt(ch.tempo, a))} – ${clock(secAt(ch.tempo, b))}` : `第 ${barOf(a)} 小节`);
+    const go = (text) => (this.onSeek ? el("div", { class: "dim l5-tip-go" }, text) : null);
+    const here = `全场第 ${barOf(t.beat)} 小节`;
+    if (t.kind === "scene") {
+      const sc = t.sc, roles = sceneRoles(ch, sc), st = sc.strategy || {};
+      const b0 = tempoAt(ch, sc.start), b1 = tempoAt(ch, sc.end - 1e-6);
+      return [head(`场景 ${sc.no}${sc.name ? " " + sc.name : ""}`, sc.draft ? el("span", { class: "badge warn" }, "草稿") : null),
+        row("全场", span(sc.start, sc.end)),
+        row("主速", fmtBpm(b0) + (Math.abs(b1 - b0) > 0.05 ? ` → ${fmtBpm(b1)}` : "") + " BPM"),
+        row("Deck", this.decks.map((d) => `D${d} ${roles[d] || "待命"}`).join(" · ")),
+        ...STRATEGY.map((k) => ((st[k] || "").trim() ? row(k, st[k].trim()) : null)),
+        go("点一下：从这个场景的开头放")];
+    }
+    if (t.kind === "ho") {
+      const h = t.ho, a = clipById(ch, h.from) || {}, b = clipById(ch, h.to) || {};
+      const swap = h.swap !== null && h.swap !== undefined;
+      return [head(`交接 ${h.n}：${h.from} ${a.title || ""}（D${h.from_deck}）→ ${h.to} ${b.title || ""}（D${h.to_deck}）`),
+        row("全场", h.end > h.start + 1e-6 ? span(h.start, h.end) : `第 ${barOf(h.start)} 小节直接接上（两首没有叠着放）`),
+        row("换低频", swap ? `全场 ${posText(h.swap)}（进来以后第 ${barOf(h.swap) - barOf(h.start) + 1} 小节）` : "谱上没有换低频的那一拍"),
+        go("点一下：从交接开始的地方放")];
+    }
+    if (t.kind === "clip") {
+      const k = t.k, d = t.d, asset = this.assets[k.asset] || {};
+      const sr = sceneRoles(ch, sceneAt(ch, t.beat), t.beat)[d];
+      const role = sr && sr !== "待命" ? sr : k.role || "";
+      const srcBar = (x) => Math.floor(x / B + 1e-6) + 1;
+      const pick = k._pick || (k._pick = clipPick(k)), spans = k._spans || (k._spans = clipSpans(k)), bands = clipBands(k);
+      const laps = (n) => (Math.abs(n - Math.round(n)) < 1e-6 ? String(Math.round(n)) : n.toFixed(1));
+      const moves = [
+        ...spans.filter((sp) => sp.loop).map((sp) => `Loop：原曲第 ${srcBar(sp.a)} 小节起 ${durText(sp.len)} × ${laps(sp.laps)} 圈`),
+        ...spans.filter((sp) => sp.kind === "jump" && sp.g0 > k.start).map((sp) => `跳到原曲第 ${srcBar(sp.a)} 小节`)];
+      const BZ = { lo: "LOW", mid: "MID", hi: "HIGH" }, say = { on: "", off: "（不要：从头到尾切着）", in: "（先切着，后来放进来）", out: "（先在，后来切掉）" };
+      const fx = (ch.fx || []).filter((f) => (f.decks || []).includes(d) && f.start < k.stop && f.end > k.start);
+      const cues = asset.hotcues || [];
+      return [head(el("span", { class: "l5-chip d" + d }, String(d)), ` ${k.id} ${k.title}`, el("span", { class: `l5-kind ${k.main ? "main" : "tool"}` }, k.main ? "主线" : "工具"),
+          role ? el("span", { class: "l5-role" }, role) : null),
+        k.note ? row("说明", k.note) : null,
+        row("全场", span(k.start, k.stop)),
+        row("原曲", (pick ? `选用第 ${srcBar(pick.a)}–${Math.max(srcBar(pick.a), Math.ceil(pick.b / B - 1e-6))} 小节` : "") + (asset.bars ? ` · 整首 ${Math.floor(asset.bars)} 小节` : "") + ` · ${fmtBpm(k.bpm)} BPM`),
+        moves.length ? row("怎么放", moves.join("；")) : null,
+        row("要", ["lo", "mid", "hi"].map((b) => BZ[b] + say[bands[b]]).join(" · ")),
+        fx.length ? row("效果", fx.map((f) => `${f.id} ${f.name}（${posText(f.start)}–${posText(f.end)}）`).join("、")) : null,
+        cues.length ? row("Hot cue", cues.map((c) => `${c.pad} ${c.name}`).join(" · ")) : null,
+        go(`点一下：从${here}放（原曲第 ${srcBar(srcAt(k, t.beat))} 小节）`)];
+    }
+    if (t.kind === "deck") {
+      const nx = (this.deckClips[t.d] || []).find((c) => c.start >= t.beat);
+      return [head(el("span", { class: "l5-chip d" + t.d }, String(t.d)), " 这里没有片段"),
+        nx ? row("下一段", `${nx.id} ${nx.title}，全场第 ${barOf(nx.start)} 小节进（${Math.ceil((nx.start - t.beat) / B)} 小节以后）`) : row("下一段", "后面没有了"),
+        go(`点一下：从${here}放`)];
+    }
+    return [head(here), go("点一下：从这里放")];
   }
 
   // 「主要的交接」那一行字：正在交接 = 谁接谁、低频哪一拍换、还有几小节交完；没在交接 = 下一次在哪
