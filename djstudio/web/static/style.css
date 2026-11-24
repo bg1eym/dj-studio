@@ -316,6 +316,7 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .l5-stat { display: inline-flex; align-items: baseline; white-space: nowrap; min-width: 0; }
 .l5-stat b { font: 700 20px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
 .l5-stat b.l5-pos { min-width: 3.6em; }
+.l5-stat b.l5-time { font-size: 18px; }
 .l5-stat b.l5-scene-name { font-family: inherit; font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
 .l5-stat .badge { margin-left: 8px; }
 .l5-head .l5-stat.grow { flex: 1 1 13em; } /* 当前场景：挤不下就换行，不缩成没有 */
@@ -330,20 +331,54 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .l5-nextline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 @media (max-width: 1100px) { .l5-rolerow { flex-wrap: wrap; } .l5-roles { flex: 1 1 100%; } }
 
-/* 场景条：每个场景按长短占一格（像两 Deck 的整套时间表） */
-.l5-strip { position: relative; display: flex; gap: 2px; }
-.l5-strip.hidden { display: none; }
-.live5 button.l5-seg { min-width: 0; display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 7px; overflow: hidden; white-space: nowrap;
-  border-radius: 4px; background: #1b2740; border: 1px solid transparent; text-align: left; font-size: 12px; color: var(--text); }
-.live5 button.l5-seg:nth-child(even) { background: #2a2440; }
-.live5 button.l5-seg.on { border-color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
-.l5-segn { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.l5-segb { margin-left: auto; font: 10px var(--mono); padding-left: 4px; }
-.l5-stripcur { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 5px #fff; pointer-events: none; }
+/* 主线 / 工具的小牌：主线 = 这一首歌（主曲 / 进曲 / 出曲），工具 = 加在上面的循环、人声…；橙色 = 主要的交接 */
+.l5-kind { font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 3px; font-weight: 700; white-space: nowrap; flex: none; }
+.l5-kind.main { background: var(--warn); color: #1a1300; }
+.l5-kind.tool { border: 1px dashed #5b6474; color: #aab2c2; font-weight: 500; }
+.l5-kind.idle { border: 1px solid var(--line); color: var(--dim); font-weight: 500; }
+.l5-kind.hidden { display: none; }
+.l5-horow { gap: 6px 10px; }
+.l5-ho { font-size: 14px; color: var(--text); }
+.l5-ho.live { color: var(--warn); font-weight: 700; }
+.l5-ho.dim { color: var(--dim); }
+.l5-arrleg { font-size: 11px; }
+.deck-role.main { color: var(--warn); border-color: var(--warn); }
+.deck-role.tool { border-style: dashed; }
+.l5-deck.tool { opacity: .92; }
+.l5-ch .l5-kind { font-size: 10px; line-height: 14px; margin-top: 2px; }
+.l5-ch .l5-kind.hidden { display: inline-block; visibility: hidden; } /* 占着位置：四个通道的旋钮对齐 */
+.l5-track.tool .ho-name { font-weight: 500; }
 
-/* 全场总览 / 曲线：左边行头（DOM），右边 canvas */
+/* 整套 set 的安排：场景一行 + 主要的交接一行 + 每台 Deck 一行色块（一张小图） */
+.l5-arr { position: relative; }
+canvas.l5-arrc { display: block; width: 100%; border-radius: 4px; }
+.live5.seekable canvas.l5-arrc { cursor: pointer; }
+
+/* 整首曲子：每台 Deck 一行（标签 + 整首波形），和两 Deck 的交接概览同一个样子 */
 .l5-ov { margin-bottom: 0; }
-.l5-ov .ho-head { align-items: center; margin-bottom: 6px; }
+.l5-ov .ho-head { align-items: baseline; margin-bottom: 6px; }
+.l5-ovhint, .l5-lnhint { font-size: 12px; }
+.l5-lnhint { margin: -2px 0 6px; }
+.l5-tracks { display: flex; flex-direction: column; gap: 6px; }
+canvas.ho-wave.l5-twave { height: 62px; }
+.l5-track .ho-bar { font-size: 13px; margin-top: 1px; }
+.l5-pick { margin-left: 8px; color: var(--warn); }
+.l5-need { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 11px; white-space: nowrap; overflow: hidden; }
+.l5-need .l5-lab { margin-right: 2px; font-size: 11px; }
+.l5-el { padding: 0 5px; border-radius: 3px; font: 700 10px/15px var(--mono); border: 1px solid transparent; flex: none; }
+.l5-el.lo { background: #2f69e0; color: #fff; } .l5-el.mid { background: #4cdf80; color: #0b0d11; } .l5-el.hi { background: #f2f4f8; color: #0b0d11; }
+.l5-el.off { background: none; border-color: var(--line); color: var(--dim); text-decoration: line-through; }
+.l5-el.in, .l5-el.out { background: none; }
+.l5-el.lo.in, .l5-el.lo.out { border-color: #5b8cff; color: #9db8ff; } .l5-el.mid.in, .l5-el.mid.out { border-color: #4cdf80; color: #4cdf80; }
+.l5-el.hi.in, .l5-el.hi.out { border-color: #f2f4f8; color: #f2f4f8; }
+.l5-neednote { color: var(--dim); overflow: hidden; text-overflow: ellipsis; margin-left: 4px; }
+.l5-track .ho-title { gap: 6px; }
+.l5-track .l5-role { margin-left: 2px; }
+.l5-track .ho-bar { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.l5-track.next .ho-bar { color: var(--dim); font-size: 13px; }
+.l5-track.next .ho-name { color: #c8cdd8; }
+
+/* 曲线：左边行头（DOM），右边 canvas */
 .l5-tools { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .l5-grid { display: grid; grid-template-columns: var(--l5-gutter) minmax(0, 1fr); }
 .l5-lgrid { grid-template-columns: var(--tl-label) minmax(0, 1fr); }
@@ -388,15 +423,32 @@ canvas.live-wave.l5-wave { height: 68px; }
 .l5-dstate.st-error { color: var(--err); font-weight: 700; }
 .l5-deck .dots i.on:first-child { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 
-/* 调音台（四路）+ 接下来 ｜ 曲线 + 策略 */
-.live-bottom.l5-bottom { grid-template-columns: minmax(430px, max-content) minmax(0, 1fr); }
-.l5-ch.off .knob, .l5-ch.off .fader { opacity: .6; } /* 没在放：照谱上这一拍的值摆着 */
-.l5-chs { column-gap: 8px; align-items: start; }
-.l5-ch .ch-body { gap: 7px; }
-.l5-ch .fx-row { gap: 2px; }
-.l5-ch .fader-row { gap: 6px; }
-.l5-ch .ch-name { display: flex; flex-direction: column; align-items: center; line-height: 1.25; }
-.l5-ch .ch-gain { min-height: 13px; }
+/* 调音台（四路）+ 现在的 EQ 操作 + 接下来 ｜ 曲线 + 策略。调音台做得紧凑（左边一列固定 440px，和两 Deck 时一样宽），宽度留给曲线 */
+.live-bottom.l5-bottom { grid-template-columns: 440px minmax(0, 1fr); }
+.l5-mixer { padding: 8px 8px 10px; }
+.l5-chs { column-gap: 4px; align-items: start; }
+.l5-ch .ch-name { display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
+.l5-ch .ch-gain { min-height: 12px; }
+.l5-ch .ch-body { gap: 5px; align-items: flex-start; }
+.l5-ch .ch-knobs { gap: 1px; }
+.l5-ch .knob-svg { width: 34px; height: 34px; }
+.l5-ch .knob.small .knob-svg { width: 26px; height: 26px; }
+.l5-ch .kl { font-size: 9px; letter-spacing: 0; margin-top: 0; }
+.l5-ch .kv { font-size: 10px; min-height: 12px; }
+.l5-ch .ks { display: none; } /* dB 那一行省掉：钟点位已经说了（7 点 = 切） */
+.l5-ch .fader-row { gap: 4px; margin-top: 2px; }
+.l5-ch .fader-track, .l5-ch .vu, .l5-mixer .master .vu, .l5-mixer .vu-scale { height: 200px; }
+.l5-ch .vu span, .l5-mixer .master .vu span { width: 9px; }
+.l5-ch .fader-cap { width: 22px; left: -7px; }
+.l5-ch .fx-row { gap: 4px; justify-content: center; margin-top: 3px; }
+.l5-mixer .master .kl { font-size: 9px; text-align: center; }
+.l5-mixer .vu-scale { width: 18px; font-size: 8px; }
+.l5-eqops { padding: 10px 12px; gap: 6px; }
+.l5-eqops .tl-sec.big { font-size: 15px; }
+.l5-eqops .eq-op { font-size: 18px; padding: 5px 10px; }
+.l5-eqops .eq-op.idle { font-size: 16px; }
+.l5-eqops .eq-op-now, .l5-eqops .eq-op-left { font-size: 15px; }
+.l5-eqops .eq-held, .l5-eqops .eq-next, .l5-eqops .eq-other { font-size: 15px; }
 .l5-drag { touch-action: none; outline: none; }
 .l5-drag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 .usable > .l5-drag, .knob.usable .knob-svg { cursor: ns-resize; }

@@ -953,6 +953,8 @@ def live_chart(c: Compiled5, lv: dict[str, Any]) -> dict[str, Any]:
 def chart(c: Compiled5) -> dict[str, Any]:
     """整场的图谱数据：同一条全场小节轴上的四条播放带（每段读到原曲哪里）、每个旋钮的曲线、效果、场景和策略、动作。
     网页的共轴图和交接说明都从这一份画——和交给引擎的计划同一次编译。"""
+    from .mainline import handovers, is_main
+
     p = c.project
     clips = []
     for cc in c.clips:
@@ -971,15 +973,29 @@ def chart(c: Compiled5) -> dict[str, Any]:
         clips.append({"id": k.id, "deck": k.deck, "asset": k.asset, "title": a.title or a.file or a.id, "role": k.role,
                       "track_id": cc.info.track_id, "bpm": cc.info.grid.bpm, "start": cc.start, "stop": cc.stop,
                       "load": cc.load, "gen": cc.gen, "segs": segs, "lanes": lanes, "line": k.line, "note": k.note,
-                      "keylock": k.keylock,
+                      "keylock": k.keylock, "main": is_main(c, cc),  # 主线（主曲 / 进曲 / 出曲）还是工具（mainline.py）
                       # 画波形用：原曲的 1.1 在文件的第几秒、文件多长（原曲第 s 拍 = t0 + s × 60 / bpm 秒）
                       "t0": round(cc.info.beat_time(0.0), 4), "dur": round(cc.info.grid.duration, 3)})
+    # 每份素材：整首的波形怎么对上小节（t0、bpm、dur）、这套谱要用到的点（打击垫 1–8，hotcue.py）
+    from .hotcue import asset_cues
+
+    cues = asset_cues(c)
+    info = {cc.clip.asset: cc.info for cc in c.clips}
+    assets = []
+    for a in p.assets:
+        inf = info.get(a.id)
+        assets.append({"id": a.id, "title": a.title or a.file or a.id, "file": a.file, "track_id": inf.track_id if inf else a.track_id,
+                       "bpm": inf.grid.bpm if inf else a.bpm, "t0": round(inf.beat_time(0.0), 4) if inf else 0.0,
+                       "dur": round(inf.grid.duration, 3) if inf else 0.0,
+                       "bars": round(inf.last_beat / BEATS_PER_BAR, 2) if inf and inf.grid.duration else 0.0,
+                       "hotcues": [{"pad": h.pad, "name": h.name, "color": h.color, "bar": h.bar, "note": h.note, "auto": h.auto}
+                                   for h in cues.get(a.id, [])]})
     scenes = [{"no": s.no, "name": s.name, "start": float(s.start), "end": float(s.end), "draft": s.draft,
                "strategy": {"作用": s.purpose, "保留": s.keep, "前景": s.lead, "LOW": s.low, "MID/HIGH": s.midhigh},
                "missing": s.missing(), "roles": s.roles, "intent": s.intent, "line": s.line} for s in p.scenes]
     return {"id": p.id, "name": p.name, "exec": (c.plan or {}).get("exec"), "length": c.length, "duration": c.duration,
             "bars": c.length / BEATS_PER_BAR, "tempo": [{"at": b, "bpm": v} for b, v in zip(c.tempo.b, c.tempo.v)],
-            "decks": c.caps.max_decks, "clips": clips,
+            "decks": c.caps.max_decks, "clips": clips, "assets": assets, "handovers": handovers(c),
             "fx": [fx_chart(c, f) for f in c.fx] + [live_chart(c, lv) for lv in c.live],
             "scenes": scenes, "actions": actions(c), "issues": [i.to_dict() for i in c.issues],
             "legacy": p.legacy, "caps": c.caps.to_dict()}

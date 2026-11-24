@@ -480,7 +480,8 @@ async function renderHome(force = false) {
       h("div", { class: "panel row home-live-bar" },
         h("b", {}, (S.showCompiled && S.showCompiled.set && S.showCompiled.set.name) || S.showSetId || ""),
         v5 ? h("span", { class: "grow show-status5", id: "show-status" }) : h("span", { class: "grow" }),
-        v5 ? h("a", { href: `/static/handover.html?set=${encodeURIComponent(S.showSetId)}`, target: "_blank", class: "dim", style: "margin-right:12px" }, "交接说明")
+        v5 ? [h("a", { href: `/api/v5/${encodeURIComponent(S.showSetId)}/cuesheet.md`, target: "_blank", class: "dim", style: "margin-right:12px" }, "Hot Cue 表"),
+          h("a", { href: `/static/handover.html?set=${encodeURIComponent(S.showSetId)}`, target: "_blank", class: "dim", style: "margin-right:12px" }, "交接说明")]
           : h("a", { href: `/api/sets/${S.showSetId}/cuesheet.md`, target: "_blank", class: "dim", style: "margin-right:12px" }, "Hot Cue 表"),
         playing ? h("button", { class: "danger", onclick: (e) => busy(e, "停止中…", stopShow) }, "■ 停止")
           : [resume && resume.set === S.showSetId
@@ -728,7 +729,7 @@ function renderHomeJob() {
 }
 
 // 「可以演出了」那一屏，曲谱 v5：从头 / 从某个场景开始；录成 MP3；规范、示例、另存为 v5、演出包、交接说明。
-// 「录成 MP3」和 v1–v4 是同一块面板、同一个接口（引擎按调度器模式录）。没有 Hot Cue 表：那个接口是 v1–v4 的。
+// 「录成 MP3」和 v1–v4 是同一块面板、同一个接口（引擎按调度器模式录）。Hot Cue 表是 v5 自己的（v5/hotcue.py）。
 function renderReady5(el, r) {
   const scenes = r.scenes || [];
   const opts = h("div", { class: "row play-opts" },
@@ -753,6 +754,8 @@ function renderReady5(el, r) {
     h("a", { href: `/static/handover.html?set=${encodeURIComponent(r.set)}`, target: "_blank", title: "整场结构、每个场景的策略、四 Deck 共轴图和动作表，A4 横版" }, "交接说明（打印 / 存 PDF）"),
     h("a", { href: "#home", title: "一个文件夹：谱和用到的全部原曲在同一层（原文件，不转码、不出混音）",
       onclick: (e) => { e.preventDefault(); busy(e, "导出中…", () => exportPackage5(r.set)); } }, "导出演出包"),
+    h("a", { href: `/api/v5/${r.set}/cuesheet.md`, target: "_blank", title: "每份素材的打击垫 1–8：这套谱里要用到的点（起播、旋钮和效果开始动的地方、loop、跳段、停），名字、颜色、位置" }, "Hot Cue 表（Prime 4+）"),
+    h("a", { href: `/api/v5/${r.set}/cuesheet.md?download=1` }, "下载 .md"),
     h("a", { href: `/api/v5/${r.set}/score.md?download=1`, title: "把这个项目写成一份 v5 的谱（.md）" }, "另存为 v5 的谱"),
     h("a", { href: "/api/score/spec5.md", target: "_blank" }, "曲谱规范 v5"),
     h("a", { href: "/api/score/example5.md", target: "_blank" }, "示例谱"),
@@ -1456,7 +1459,8 @@ const live = new LiveView(liveRoot, async (id) => {
 // 曲谱 v5 的演出画面（live5.js）：和上面一样只有一个实例，换页时搬过去
 const live5Root = h("div", { id: "live5" });
 const live5 = new Live5View(live5Root, { api, toast, onSeek: (beat) => guard(() => seekShow5(beat)),
-  loadTrack: (id) => api("GET", `/api/tracks/${id}/waveform`) }); // 每份素材的三频段波形（和两 Deck 的演出页同一份数据）
+  // 每份素材的三频段波形（和两 Deck 的演出页同一份数据）
+  loadTrack: (id) => api("GET", `/api/tracks/${id}/waveform`) });
 
 // 整套时间表：独奏 / 过渡 / 终曲按时长排开，当前所在段高亮
 function setStrip(p) {
