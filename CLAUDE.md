@@ -20,6 +20,9 @@
   docs/ENGINE5.md），Python 在 `djstudio/v5/`。v5 只在内置引擎里放。改 v5 不要动 v4 那条路的行为（`state` 这类 v4 命令仍然只报两台 Deck）。
 - 谱法以 [docs/SCORE_SPEC_V5.md](docs/SCORE_SPEC_V5.md) 为准，示例 docs/score_v5_example.md 必须零错误零提示地编过。
   规范里第 8 节的效果表由 `tests/test_v5_score.py` 和代码（`livefx.PARAMS`、`compile.FX_PARAMS`）比对：改一边要同时改另一边。
+- 主线 / 工具、主要的交接由 `djstudio/v5/mainline.py` 按角色分（SCORE_SPEC_V5.md 第 13 节）：只给界面、hot cue、交接说明分类用，不影响声音。
+- v5 的 hot cue 不写在谱里，由 `djstudio/v5/hotcue.py` 按谱算（名字、颜色、取舍 = docs/SET_SPEC.md 第 7 节的那一套，点从片段来）；
+  SCORE_SPEC_V5.md 第 12 节的效果名字表由 `tests/test_v5_hotcue.py` 和代码（`hotcue.FX_NAME`）比对。
 - 改了 `djs5/*.hpp`：跑 `tests/test_v5_engine.py`、`tests/test_v5_live.py`（模拟器 `sim5` 会按源码哈希自动重编），
   DSP 模块另跑 `g++ -O2 -std=c++17 -Wall -Wextra -ffast-math tools/mixxx-engine/djs5/test_dsp.cpp`；有声音引擎时再重编引擎、
   跑 `python packaging/macos/smoke_v5.py <引擎>` 和带 `DJSTUDIO_ENGINE_BIN` 的全量 pytest（引擎是四台 Deck，v4 的引擎测试也要过）。

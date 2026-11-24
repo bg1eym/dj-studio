@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,8 +15,12 @@ STATIC = Path(__file__).resolve().parents[1] / "djstudio" / "web" / "static"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="要 node")
 
+# 速度图（全场拍, BPM）：平的、匀速变速的、一下换速的（同一拍两个点）、最后一个点以后
+TEMPO = [(0.0, 132.0), (384.0, 132.0), (448.0, 134.0), (704.0, 134.0), (704.0, 138.0), (768.0, 136.0)]
+BEATS = [0.0, 100.0, 384.0, 400.5, 448.0, 600.0, 704.0, 730.0, 768.0, 960.0]
+
 SCRIPT = r"""
-import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar } from "./live5.js";
+import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide } from "./live5.js";
 import { eqHours as v4Hours, faderPos } from "./live.js";
 const out = {};
 const dbs = [-25, -16, -6, -2, 0, 3, 6];
@@ -27,7 +32,7 @@ out.fader = [0, 0.3, 0.6, 1].map((v) => +faderPos(nativeOf("vol", v)).toFixed(4)
 out.frac = { cut: laneFrac("lo", -25), noon: laneFrac("lo", 0), top: laneFrac("lo", 6), fOff: laneFrac("filter", 0), vol: laneFrac("vol", 0.6) };
 // 片段：全场第 8 拍起播，从原曲第 2 小节（第 4 拍）放；全场 24–40 在原曲第 5–6 小节打一个 2 小节的 loop（转两圈）
 const clip = { bpm: 120, t0: 0.5, start: 8, stop: 40, segs: [
-  { g0: 8, g1: 24, src: 4, loop: 0, kind: "start" }, { g0: 24, g1: 40, src: 16, loop: 8, kind: "loop" }, { g0: 40, g1: 40, src: 24, loop: 0, kind: "exit" }] };
+  { g0: 8, g1: 24, src: 4, lsrc: 4, loop: 0, kind: "start" }, { g0: 24, g1: 40, src: 16, lsrc: 16, loop: 8, kind: "loop" }, { g0: 40, g1: 40, src: 24, lsrc: 24, loop: 0, kind: "exit" }] };
 out.bars = [];
 eachSrcBar(clip, 0, 64, (g, k, head) => out.bars.push([g, k + 1, head]));
 out.window = [];
@@ -39,6 +44,41 @@ wf.low[Math.floor((0.5 + 16 * 0.5) * 50)] = 255;  // 原曲第 16 拍（loop 的
 wf.high[Math.floor((0.5 + 4 * 0.5) * 50)] = 128;  // 起播的那一格
 out.cols = [8, 24, 28, 32, 39.99].map((g) => waveCol(clip, wf, g, g + 0.01));
 out.outside = waveCol(clip, wf, 100000, 100001);
+// 点整首波形：原曲第几拍 → 这套谱里第一次放到它是全场第几拍
+out.g = [4, 10, 19.5, 16, 20, 23, 3, 24, 40].map((src) => globalOfSrc(clip, src));
+// 从圈中间起播的片段：圈头要等转回来才到
+const mid = { bpm: 120, t0: 0, start: 0, stop: 32, segs: [{ g0: 0, g1: 32, src: 6, lsrc: 4, loop: 8, kind: "loop", id: "L" }] };
+out.gmid = [6, 11, 4, 5.5, 12, 3].map((src) => globalOfSrc(mid, src));
+out.spans = clipSpans(clip).map((sp) => [sp.a, sp.b, sp.loop, sp.laps ?? null]);
+out.pick = [clipPick(clip), clipPick(mid), clipPick({ segs: [] })];
+// 要这首的哪些元素：LOW 从头切到尾 = 不要；先切着后来放进来 = 后进；先在后来切掉 = 后切
+const L = (...vs) => vs.map((v, i) => ({ at: i * 16, v }));
+out.bands = [
+  clipBands({ lanes: { lo: L(-25, -25), mid: L(0, -6), hi: L(0) } }),
+  clipBands({ lanes: { lo: L(-25, 0), mid: L(0), hi: L(0, -25) } }),
+  clipBands({ lanes: {} }),
+];
+// set 的时间：全场第几拍 = 开演后第几秒
+const tempo = JSON.parse(process.env.TEMPO || "[]");
+out.sec = JSON.parse(process.env.BEATS || "[]").map((b) => secAt(tempo, b));
+out.clock = [0, 59.99, 61, 3599, 3600, 3725].map(clock);
+// 曲线一页一页地翻：一页 64 拍（16 小节），每一拍落在哪一页
+out.pages = [0, 10, 47.9, 48, 95.9, 96, 400].map((b) => pageStart(b, 64));
+out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // 按场景看、场景比一页长：从场景的开头数页
+// 游标匀着走：132 BPM（每毫秒 0.0022 拍），每帧 16.7 毫秒，引擎每 250 毫秒报一次、每次差 ±0.04 拍
+{
+  const rate = 132 / 60000, dt = 1000 / 60;
+  let shown = 100, truth = 100, target = 100, minStep = 1e9, maxStep = 0;
+  for (let i = 1; i <= 600; i++) {
+    truth += dt * rate;
+    if (i % 15 === 0) target = truth + (i % 30 === 0 ? 0.04 : -0.04); else target += dt * rate;
+    const next = glide(shown, target, dt, rate);
+    minStep = Math.min(minStep, next - shown); maxStep = Math.max(maxStep, next - shown);
+    shown = next;
+  }
+  out.glide = { min: minStep / (dt * rate), max: maxStep / (dt * rate), off: Math.abs(shown - truth) };
+  out.glideSnap = [glide(100, 108, dt, rate), glide(100, 99.5, dt, rate) >= 100, glide(100, 100, 5000, rate) - 100 < 0.6];
+}
 console.log(JSON.stringify(out));
 """
 
@@ -50,7 +90,8 @@ def out(tmp_path_factory):
         shutil.copy(STATIC / name, d / name)
     (d / "package.json").write_text('{"type": "module"}')
     (d / "t.js").write_text(SCRIPT)
-    r = subprocess.run(["node", "t.js"], cwd=d, capture_output=True, text=True, timeout=60)
+    env = {**os.environ, "TEMPO": json.dumps([{"at": b, "bpm": v} for b, v in TEMPO]), "BEATS": json.dumps(BEATS)}
+    r = subprocess.run(["node", "t.js"], cwd=d, capture_output=True, text=True, timeout=60, env=env)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
@@ -78,3 +119,43 @@ def test_waveform_column_reads_the_source_position(out):
     assert c[0][2] == pytest.approx(128 / 255) and c[0][0] == 0
     assert c[1][0] == 1 and c[3][0] == 1 and c[2][0] == 0
     assert c[4] is not None and out["outside"] is None
+
+
+def test_click_on_the_whole_track_maps_to_a_global_bar(out):
+    """点整首波形上的一个位置：换成这套谱里第一次放到那里的全场拍；这套谱不放的那一段（起播点之前、停之后）点不了。"""
+    # 片段：全场 8 起播、从原曲第 4 拍放到第 20 拍（全场 24），然后在原曲 16–24 拍转圈到全场 40
+    assert out["g"] == [8, 14, 23.5, 20, 28, 31, None, None, None]  # 原曲 16–20 拍直放时先放到过一次（全场 20–24）
+    assert out["gmid"] == [0, 5, 6, 7.5, None, None]  # 从圈中间（第 6 拍）起播：圈头第 4 拍要等转回来（全场第 6 拍）
+    assert out["spans"] == [[4, 20, False, None], [16, 24, True, 2]]  # loop 的那一圈：原曲 16–24 拍，转 2 圈
+
+
+def test_selected_span_and_needed_bands(out):
+    """整首波形上框出来的「选用哪一段」= 放到的最前面到最后面；「要哪些元素」按三个频段的 EQ 从头到尾怎么摆。"""
+    assert out["pick"] == [{"a": 4, "b": 24}, {"a": 4, "b": 12}, None]
+    assert out["bands"] == [{"lo": "off", "mid": "on", "hi": "on"}, {"lo": "in", "mid": "on", "hi": "out"},
+                            {"lo": "on", "mid": "on", "hi": "on"}]
+
+
+def test_set_time_matches_the_compiler(out):
+    """画面上的 Set 时间（全场第几拍是第几秒）和编译器的速度图是同一个算法。"""
+    from djstudio.v5.compile import TempoMap
+
+    tm = TempoMap(TEMPO)
+    assert out["sec"] == pytest.approx([tm.sec_at(b) for b in BEATS], abs=1e-6)
+    assert out["clock"] == ["0:00", "0:59", "1:01", "59:59", "1:00:00", "1:02:05"]
+
+
+def test_curve_pages_stay_put_and_flip_with_look_ahead(out):
+    """EQ 曲线一页一页地看：一页里的线不动（同一页里的拍都落在同一个页头），游标走到最后四分之一页才翻，
+    新的一页正好从游标那里开始——后面至少四分之一页一直看得到。"""
+    assert out["pages"] == [0, 0, 0, 48, 48, 96, 384]  # 16 小节一页：每 12 小节翻一次
+    assert out["scenePages"] == [320, 320, 320, 416]  # 场景从第 320 拍起、一屏 32 小节：从场景的开头数
+
+
+def test_cursor_glides_instead_of_stopping_and_jumping(out):
+    """引擎的拍一块一块报上来（每次和画面差几十毫秒）：游标照样匀着走——每一帧走的拍数和正常速度差不到两成，
+    不停、不往回走，也不越走越偏；差得多了（卡住、跳转）才直接过去。"""
+    g = out["glide"]
+    assert 0.8 < g["min"] <= g["max"] < 1.2
+    assert g["off"] < 0.06
+    assert out["glideSnap"] == [108, True, True]  # 差 8 拍：直接过去；目标在后面：停着不退；隔了很久才画下一帧：不会一下窜出去

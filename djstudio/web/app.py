@@ -548,6 +548,18 @@ def create_app(studio: Studio) -> FastAPI:
         return Response(studio.v5.score_md(pid), media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
                         headers={"Content-Disposition": f"{disp}; filename=\"score.md\"; filename*=UTF-8''{quote(pid + '.v5.md')}"})
 
+    @app.get("/api/v5/{pid}/cuesheet.md")
+    def api_v5_cuesheet(pid: str, download: int = 0) -> Response:
+        """四 Deck 的谱的 hot cue 表（Markdown）：每份素材的打击垫 1–8（v5/hotcue.py），照着在 Engine DJ / Prime 4+ 上设。"""
+        from ..v5.hotcue import cue_sheet_md
+
+        c = studio.v5.compiled(pid)
+        if not c.ok:
+            raise HTTPException(400, "曲谱没编过，出不了 hot cue 表")
+        disp = "attachment" if download else "inline"
+        return Response(cue_sheet_md(c), media_type=("text/markdown" if download else "text/plain") + "; charset=utf-8",
+                        headers={"Content-Disposition": f"{disp}; filename=\"hotcues.md\"; filename*=UTF-8''{quote(pid + '-hotcues.md')}"})
+
     @app.get("/api/sets/{sid}/v5.md")
     def api_set_as_v5(sid: str, download: int = 0) -> Response:
         """旧的 set（v1–v4 的谱转出来的）另存为 v5 的谱：一份新文件，原来的不动。"""

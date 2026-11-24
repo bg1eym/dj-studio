@@ -275,6 +275,13 @@ def test_web_api_serves_the_chart_and_controls(ready):
     assert client.post("/api/v5/seek", json={"beat": 120}).status_code == 200
     assert client.post("/api/stop").status_code == 200
     wait_stage(studio, ("stopped", "done"))
+    # 图谱里每份素材带着整首的长度和打击垫；Hot Cue 表能看、能下载
+    ch = client.get(f"/api/sets/{pid}").json()["chart"]
+    assert ch["assets"] and all(a["dur"] > 0 and a["track_id"] for a in ch["assets"] if a["hotcues"])
+    assert any(h["name"] == "IN" for a in ch["assets"] for h in a["hotcues"])
+    r = client.get(f"/api/v5/{pid}/cuesheet.md")
+    assert r.status_code == 200 and "Hot Cue 表" in r.text and "| 1 | IN |" in r.text
+    assert "attachment" in client.get(f"/api/v5/{pid}/cuesheet.md?download=1").headers["content-disposition"]
 
 
 # ---------------------------------------------------------------- 整场录成 MP3

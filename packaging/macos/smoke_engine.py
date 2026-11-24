@@ -78,6 +78,34 @@ def cmd(i, c, timeout=30):
     return replies.get(i)
 
 
+def audio_now(i):
+    """问一次声音输出的状态，连同「这个回答是哪一刻的」→ (时刻, 回答, 问答来回几秒)；没回答 = None。
+    量声卡取数据的速度要两头的时刻准：cmd() 每 50 ms 才看一次有没有回答，两头各差 50 ms，量 2 秒就是 5%——
+    比要查的 3% 还大（构建机上因此假失败过两次：0.950、1.032）。这里回答一到就记时间，取问和答的中点；
+    来回超过 20 ms（引擎那边卡了一下）的不要、再问，最多 8 次，留来回最短的那次。"""
+    best = None
+    for k in range(8):
+        ta = time.time()
+        p.stdin.write("#" + json.dumps({"cmd": "audio", "_id": i + k}) + "\n")
+        p.stdin.flush()
+        while (i + k) not in replies and time.time() - ta < 5:
+            time.sleep(0.001)
+        tb = time.time()
+        r = replies.get(i + k)
+        if r is None:
+            continue
+        if best is None or tb - ta < best[2]:
+            best = ((ta + tb) / 2, r, tb - ta)
+        if tb - ta < 0.02:
+            break
+    return best
+
+
+def pull_rate(s0, s1):
+    """两次 audio_now 之间声卡取走的声音 ÷ 墙钟。"""
+    return (s1[1]["played_ms"] - s0[1]["played_ms"]) / ((s1[0] - s0[0]) * 1000)
+
+
 lib = cmd(1, {"cmd": "library", "tracks": [{"id": "k", "path": str(m4a), "bpm": 128.0, "first_beat": 0.0}]}, 60)
 t_lib = time.time()
 check(lib and lib["tracks"][0]["duration"] > 9, f"引擎装进曲目：{lib}")
@@ -99,13 +127,16 @@ check(au and 1.0 < au.get("eq_delay_ms", 0) < 1.6, f"EQ 群延迟 {au and au.get
 a = cmd(2, {"cmd": "audio"})
 print("  声音输出：", a)
 if a and a.get("on"):
-    # 声卡按自己的时钟取数据：3 秒里取走的应该正好 3 秒（快了 = 采样率不对，声音会变调、和画面错开）
-    t0, p0 = time.time(), a["played_ms"]
+    # 声卡按自己的时钟取数据：3 秒里取走的应该正好 3 秒（快了 = 采样率不对，声音会变调、和画面错开；
+    # 44.1k 当成 48k 是差 9%）。两头的时刻用 audio_now 量准，3% 的线才有意义
+    s0 = audio_now(200)
     time.sleep(3)
-    b = cmd(4, {"cmd": "audio"})
-    ratio = (b["played_ms"] - p0) / ((time.time() - t0) * 1000)
+    s1 = audio_now(220)
+    check(bool(s0 and s1), "声音输出的状态问得到")
+    ratio, b = pull_rate(s0, s1), s1[1]
     check(abs(ratio - 1) < 0.03, f"声卡取数据的速度 = 墙钟的 {ratio:.3f} 倍（设备 {b.get('device')}，"
-          f"设备采样率 {b.get('device_rate')}，引擎 {b.get('rate')}，延迟 {b.get('latency_ms', 0):.1f} ms，断音 {b.get('underruns')} 次）")
+          f"设备采样率 {b.get('device_rate')}，引擎 {b.get('rate')}，延迟 {b.get('latency_ms', 0):.1f} ms，断音 {b.get('underruns')} 次；"
+          f"问答来回 {s0[2] * 1000:.0f} / {s1[2] * 1000:.0f} ms）")
     # 跟着系统换输出（插耳机 / 连 AirPods）：重开声音输出以后接着出声，引擎还在
     r = cmd(5, {"cmd": "audio", "reopen": True})
     check(r and r.get("on") and r.get("switches") == 1, f"声音输出重开一次（换设备的那条路）：{r}")
@@ -121,11 +152,13 @@ if a and a.get("on"):
     gap = (time.time() - t1) * 1000
     check(bool(first) and first["played_ms"] > p1 and gap < 1000,
           f"重开以后 {gap:.0f} ms 内声卡又开始取数据（要求 1 秒以内；每 50 ms 问一次，所以这是上限）")
-    t2, p2 = time.time(), first["played_ms"]
-    time.sleep(2)
-    c2 = cmd(6, {"cmd": "audio"})
-    ratio2 = (c2["played_ms"] - p2) / ((time.time() - t2) * 1000)
-    check(abs(ratio2 - 1) < 0.03, f"重开以后声卡照样取数据：{ratio2:.3f} 倍墙钟（设备 {c2.get('device')}，断音 {c2.get('underruns')} 次）")
+    s2 = audio_now(240)
+    time.sleep(3)
+    s3 = audio_now(260)
+    check(bool(s2 and s3), "重开以后声音输出的状态问得到")
+    ratio2, c2 = pull_rate(s2, s3), s3[1]
+    check(abs(ratio2 - 1) < 0.03, f"重开以后声卡照样取数据：{ratio2:.3f} 倍墙钟（设备 {c2.get('device')}，断音 {c2.get('underruns')} 次；"
+          f"问答来回 {s2[2] * 1000:.0f} / {s3[2] * 1000:.0f} ms）")
     st = cmd(7, {"cmd": "state"})
     check(st is not None and st.get("audio", {}).get("on"), "重开以后引擎照常回状态")
 cmd(3, {"cmd": "quit"})

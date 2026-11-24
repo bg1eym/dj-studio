@@ -751,7 +751,7 @@ function laneAt(pts, x) {
 }
 
 // hot cue 小旗：位置一条细色线，底部一个带打击垫号的色块（compact = 整首波形上只画号码），后面跟名字
-function drawHotCues(g, cues, xOf, top, H, w, compact = false) {
+export function drawHotCues(g, cues, xOf, top, H, w, compact = false) {
   g.font = "bold 10px ui-monospace, Menlo, monospace";
   for (const hc of cues) {
     const x = Math.round(xOf(hc.bar));
