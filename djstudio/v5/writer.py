@@ -97,6 +97,12 @@ def write(p: Project) -> str:
                   [[a.id, a.title + (f" — {a.artist}" if a.artist else ""), a.file, f"{a.bpm:g}",
                     "" if a.bar1_s is None else f"{a.bar1_s:.3f}", "" if a.bars is None else str(a.bars), a.key or "—"]
                    for a in p.assets])
+    if any(a.elements for a in p.assets):
+        from . import elements as el
+
+        out += ["## 元素", ""]
+        out += _table(["素材", "元素", "原曲小节"],
+                      [[a.id, el.ZH[e.name], el.write_spans(e.spans)] for a in p.assets for e in a.elements])
     if len(p.tempo) > 1:
         out += ["## 速度", ""]
         out += _table(["全场位置", "BPM", "变化"],

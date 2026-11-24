@@ -54,6 +54,13 @@ def _check_id(v: str, what: str) -> str:
     return v
 
 
+class ElementRow(_M):
+    """素材里的一个声部在原曲的哪几小节有、有多满（elements.py；只给界面画图用）。"""
+
+    name: str  # elements.ORDER 里的名字（kick、bass、clap…）
+    spans: list[tuple[int, int, float]] = Field(default_factory=list)  # (从第几小节——0 起, 到第几小节——不含, 0–1)
+
+
 class Asset(_M):
     """素材：一个原音频文件和它的拍网格。file 是相对路径（相对于谱所在的文件夹），不改原文件。"""
 
@@ -68,6 +75,7 @@ class Asset(_M):
     track_id: str = ""  # 曲库里对上的那首（导入时填）
     sha256: str = ""  # 内容哈希（第一次确认后记下，换了内容要重新确认）
     hot_cues: list[HotCue] = Field(default_factory=list)
+    elements: list[ElementRow] = Field(default_factory=list)  # 谱上的元素表（没写 = 空）
     line: int = 0  # 谱里的行号（报错、图谱追溯用）
 
     @field_validator("id")

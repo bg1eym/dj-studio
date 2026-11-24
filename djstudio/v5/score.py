@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from ..plan.cdw import PlanError, clock, fader
 from ..plan.convert import eq_db, filter_val
 from ..plan.mdplan import _alias, _bullets, _clean, _dash, _key, _Line, _lines, _number, _seconds, _tables
+from . import elements as el
 from .compile import FX_PARAMS, Issue5
 from .livefx import LIVE_KINDS
 from .model import MAX_DECKS, SCORE_VERSION, Project
@@ -40,6 +41,7 @@ ASSET_COLS = _alias({
     "调性": ["key"],
 })
 TEMPO_COLS = _alias({"全场位置": ["位置", "全场"], "BPM": ["主速", "速度"], "变化": ["怎么变", "类型"]})
+ELEMENT_COLS = _alias({"素材": ["素材ID", "曲"], "元素": ["声部", "乐器"], "原曲小节": ["小节", "范围", "在哪几小节"], "说明": ["备注"]})
 CLIP_COLS = _alias({
     "ID": ["id", "片段"], "素材": ["asset"], "Deck": ["deck", "播放器"], "原曲起点": ["原曲位置", "原曲", "源起点"],
     "全场起播": ["起播", "全场起点"], "全场停止": ["停止", "停"], "角色": ["role"], "推子": ["音量"],
@@ -66,6 +68,7 @@ STRATEGY = {"作用": "purpose", "保留": "keep", "前景": "lead", "low": "low
 INTENT = {"多低频": "multi_low", "两条声线": "multi_vocal", "中频叠加": "multi_mid"}
 SCENE_RE = re.compile(r"^场景\s*0*(\d+)\s*(?:[：:]\s*(.*?))?\s*$")
 RANGE_RE = re.compile(r"[（(]\s*([0-9.+/\s]+?)\s*(?:[–\-—~～]|到|至)\s*([0-9.+/\s]+?)\s*[)）]\s*$")
+ELEMENT_TABLE_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_\-]*)\s*(?:的)?\s*(?:元素|声部)(?:表)?$")  # 「### A2 元素」
 CLIP_TABLE_RE = re.compile(r"^(?:参数\s*)?([A-Za-z][A-Za-z0-9_\-]*)\s*(?:的)?\s*(?:参数|旋钮)?$")
 
 
@@ -170,6 +173,7 @@ class _Parser:
         self.fx: list[dict[str, Any]] = []
         self.scenes: list[dict[str, Any]] = []
         self.marks: list[dict[str, Any]] = []
+        self.elements: dict[str, dict[str, tuple[int, list[tuple[int, int, float]]]]] = {}  # 素材 → 声部 → (行号, 哪几小节)
         self.scene: dict[str, Any] | None = None  # 正在读的场景
 
     # ------------------------------------------------------------ 报告
@@ -240,6 +244,10 @@ class _Parser:
                 self._moves(body, line)
             elif key in ("效果", "效果器", "fx"):
                 self._effects(body, line)
+            elif level == 2 and key in ("元素", "元素表", "声部", "声部表"):
+                self._elements(body, line, None)
+            elif level == 3 and ELEMENT_TABLE_RE.match(name):
+                self._elements(body, line, ELEMENT_TABLE_RE.match(name).group(1))
             elif key == "hotcue" or key == "hotcues":
                 self.hint(line, "hotcue", "v5 的谱里 Hot Cue 表现在还不读（不影响演出）")
             else:
@@ -262,6 +270,7 @@ class _Parser:
                 self.err(self.tempo[0]["line"], "tempo", "速度表要从 1.1 写起（或者开头写「- 主速：…」）")
             else:
                 self.tempo.insert(0, {"at": Fraction(0), "bpm": base_bpm, "ramp": False, "line": 0})
+        self._attach_elements(title_line.no)
         project = None
         if not any(i.level == "error" for i in self.issues):
             data = {
@@ -329,6 +338,64 @@ class _Parser:
             key = r.get("调性", "")
             self.assets.append({"id": aid, "title": title, "artist": artist, "file": r.get("文件名", ""), "bpm": bpm,
                                 "bar1_s": bar1, "bars": bars, "key": "" if _dash(key) else key, "line": no})
+
+    def _elements(self, body: list[_Line], line: int, asset: str | None) -> None:
+        """元素表：「## 元素」下面一张表（素材 / 元素 / 原曲小节），或者「### A2 元素」下面一张表（元素 / 原曲小节）。"""
+        tables = self.tables(body, ELEMENT_COLS, line)
+        if not tables:
+            if asset:
+                self.err(line, "structure", f"「{asset} 元素」下面要有一张表：元素 / 原曲小节")
+            return  # 「## 元素」下面可以只有几张「### A2 元素」
+        for t in tables:
+            need = ("元素", "原曲小节") if asset else ("素材", "元素", "原曲小节")
+            missing = [n for n in need if n not in t.cols]
+            if missing:
+                self.err(t.line, "structure", f"元素表少了「{'、'.join(missing)}」这一列", fix="列：素材 / 元素 / 原曲小节（比如 A2｜kick｜1–64 满，81–192）")
+                continue
+            for no, r in t.rows:
+                aid = asset or r.get("素材", "")
+                what = f"素材 {aid} 的元素"
+                name = r.get("元素", "")
+                if not aid or not name:
+                    if any(r.values()):
+                        self.err(no, "element", "这一行要写是哪份素材的哪个元素", what)
+                    continue
+                cid = el.canon(name)
+                if cid is None:
+                    self.err(no, "element", f"不认识的元素「{name}」", what, fix=f"认得的：{el.known_names()}")
+                    continue
+                text = r.get("原曲小节", "")
+                if not text or _dash(text):
+                    continue  # 这个声部整首都没有：不用写，写了空着也行
+                try:
+                    spans = el.parse_spans(text)
+                except ValueError as e:
+                    self.err(no, "element", str(e), f"{what} {el.ZH[cid]}")
+                    continue
+                rows = self.elements.setdefault(aid, {})
+                if cid in rows:
+                    self.err(no, "element", f"{el.ZH[cid]} 写了两行（第 {rows[cid][0]} 行已经写过）：合成一行", what)
+                    continue
+                rows[cid] = (no, spans)
+
+    def _attach_elements(self, line: int) -> None:
+        """读完全篇以后把元素表挂到素材上；谱上要放的素材没写元素的，提示一下（画面上那一台就画不出格子）。"""
+        ids = {a["id"]: a for a in self.assets}
+        for aid, rows in self.elements.items():
+            a = ids.get(aid)
+            if a is None:
+                self.err(min(no for no, _ in rows.values()), "element", f"元素表里的素材「{aid}」不在素材表里")
+                continue
+            for cid, (no, spans) in rows.items():
+                if a["bars"] and spans and spans[-1][1] > a["bars"]:
+                    self.hint(no, "element_range", f"{el.ZH[cid]} 写到了第 {spans[-1][1]} 小节，素材表上这首只有 {a['bars']} 小节", f"素材 {aid} 的元素")
+            a["elements"] = [{"name": cid, "spans": rows[cid][1]} for cid in el.ORDER if cid in rows]
+        used = list(dict.fromkeys(c["asset"] for c in self.clips if c["asset"] in ids))
+        lacking = [aid for aid in used if aid not in self.elements]
+        if used and lacking:
+            which = "这份谱" if len(lacking) == len(used) else f"素材 {'、'.join(lacking)} "
+            self.hint(line, "elements", f"{which}没写元素表：演出画面的 EQ 曲线底下画不出各个声部（kick、bass、镲、人声…）在哪几小节有，旋钮为什么这么拧就看不出来",
+                      fix="加一段「## 元素」：素材 / 元素 / 原曲小节（写法见曲谱规范 v5 第 14 节）。不写也能演出")
 
     def _tempo(self, body: list[_Line], line: int) -> None:
         tables = self.tables(body, TEMPO_COLS, line)

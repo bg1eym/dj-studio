@@ -20,7 +20,8 @@ TEMPO = [(0.0, 132.0), (384.0, 132.0), (448.0, 134.0), (704.0, 134.0), (704.0, 1
 BEATS = [0.0, 100.0, 384.0, 400.5, 448.0, 600.0, 704.0, 730.0, 768.0, 960.0]
 
 SCRIPT = r"""
-import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide } from "./live5.js";
+import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide,
+  overlayFrac, elemLevel, audible, filterPass, GRID_NOON } from "./live5.js";
 import { eqHours as v4Hours, faderPos } from "./live.js";
 import { overviewColumns, stackColumn } from "./wavedraw.js";
 const out = {};
@@ -88,6 +89,23 @@ out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // �
   out.ovOut = overviewColumns(ow, 4, 16, 0);           // 画布比曲子长一倍：后一半没有
   out.ovSmooth = overviewColumns(ow, 8, 8, 4)[0];      // 抹平 4 秒：第一列看的是前后各 2 秒
   out.ovStack = stackColumn([0.5, 0.25, 0.125], 60, 40); // 底边 y = 60，满高 40
+}
+// 元素格子图：旋钮线叠在格子上用的纵轴、某一小节有多满、过完旋钮还剩多少
+{
+  const flat = { lo: 0, mid: 0, hi: 0, filter: 0, vol: 1 };
+  const KICK = [0.8, 0.15, 0.05], HAT = [0, 0.1, 0.9], BASS = [0.85, 0.15, 0];
+  out.noon = GRID_NOON;
+  out.ovl = [overlayFrac("lo", -25), overlayFrac("lo", eqDb(-3)), overlayFrac("lo", 0), overlayFrac("hi", 6), overlayFrac("vol", 1), overlayFrac("vol", 0.5), overlayFrac("vol", 0)];
+  const spans = [[24, 72, 1], [96, 168, 0.6]];
+  out.lvl = [23, 24, 71, 72, 96, 167, 168].map((b) => elemLevel(spans, b)).concat([elemLevel(undefined, 3)]);
+  out.aud = {
+    full: audible(1, KICK, flat), half: audible(0.6, KICK, flat),
+    kickLowCut: audible(1, KICK, { ...flat, lo: -25 }), hatLowCut: audible(1, HAT, { ...flat, lo: -25 }),
+    hatHighDown: audible(1, HAT, { ...flat, hi: -6 }), boost: audible(1, KICK, { ...flat, lo: 6 }),
+    faderDown: audible(1, KICK, { ...flat, vol: 0 }), faderHalf: audible(1, KICK, { ...flat, vol: 0.5 }),
+    bassHpf: audible(1, BASS, { ...flat, filter: 0.5 }), hatLpf: audible(1, HAT, { ...flat, filter: -0.5 }), hatHpf: audible(1, HAT, { ...flat, filter: 0.5 }),
+  };
+  out.fpass = [filterPass(0), filterPass(0.25), filterPass(1), filterPass(-1)];
 }
 console.log(JSON.stringify(out));
 """
@@ -184,3 +202,20 @@ def test_whole_track_waveform_is_stacked_from_the_bottom_like_engine(out):
     (y_lo, h_lo), (y_mid, h_mid), (y_hi, h_hi) = out["ovStack"]
     assert (h_lo, h_mid, h_hi) == (20, 10, 5)
     assert (y_lo, y_mid, y_hi) == (40, 30, 25)  # 低频从底边 60 往上 20，中频接在它上面，高频接在中频上面
+
+
+def test_element_grid_axis_and_what_is_left_after_the_knobs(out):
+    """元素格子图（曲谱规范 v5 第 14 节）。旋钮线叠在格子上：7 点在最下面，12 点和推子 10 在同一条线上，5 点到顶，中间按钟点位匀着排。
+    格子的亮度 = 过完旋钮还剩多少：有多满 ×（每个频段的份额 × 那个频段放过去多少）× 推子。"""
+    noon = out["noon"]
+    assert out["ovl"] == pytest.approx([0, noon * 0.4, noon, 1, noon, noon / 2, 0])  # 7 点、9 点、12 点、5 点；推子 10 / 5 / 0
+    assert out["lvl"] == [0, 1, 1, 0, 0.6, 0.6, 0, 0]  # 小节从 0 数、不含末尾；没写 = 没有
+    a = out["aud"]
+    assert a["full"] == pytest.approx(1) and a["half"] == pytest.approx(0.6)
+    assert a["kickLowCut"] == pytest.approx(0.2)  # 切了 LOW：kick 只剩它在中、高频的那一点（0.15 + 0.05）
+    assert a["hatLowCut"] == pytest.approx(1)  # 镲不在低频：切 LOW 对它没影响
+    assert a["hatHighDown"] == pytest.approx(0.1 + 0.9 * 10 ** (-6 / 20))  # HIGH 退 6 dB：高频那九成剩一半
+    assert a["boost"] == pytest.approx(1)  # 12 点以上按全放过去算，不会超过原来有多满
+    assert a["faderDown"] == 0 and 0 < a["faderHalf"] < 1  # 推子在底 = 没有
+    assert a["bassHpf"] == pytest.approx(0.15) and a["hatLpf"] == pytest.approx(0.1) and a["hatHpf"] == pytest.approx(1)  # Filter 往右先吃低频，往左先吃高频
+    assert out["fpass"] == [[1, 1, 1], [0.5, 1, 1], [0, pytest.approx(0.2), 1], [1, pytest.approx(0.2), 0]]
