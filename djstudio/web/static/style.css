@@ -395,6 +395,18 @@ canvas.ho-wave.l5-twave { height: 72px; }
 .l5-g-head b { font-weight: 700; flex: none; }
 .l5-lwho { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
 .l5-g-param { font: 11px var(--mono); gap: 5px; }
+/* 元素格子图的行头：最上面一条「原曲小节」，下面一行一个声部的名字 */
+.l5-g-grid { display: block; padding: 0; }
+.l5-gsrc, .l5-gel { position: absolute; left: 2px; right: 4px; display: flex; align-items: center; justify-content: flex-end; font-size: 11px; line-height: 1; white-space: nowrap; overflow: hidden; }
+.l5-gsrc { font-size: 9px; color: var(--dim); }
+.l5-gel { color: #c8cdd8; }
+/* 曲线那一块标题里的图例（有格子图时才出来）：旋钮线的颜色 */
+.l5-lnlegend { display: inline-flex; align-items: center; gap: 10px; font-size: 11px; color: var(--dim); white-space: nowrap; }
+.l5-lnlegend.hidden { display: none; }
+.l5-lnlegend > span { display: inline-flex; align-items: center; gap: 4px; }
+.l5-lnlegend i { display: inline-block; width: 16px; height: 0; border-top: 2px solid currentColor; background: none !important; }
+.l5-lnlegend i[style] { border: 0; height: 2px; }
+.l5-lnlegend i.dash { border-top: 2px dashed #c8cdd8; }
 .l5-g-param.off { opacity: .5; }
 .l5-g-param.manual .tl-kv { color: var(--warn); font-weight: 700; }
 .l5-vm { font-size: 11px; line-height: 13px; color: #1a1300; background: var(--warn); border-radius: 3px; padding: 0 2px; font-weight: 700; font-family: inherit; }

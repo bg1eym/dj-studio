@@ -989,13 +989,20 @@ def chart(c: Compiled5) -> dict[str, Any]:
                        "dur": round(inf.grid.duration, 3) if inf else 0.0,
                        "bars": round(inf.last_beat / BEATS_PER_BAR, 2) if inf and inf.grid.duration else 0.0,
                        "hotcues": [{"pad": h.pad, "name": h.name, "color": h.color, "bar": h.bar, "note": h.note, "auto": h.auto}
-                                   for h in cues.get(a.id, [])]})
+                                   for h in cues.get(a.id, [])],
+                       # 元素表（谱上写的）：这份素材的每个声部在原曲的哪几小节有、有多满（[从, 到, 0–1]，小节从 0 数、不含末尾）
+                       "elements": {e.name: [list(sp) for sp in e.spans] for e in a.elements}})
+    from . import elements as el
+
+    used_el = {e.name for a in p.assets for e in a.elements}
     scenes = [{"no": s.no, "name": s.name, "start": float(s.start), "end": float(s.end), "draft": s.draft,
                "strategy": {"作用": s.purpose, "保留": s.keep, "前景": s.lead, "LOW": s.low, "MID/HIGH": s.midhigh},
                "missing": s.missing(), "roles": s.roles, "intent": s.intent, "line": s.line} for s in p.scenes]
     return {"id": p.id, "name": p.name, "exec": (c.plan or {}).get("exec"), "length": c.length, "duration": c.duration,
             "bars": c.length / BEATS_PER_BAR, "tempo": [{"at": b, "bpm": v} for b, v in zip(c.tempo.b, c.tempo.v)],
             "decks": c.caps.max_decks, "clips": clips, "assets": assets, "handovers": handovers(c),
+            # 这套谱里出现过的声部（画面上格子图的行，从上到下）：名字、在 LOW / MID / HIGH 里各占多少（画「过完旋钮还剩多少」用）
+            "elements": [{"id": n, "name": el.ZH[n], "w": list(el.WEIGHTS[n])} for n in el.ORDER if n in used_el],
             "fx": [fx_chart(c, f) for f in c.fx] + [live_chart(c, lv) for lv in c.live],
             "scenes": scenes, "actions": actions(c), "issues": [i.to_dict() for i in c.issues],
             "legacy": p.legacy, "caps": c.caps.to_dict()}

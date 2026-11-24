@@ -20,6 +20,8 @@
   docs/ENGINE5.md），Python 在 `djstudio/v5/`。v5 只在内置引擎里放。改 v5 不要动 v4 那条路的行为（`state` 这类 v4 命令仍然只报两台 Deck）。
 - 谱法以 [docs/SCORE_SPEC_V5.md](docs/SCORE_SPEC_V5.md) 为准，示例 docs/score_v5_example.md 必须零错误零提示地编过。
   规范里第 8 节的效果表由 `tests/test_v5_score.py` 和代码（`livefx.PARAMS`、`compile.FX_PARAMS`）比对：改一边要同时改另一边。
+- 元素表（SCORE_SPEC_V5.md 第 14 节：每份素材的各个声部在原曲哪几小节有）由 `djstudio/v5/elements.py` 读，只给演出画面画元素格子图用，不影响声音；
+  规范里的声部表和 `elements.ELEMENTS` 由 `tests/test_v5_elements.py` 比对。程序不分析声部：这张表由谱提供（运行时零 AI）。
 - 主线 / 工具、主要的交接由 `djstudio/v5/mainline.py` 按角色分（SCORE_SPEC_V5.md 第 13 节）：只给界面、hot cue、交接说明分类用，不影响声音。
 - v5 的 hot cue 不写在谱里，由 `djstudio/v5/hotcue.py` 按谱算（名字、颜色、取舍 = docs/SET_SPEC.md 第 7 节的那一套，点从片段来）；
   SCORE_SPEC_V5.md 第 12 节的效果名字表由 `tests/test_v5_hotcue.py` 和代码（`hotcue.FX_NAME`）比对。
