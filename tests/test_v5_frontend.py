@@ -22,7 +22,7 @@ BEATS = [0.0, 100.0, 384.0, 400.5, 448.0, 600.0, 704.0, 730.0, 768.0, 960.0]
 SCRIPT = r"""
 import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide } from "./live5.js";
 import { eqHours as v4Hours, faderPos } from "./live.js";
-import { overviewNorm, overviewColumn, overviewStack } from "./wavedraw.js";
+import { overviewColumns, stackColumn } from "./wavedraw.js";
 const out = {};
 const dbs = [-25, -16, -6, -2, 0, 3, 6];
 out.hours = dbs.map((d) => +eqHours(d).toFixed(4));
@@ -80,13 +80,14 @@ out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // �
   out.glide = { min: minStep / (dt * rate), max: maxStep / (dt * rate), off: Math.abs(shown - truth) };
   out.glideSnap = [glide(100, 108, dt, rate), glide(100, 99.5, dt, rate) >= 100, glide(100, 100, 5000, rate) - 100 < 0.6];
 }
-// 整首波形（Engine 的 Track Overview 那种画法）：三段各自除以整首里的最大值，从底边往上摞（低频在下、中频在中、高频在上）
+// 整首波形（Prime 4 的 Track Overview 那种画法）：三段的音量按真实比例加在一起，从底边往上摞；整首最高的那一列画满
 {
-  const ow = { rate: 50, n: 8, low: Uint8Array.from([200, 100, 0, 50, 0, 0, 0, 0]), mid: Uint8Array.from([40, 80, 0, 20, 0, 0, 0, 0]), high: Uint8Array.from([0, 2, 0, 1, 0, 0, 0, 0]) };
-  out.ovNorm = overviewNorm(ow);                       // 高频几乎没有：不拉满，按最响那一段的 15% 封底
-  out.ovCols = [overviewColumn(ow, 0, 1), overviewColumn(ow, 1, 2), overviewColumn(ow, 0, 4), overviewColumn(ow, 4, 8), overviewColumn(ow, 9, 12)];
-  out.ovStack = overviewStack([1, 0.5, 0.25], 60, 45); // 底边 y = 60，满高 45：每段最多 15
-  out.ovFull = overviewStack([1, 1, 1], 60, 45);
+  // 8 帧、每秒 1 帧、整首 8 秒，画 4 列（一列 2 帧）。不另外抹平（smooth = 0）
+  const ow = { rate: 1, n: 8, low: Uint8Array.from([200, 100, 100, 100, 0, 0, 40, 40]), mid: Uint8Array.from([40, 20, 50, 50, 0, 0, 10, 10]), high: Uint8Array.from([10, 0, 0, 0, 0, 0, 0, 0]) };
+  out.ovCols = overviewColumns(ow, 4, 8, 0);
+  out.ovOut = overviewColumns(ow, 4, 16, 0);           // 画布比曲子长一倍：后一半没有
+  out.ovSmooth = overviewColumns(ow, 8, 8, 4)[0];      // 抹平 4 秒：第一列看的是前后各 2 秒
+  out.ovStack = stackColumn([0.5, 0.25, 0.125], 60, 40); // 底边 y = 60，满高 40
 }
 console.log(JSON.stringify(out));
 """
@@ -171,14 +172,15 @@ def test_cursor_glides_instead_of_stopping_and_jumping(out):
 
 
 def test_whole_track_waveform_is_stacked_from_the_bottom_like_engine(out):
-    """整首波形照 Engine DJ / Prime 4 的 Track Overview：每段的高 = 这一列 ÷ 这一段在整首里的最大值（很弱的一段不拉满），
-    从底边往上摞——低频在最下面，中频摞在上面，高频在最上面；三段都到自己的最大值时正好到顶。"""
-    assert out["ovNorm"] == [200, 80, 30]  # 高频最大只有 2：按 200 的 15% 封底，不把底噪放大成一整块
+    """整首波形照 Prime 4 的 Track Overview：一列 = 这一小段时间里三段各自的平均，三段按真实的比例加在一起（不各自拉满），
+    从底边往上摞——低频贴着底边，中频接在上面，高频在最上面；整首统一一个比例，最高的那一列正好画满。"""
     c = out["ovCols"]
-    assert c[0] == [1, 0.5, 0] and c[1] == [0.5, 1, pytest.approx(2 / 30)]
-    assert c[2] == [1, 1, pytest.approx(2 / 30)]  # 一列里有几帧：每段取最响的那一帧
-    assert c[3] == [0, 0, 0] and c[4] is None  # 静音 = 0；曲子以外 = 没有
+    # 第一列：low (200+100)/2 = 150，mid 30，high 5 → 一共 185，是最高的一列 → 画满
+    assert c[0] == pytest.approx([150 / 185, 30 / 185, 5 / 185]) and sum(c[0]) == pytest.approx(1)
+    assert c[1] == pytest.approx([100 / 185, 50 / 185, 0])  # 三段的比例是真实的：高频没有就没有，不拉满
+    assert c[2] == [0, 0, 0] and c[3] == pytest.approx([40 / 185, 10 / 185, 0])  # 静音 = 0
+    assert out["ovOut"][1] is not None and out["ovOut"][2] is None and out["ovOut"][3] is None  # 曲子以外没有
+    assert out["ovSmooth"][0] > out["ovSmooth"][1] > out["ovSmooth"][2] > 0  # 抹平以后还是低 > 中 > 高
     (y_lo, h_lo), (y_mid, h_mid), (y_hi, h_hi) = out["ovStack"]
-    assert (h_lo, h_mid, h_hi) == (15, 7.5, 3.75)
-    assert y_lo == 45 and y_mid == 37.5 and y_hi == 33.75  # 低频贴着底边（60 − 15），中频接在它上面，高频接在中频上面
-    assert out["ovFull"][2][0] == pytest.approx(15)  # 三段都到最大：最上面正好是 60 − 45
+    assert (h_lo, h_mid, h_hi) == (20, 10, 5)
+    assert (y_lo, y_mid, y_hi) == (40, 30, 25)  # 低频从底边 60 往上 20，中频接在它上面，高频接在中频上面

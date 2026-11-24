@@ -10,7 +10,7 @@
 //   游标在两次状态之间按速度外推（只有游标）。
 // - 旋钮、推子、电平表就是 live.js 里那几个部件；这里只管四 Deck 的排法和全场小节轴。
 
-import { drawTriBand, drawOverview, overviewColumn, WAVE_COLORS, OVERVIEW_DIM } from "./wavedraw.js";
+import { drawTriBand, drawStack, overviewColumns, WAVE_COLORS, OVERVIEW_DIM } from "./wavedraw.js";
 import { Knob, Fader, Meter, meterScale, BAND_HEX, FX_HEX, drawSeekHover, clockText } from "./live.js";
 import {
   PARAM_ZH, BEATS, posText, posTextFine, barOf, durText, sceneAt, tempoAt, fmtBpm, clipAt, clipById, srcAt, laneAt, lanePoints,
@@ -25,8 +25,9 @@ const CH_W = 74; // 调音台一个通道的宽（定宽：读数、效果的名
 const LEAD_IN = 8; // 开演前留两小节（装载、摆旋钮）
 const SPAN_S = 7; // 每台 Deck 的滚动波形：播放头两侧各 7 秒（音乐里的时间），四台同一比例
 const STRATEGY = ["作用", "保留", "前景", "LOW", "MID/HIGH"];
-const TRACK_H = 62; // 整首曲子那一行的高（左边要写三行字：片段、第几小节 / 选用哪一段、要它的哪些元素）
-const TRACK_TOP = 17; // 整首波形上面留给字的一条（起播 / 停 / 选用哪一段）；波形从底边往上画，最高画到这里
+const TRACK_H = 72; // 整首曲子那一行的高
+const TRACK_TOP = 16; // 整首波形上面留给字的一条（起播 / 停 / 选用哪一段）；波形最高画到这里
+const TRACK_STRIP = 13; // 波形底边下面的一条（和 Prime 4 的概览一样）：hot cue 的小旗、最底下是播放进度的白线
 const ARR = { left: 30, scene: 20, ho: 17, row: 18, gap: 2 }; // 整套 set 的安排：场景一行 + 主要的交接一行 + 每台 Deck 一行
 const HO_HEX = "#f2b84b"; // 主要的交接（主线上一首接一首）
 const LN = { ruler: 22, head: 20, row: 22, gap: 2, group: 7, band: 15 }; // 曲线每一行的高
@@ -1032,7 +1033,7 @@ export class Live5View {
     return g !== null && g >= 0 && g < (this.chart.length || 0) ? g : null;
   }
 
-  // 整首波形的底图：Engine DJ / Prime 4 的 Track Overview 那种画法（半边、三段摞起来，见 wavedraw.js），亮、暗各一张——
+  // 整首波形的底图：Prime 4 的 Track Overview 那种画法（三个频段按真实比例摞起来，见 wavedraw.js），亮、暗各一张——
   // 亮的 = 还没放的，暗的 = 放过的 / 这套谱不放的。和播放位置无关，画一次存着。顶上每 16 小节一个小刻度（乐句）
   _trackImage(clip, w, dur) {
     const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
@@ -1040,12 +1041,13 @@ export class Live5View {
     const key = `${clip.track_id}:${clip.t0}:${clip.bpm}:${w}:${dpr}:${wf ? 1 : 0}`;
     if (this.trackImg.has(key)) return this.trackImg.get(key);
     const H = TRACK_H, bars = Math.ceil(((dur - (clip.t0 || 0)) * clip.bpm) / 60 / BEATS);
+    const cols = wf ? overviewColumns(wf, w, dur) : null;
     const make = (colors) => {
       const c = document.createElement("canvas");
       c.width = Math.round(w * dpr); c.height = Math.round(H * dpr);
       const g = c.getContext("2d");
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (wf) drawOverview(g, w, H - 1, H - 1 - TRACK_TOP, (x) => overviewColumn(wf, Math.floor(((x / w) * dur) * wf.rate), Math.max(Math.floor(((x / w) * dur) * wf.rate) + 1, Math.floor((((x + 1) / w) * dur) * wf.rate))), colors);
+      if (cols) drawStack(g, cols, H - TRACK_STRIP, H - TRACK_STRIP - TRACK_TOP - 1, colors);
       g.fillStyle = "rgba(255,255,255,.28)";
       for (let b = 0; b <= bars; b += 16) g.fillRect(Math.round((srcSec(clip, b * BEATS) / dur) * w), 0, 1, b % 64 === 0 ? 5 : 3);
       return c;
@@ -1096,11 +1098,11 @@ export class Live5View {
       for (const sp of spans) {
         if (!sp.loop) continue;
         const a = X(sp.a), b = Math.max(a + 2, X(sp.b));
-        g.fillStyle = "rgba(91,140,255,.24)";
-        g.fillRect(a, TRACK_TOP, b - a, H - TRACK_TOP);
+        g.fillStyle = "rgba(91,140,255,.26)";
+        g.fillRect(a, TRACK_TOP, b - a, H - TRACK_TOP - 2);
         g.fillStyle = "rgba(255,255,255,.8)";
-        g.fillRect(Math.round(a), TRACK_TOP, 1, H - TRACK_TOP);
-        g.fillRect(Math.round(b) - 1, TRACK_TOP, 1, H - TRACK_TOP);
+        g.fillRect(Math.round(a), TRACK_TOP, 1, H - TRACK_TOP - 2);
+        g.fillRect(Math.round(b) - 1, TRACK_TOP, 1, H - TRACK_TOP - 2);
       }
       // 选用的那一段：用这台 Deck 的颜色框出来，顶上那一条写原曲第几到第几小节、几小节（整 16 小节的写几个乐句）
       const pick = clip._pick || (clip._pick = clipPick(clip));
@@ -1151,25 +1153,31 @@ export class Live5View {
         if (!sp.loop) line(sp.a, "#c9a6ff");
         const tw = g.measureText(t).width, lx = Math.min(w - tw - 4, X(sp.a) + 4);
         g.fillStyle = "rgba(15,17,21,.8)";
-        g.fillRect(lx - 2, TRACK_TOP + 2, tw + 4, 13);
+        g.fillRect(lx - 2, TRACK_TOP + 1, tw + 4, 13);
         g.fillStyle = sp.loop ? "#c5d5ff" : "#c9a6ff";
-        g.fillText(t, lx, TRACK_TOP + 12);
+        g.fillText(t, lx, TRACK_TOP + 11);
       }
-      // hot cue：和 Prime 4 的概览一样——打击垫颜色的一条竖线，底边上一个小三角（这里做成带尖的小旗，里面写打击垫号）
+      // hot cue：和 Prime 4 的概览一样——一条打击垫颜色的竖线穿过波形，波形底边下面一个尖朝上的小旗（Prime 上是三角，这里里面写打击垫号）
+      const base = H - TRACK_STRIP;
       g.font = "bold 9px ui-monospace, Menlo, monospace";
       for (const hc of asset.hotcues || []) {
         const x = Math.round(X((hc.bar - 1) * BEATS));
         if (x < -6 || x > w + 6) continue;
         g.fillStyle = hc.color;
-        g.globalAlpha = 0.8;
-        g.fillRect(x, TRACK_TOP, 1, H - TRACK_TOP);
+        g.globalAlpha = 0.85;
+        g.fillRect(x, TRACK_TOP, 1, base - TRACK_TOP);
         g.globalAlpha = 1;
-        g.beginPath(); g.moveTo(x + 0.5, H - 15); g.lineTo(x + 6.5, H - 9); g.lineTo(x + 6.5, H); g.lineTo(x - 5.5, H); g.lineTo(x - 5.5, H - 9); g.closePath(); g.fill();
+        g.beginPath(); g.moveTo(x + 0.5, base - 1); g.lineTo(x + 6.5, base + 4); g.lineTo(x + 6.5, H - 3); g.lineTo(x - 5.5, H - 3); g.lineTo(x - 5.5, base + 4); g.closePath(); g.fill();
         g.fillStyle = "#0b0d11";
-        g.fillText(String(hc.pad), x - 2.2, H - 1.5);
+        g.fillText(String(hc.pad), x - 2.2, H - 4.5);
       }
-      // 播放头：一条白线（放过的那一边已经是暗的）
-      if (xp !== null) { g.fillStyle = "#fff"; g.fillRect(Math.round(xp) - 1, 0, 2, H); }
+      // 播放头：一条白线（放过的那一边已经是暗的）；最底下一条白线 = 从这里到这一段放完还有多长（Prime 的 Track Progress）
+      if (xp !== null) {
+        const end = used.length ? used[used.length - 1][1] : w;
+        g.fillStyle = "#fff";
+        if (end > xp) g.fillRect(xp, H - 2, end - xp, 2);
+        g.fillRect(Math.round(xp) - 1, 0, 2, H);
+      }
       const total = Math.max(1, Math.floor(asset.bars || ((dur - (clip.t0 || 0)) * clip.bpm) / 60 / BEATS));
       setText(r.bar, `整首 ${total} 小节`); // 现在读到第几小节、还有几小节进：看下面的滚动波形，这里不重复
       r.root.classList.toggle("next", !live);

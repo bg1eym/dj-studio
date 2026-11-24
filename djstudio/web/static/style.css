@@ -359,7 +359,7 @@ canvas.l5-arrc { display: block; width: 100%; border-radius: 4px; }
 .l5-lanes .tl-head > .l5-lnhint { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .l5-lnwhere { min-width: 15em; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; } /* 定宽：数字变了不挤别人 */
 .l5-tracks { display: flex; flex-direction: column; gap: 6px; }
-canvas.ho-wave.l5-twave { height: 62px; }
+canvas.ho-wave.l5-twave { height: 72px; }
 .l5-track .ho-bar { font-size: 13px; margin-top: 1px; }
 .l5-need { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 11px; white-space: nowrap; overflow: hidden; }
 .l5-need .l5-lab { margin-right: 2px; font-size: 11px; }

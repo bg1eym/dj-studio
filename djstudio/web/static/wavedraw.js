@@ -26,63 +26,50 @@ export function drawTriBand(g, w, mid, amp, column) {
 }
 
 // ------------------------------------------------------------------ 整首波形（Track Overview）
-// Engine DJ / Prime 4 的整首波形和滚动波形不是一个画法（Engine DJ 用户手册 5.3.0 第 39 页、Prime 4 用户手册 5.3.0 第 33 页的截图，
-// 设置里叫 Track Overview Style，Half / Full 两种，截图上都是 Half）：
-// - 半边：从底边往上画，不上下对称；
-// - 三个频段摞起来：蓝（低频）在最下面，绿（中频）摞在它上面，白（高频）在最上面；
-// - 放过的部分暗一档，没放的是亮的。
-// 每段的高怎么定没有公开的说法。Engine 的数据是每个点三个频段各一个值、最后再存每段的最大值
-// （libdjinterop：overview_waveform_data_blob 的 waveform_points + maximum_point），所以这里按「这一段 ÷ 它在整首里的最大值」定高，
-// 三段各占三分之一的高——三段都到自己的最大值时正好到顶。这一条是推的，记在 docs/DEVICE_TEST.md 的假设表里。
+// Prime 4 / Engine DJ 的整首波形和滚动波形不是一个画法，也不是滚动波形切一半。
+// 依据：Prime 4 用户手册 5.3.0 第 33 页里嵌的 1280×800 原始屏幕截图（Engine DJ 用户手册 5.3.0 第 39 页的图同），把概览那一条放大了逐列量：
+// - 每一列从底边往上都是蓝、绿、白三层摞着，三层在每一列里都有；白的最薄（中位 4–5 像素），蓝 9–10、绿 6–10 像素。
+//   三层都在、白的又一直很薄 → 是三个频段的音量加在一起（摞起来），比例是真实的（哪一段响哪一层就厚），不是三段各画各的、也不是各自拉满；
+// - 上沿比较平滑：一个点管一小段时间（Engine 的数据整首只有 1024 个点，每个点三个频段各一个值——libdjinterop 的
+//   overview_waveform_data_blob），不是取尖峰；
+// - 放过的部分暗一档（蓝 #1066EF → #043263），没放的是亮的。
+// 所以这里：每一列取这一小段时间（不短于 smooth 秒）里三段各自的平均值，三段直接相加；整首统一一个比例——最高的那一列画满。
+// 每个频段的音量 Engine 怎么算没有资料（这里用本应用分析出来的三段），记在 docs/DEVICE_TEST.md 的假设表里。
 
-export const OVERVIEW_DIM = { lo: "#1b3a7a", mid: "#2b7044", hi: "#878d99" }; // 放过的 / 不放的：暗一档
+export const OVERVIEW_DIM = { lo: "#0b3068", mid: "#1c6a42", hi: "#7b828d" }; // 放过的 / 不放的：暗一档
 
-// 一份波形三个频段各自在整首里的最大值（0..255）。很弱的那一段不拉满：不低于最响那一段的 15%（不把底噪放大成一大块）
-export function overviewNorm(wf) {
-  if (wf._norm) return wf._norm;
-  const m = [0, 0, 0];
-  for (let i = 0; i < wf.n; i++) {
-    if (wf.low[i] > m[0]) m[0] = wf.low[i];
-    if (wf.mid[i] > m[1]) m[1] = wf.mid[i];
-    if (wf.high[i] > m[2]) m[2] = wf.high[i];
+// 每一列的三段（已经除过整首最高那一列的总和）：cols[x] = [lo, mid, high]，三个加起来 ≤ 1；曲子以外 = null
+export function overviewColumns(wf, w, dur, smooth = 0.4) {
+  if (!wf._ps) { // 前缀和：取一段的平均不用每次重加
+    const ps = [new Float64Array(wf.n + 1), new Float64Array(wf.n + 1), new Float64Array(wf.n + 1)];
+    for (let i = 0; i < wf.n; i++) { ps[0][i + 1] = ps[0][i] + wf.low[i]; ps[1][i + 1] = ps[1][i] + wf.mid[i]; ps[2][i + 1] = ps[2][i] + wf.high[i]; }
+    wf._ps = ps;
   }
-  const floor = Math.max(1, 0.15 * Math.max(m[0], m[1], m[2]));
-  return (wf._norm = m.map((v) => Math.max(v, floor)));
+  const ps = wf._ps, half = (smooth * wf.rate) / 2, cols = new Array(w).fill(null);
+  let top = 0;
+  for (let x = 0; x < w; x++) {
+    const fa = ((x / w) * dur) * wf.rate, fb = (((x + 1) / w) * dur) * wf.rate, mid = (fa + fb) / 2;
+    if (fa >= wf.n) break;
+    const ia = Math.max(0, Math.floor(Math.min(fa, mid - half))), ib = Math.min(wf.n, Math.max(ia + 1, Math.ceil(Math.max(fb, mid + half))));
+    const c = [0, 1, 2].map((b) => (ps[b][ib] - ps[b][ia]) / (ib - ia) / 255);
+    cols[x] = c;
+    top = Math.max(top, c[0] + c[1] + c[2]);
+  }
+  if (top > 0) for (const c of cols) if (c) { c[0] /= top; c[1] /= top; c[2] /= top; }
+  return cols;
 }
 
-// 第 ia–ib 帧（不含 ib）这一列的三段：各取最响的那一帧，除以整首的最大值 → [lo, mid, high]，各自 0..1；没有帧 = null
-export function overviewColumn(wf, ia, ib) {
-  ia = Math.max(0, ia); ib = Math.min(wf.n, ib);
-  if (ia >= ib) return null;
-  const n = overviewNorm(wf);
-  let lo = 0, mi = 0, hi = 0;
-  for (let i = ia; i < ib; i++) {
-    if (wf.low[i] > lo) lo = wf.low[i];
-    if (wf.mid[i] > mi) mi = wf.mid[i];
-    if (wf.high[i] > hi) hi = wf.high[i];
-  }
-  return [Math.min(1, lo / n[0]), Math.min(1, mi / n[1]), Math.min(1, hi / n[2])];
-}
-
-// 摞起来以后每段从哪到哪：[[y0, h], …]（y0 = 这一段的上沿，从底边 base 往上摞；height = 满高）
-export function overviewStack(c, base, height) {
+// 一列摞起来以后每段的上沿和高：[[y, h] × 3]，从底边 base 往上——低频贴着底边，中频接在它上面，高频在最上面
+export function stackColumn(c, base, height) {
   const out = [];
   let y = base;
-  for (let b = 0; b < 3; b++) {
-    const h = (Math.min(1, Math.max(0, c[b])) * height) / 3;
-    y -= h;
-    out.push([y, h]);
-  }
+  for (let b = 0; b < 3; b++) { const h = Math.max(0, c[b]) * height; y -= h; out.push([y, h]); }
   return out;
 }
 
-// column(x) → null 或 [lo, mid, high]（overviewColumn 的结果）；base = 底边的 y，height = 满高；colors = WAVE_COLORS（亮）或 OVERVIEW_DIM（暗）
-export function drawOverview(g, w, base, height, column, colors = WAVE_COLORS) {
+// cols = overviewColumns 的结果；base = 底边的 y，height = 满高；colors = WAVE_COLORS（亮）或 OVERVIEW_DIM（暗）
+export function drawStack(g, cols, base, height, colors = WAVE_COLORS) {
   const paths = [new Path2D(), new Path2D(), new Path2D()];
-  for (let x = 0; x < w; x++) {
-    const c = column(x);
-    if (!c) continue;
-    overviewStack(c, base, height).forEach(([y, h], b) => { if (h >= 0.3) paths[b].rect(x, y, 1, h); });
-  }
+  cols.forEach((c, x) => { if (c) stackColumn(c, base, height).forEach(([y, h], b) => { if (h > 0.05) paths[b].rect(x, y, 1, h); }); });
   [colors.lo, colors.mid, colors.hi].forEach((col, b) => { g.fillStyle = col; g.fill(paths[b]); });
 }
