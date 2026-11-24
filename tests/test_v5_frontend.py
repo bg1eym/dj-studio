@@ -20,7 +20,7 @@ TEMPO = [(0.0, 132.0), (384.0, 132.0), (448.0, 134.0), (704.0, 134.0), (704.0, 1
 BEATS = [0.0, 100.0, 384.0, 400.5, 448.0, 600.0, 704.0, 730.0, 768.0, 960.0]
 
 SCRIPT = r"""
-import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock } from "./live5.js";
+import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide } from "./live5.js";
 import { eqHours as v4Hours, faderPos } from "./live.js";
 const out = {};
 const dbs = [-25, -16, -6, -2, 0, 3, 6];
@@ -62,6 +62,23 @@ out.bands = [
 const tempo = JSON.parse(process.env.TEMPO || "[]");
 out.sec = JSON.parse(process.env.BEATS || "[]").map((b) => secAt(tempo, b));
 out.clock = [0, 59.99, 61, 3599, 3600, 3725].map(clock);
+// 曲线一页一页地翻：一页 64 拍（16 小节），每一拍落在哪一页
+out.pages = [0, 10, 47.9, 48, 95.9, 96, 400].map((b) => pageStart(b, 64));
+out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // 按场景看、场景比一页长：从场景的开头数页
+// 游标匀着走：132 BPM（每毫秒 0.0022 拍），每帧 16.7 毫秒，引擎每 250 毫秒报一次、每次差 ±0.04 拍
+{
+  const rate = 132 / 60000, dt = 1000 / 60;
+  let shown = 100, truth = 100, target = 100, minStep = 1e9, maxStep = 0;
+  for (let i = 1; i <= 600; i++) {
+    truth += dt * rate;
+    if (i % 15 === 0) target = truth + (i % 30 === 0 ? 0.04 : -0.04); else target += dt * rate;
+    const next = glide(shown, target, dt, rate);
+    minStep = Math.min(minStep, next - shown); maxStep = Math.max(maxStep, next - shown);
+    shown = next;
+  }
+  out.glide = { min: minStep / (dt * rate), max: maxStep / (dt * rate), off: Math.abs(shown - truth) };
+  out.glideSnap = [glide(100, 108, dt, rate), glide(100, 99.5, dt, rate) >= 100, glide(100, 100, 5000, rate) - 100 < 0.6];
+}
 console.log(JSON.stringify(out));
 """
 
@@ -126,3 +143,19 @@ def test_set_time_matches_the_compiler(out):
     tm = TempoMap(TEMPO)
     assert out["sec"] == pytest.approx([tm.sec_at(b) for b in BEATS], abs=1e-6)
     assert out["clock"] == ["0:00", "0:59", "1:01", "59:59", "1:00:00", "1:02:05"]
+
+
+def test_curve_pages_stay_put_and_flip_with_look_ahead(out):
+    """EQ 曲线一页一页地看：一页里的线不动（同一页里的拍都落在同一个页头），游标走到最后四分之一页才翻，
+    新的一页正好从游标那里开始——后面至少四分之一页一直看得到。"""
+    assert out["pages"] == [0, 0, 0, 48, 48, 96, 384]  # 16 小节一页：每 12 小节翻一次
+    assert out["scenePages"] == [320, 320, 320, 416]  # 场景从第 320 拍起、一屏 32 小节：从场景的开头数
+
+
+def test_cursor_glides_instead_of_stopping_and_jumping(out):
+    """引擎的拍一块一块报上来（每次和画面差几十毫秒）：游标照样匀着走——每一帧走的拍数和正常速度差不到两成，
+    不停、不往回走，也不越走越偏；差得多了（卡住、跳转）才直接过去。"""
+    g = out["glide"]
+    assert 0.8 < g["min"] <= g["max"] < 1.2
+    assert g["off"] < 0.06
+    assert out["glideSnap"] == [108, True, True]  # 差 8 拍：直接过去；目标在后面：停着不退；隔了很久才画下一帧：不会一下窜出去

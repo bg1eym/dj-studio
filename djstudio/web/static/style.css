@@ -50,6 +50,7 @@ nav a.active { color: var(--text); border-bottom-color: var(--accent); }
 .alarm { background: #5a1414; color: #ffdede; padding: 10px 20px; font-weight: 600; border-bottom: 1px solid var(--err); }
 
 main { padding: 16px 20px 60px; max-width: 1500px; margin: 0 auto; }
+main:has(.live5) { max-width: none; padding: 12px 12px 48px; } /* 四 Deck 的演出页：用满窗口的宽度（曲线、波形越宽越好看） */
 .tab { display: none; }
 .tab.active { display: block; }
 h2 { font-size: 16px; margin: 0 0 10px; }
@@ -316,7 +317,13 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .l5-stat { display: inline-flex; align-items: baseline; white-space: nowrap; min-width: 0; }
 .l5-stat b { font: 700 20px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
 .l5-stat b.l5-pos { min-width: 3.6em; }
-.l5-stat b.l5-time { font-size: 18px; }
+.l5-stat b.l5-bpm { min-width: 3.1em; } /* 变速时 132 → 132.5：后面的场景名不挪 */
+.l5-stat b.l5-time { font-size: 18px; min-width: 7.2em; }
+.l5-sceneprog { margin-left: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.l5-left { display: inline-block; min-width: 5.6em; font-variant-numeric: tabular-nums; } /* 定宽：秒数在跳，后面的主速、场景不跟着挪 */
+.l5-toprow { flex-wrap: nowrap; overflow: hidden; }
+.l5-toprow > * { flex: none; }
+.l5-toprow > .l5-stat.grow { flex: 1 1 8em; min-width: 0; overflow: hidden; }
 .l5-stat b.l5-scene-name { font-family: inherit; font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
 .l5-stat .badge { margin-left: 8px; }
 .l5-head .l5-stat.grow { flex: 1 1 13em; } /* 当前场景：挤不下就换行，不缩成没有 */
@@ -324,12 +331,6 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .l5-stage.warn { color: var(--warn); border-color: var(--warn); }
 .l5-late { font-size: 12px; color: var(--warn); }
 .l5-speed { font-size: 12px; margin-left: 6px; }
-.l5-rolerow { flex-wrap: nowrap; gap: 6px 24px; }
-.l5-roles { font-size: 13px; flex: none; }
-.l5-rolechip { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.l5-nextrow { font-size: 13px; display: flex; align-items: center; min-width: 0; flex: 1; }
-.l5-nextline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-@media (max-width: 1100px) { .l5-rolerow { flex-wrap: wrap; } .l5-roles { flex: 1 1 100%; } }
 
 /* 主线 / 工具的小牌：主线 = 这一首歌（主曲 / 进曲 / 出曲），工具 = 加在上面的循环、人声…；橙色 = 主要的交接 */
 .l5-kind { font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 3px; font-weight: 700; white-space: nowrap; flex: none; }
@@ -337,16 +338,11 @@ button.huge { font-size: 18px; padding: 12px 26px; border-radius: 8px; }
 .l5-kind.tool { border: 1px dashed #5b6474; color: #aab2c2; font-weight: 500; }
 .l5-kind.idle { border: 1px solid var(--line); color: var(--dim); font-weight: 500; }
 .l5-kind.hidden { display: none; }
-.l5-horow { gap: 6px 10px; }
-.l5-ho { font-size: 14px; color: var(--text); }
+.l5-horow { display: flex; align-items: center; gap: 10px; height: 22px; overflow: hidden; } /* 定高、不换行：字变长变短，下面的东西不跟着跳 */
+.l5-ho { font-size: 14px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font-variant-numeric: tabular-nums; }
 .l5-ho.live { color: var(--warn); font-weight: 700; }
 .l5-ho.dim { color: var(--dim); }
-.l5-arrleg { font-size: 11px; }
-.deck-role.main { color: var(--warn); border-color: var(--warn); }
-.deck-role.tool { border-style: dashed; }
 .l5-deck.tool { opacity: .92; }
-.l5-ch .l5-kind { font-size: 10px; line-height: 14px; margin-top: 2px; }
-.l5-ch .l5-kind.hidden { display: inline-block; visibility: hidden; } /* 占着位置：四个通道的旋钮对齐 */
 .l5-track.tool .ho-name { font-weight: 500; }
 
 /* 整套 set 的安排：场景一行 + 主要的交接一行 + 每台 Deck 一行色块（一张小图） */
@@ -358,11 +354,13 @@ canvas.l5-arrc { display: block; width: 100%; border-radius: 4px; }
 .l5-ov { margin-bottom: 0; }
 .l5-ov .ho-head { align-items: baseline; margin-bottom: 6px; }
 .l5-ovhint, .l5-lnhint { font-size: 12px; }
-.l5-lnhint { margin: -2px 0 6px; }
+.l5-lanes .tl-head { flex-wrap: nowrap; overflow: hidden; align-items: center; }
+.l5-lanes .tl-head > * { flex: none; white-space: nowrap; }
+.l5-lanes .tl-head > .l5-lnhint { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.l5-lnwhere { min-width: 15em; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; } /* 定宽：数字变了不挤别人 */
 .l5-tracks { display: flex; flex-direction: column; gap: 6px; }
 canvas.ho-wave.l5-twave { height: 62px; }
 .l5-track .ho-bar { font-size: 13px; margin-top: 1px; }
-.l5-pick { margin-left: 8px; color: var(--warn); }
 .l5-need { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 11px; white-space: nowrap; overflow: hidden; }
 .l5-need .l5-lab { margin-right: 2px; font-size: 11px; }
 .l5-el { padding: 0 5px; border-radius: 3px; font: 700 10px/15px var(--mono); border: 1px solid transparent; flex: none; }
@@ -381,12 +379,13 @@ canvas.ho-wave.l5-twave { height: 62px; }
 /* 曲线：左边行头（DOM），右边 canvas */
 .l5-tools { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .l5-grid { display: grid; grid-template-columns: var(--l5-gutter) minmax(0, 1fr); }
-.l5-lgrid { grid-template-columns: var(--tl-label) minmax(0, 1fr); }
+.l5-lgrid { grid-template-columns: 150px minmax(0, 1fr); }
 .l5-gutter { position: relative; }
 .l5-g { position: absolute; left: 0; right: 0; padding: 0 6px 0 2px; overflow: hidden; font-size: 12px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .l5-g-deck { flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; }
 .l5-g1, .l5-g2 { display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
 .l5-g1 .ho-name { font-size: 13px; font-weight: 600; }
+.l5-role.hidden { display: none; }
 .l5-role { font-size: 11px; border: 1px solid var(--line); border-radius: 9px; padding: 0 7px; overflow: hidden; text-overflow: ellipsis; flex: none; max-width: 7em; }
 .l5-g2 { font-size: 12px; line-height: 15px; color: #c8cdd8; }
 .l5-g-deck.st-idle .l5-g2, .l5-g-deck.st-stop .l5-g2 { color: var(--dim); }
@@ -414,8 +413,14 @@ canvas.l5-canvas { display: block; width: 100%; touch-action: pan-y; cursor: gra
 .l5-deck { padding: 5px 10px 7px; }
 .l5-deck .deck-head { margin-bottom: 3px; }
 canvas.live-wave.l5-wave { height: 68px; }
-.l5-deck .deck-bar { font-size: 15px; min-width: 9em; }
-.l5-deck .deck-bpm { font-size: 17px; }
+.l5-deck .deck-bar { font-size: 15px; min-width: 9em; text-align: right; white-space: nowrap; }
+/* 右边这几格定宽：数字从一位变两位、「原速」变成百分数，旁边的字不跟着左右挪 */
+.l5-deck .deck-phrase { display: inline-block; min-width: 6.4em; white-space: nowrap; }
+.l5-deck .deck-tempo { min-width: 152px; white-space: nowrap; }
+.l5-track .ho-label { align-self: flex-start; } /* 字少了一行（后面没有片段了）时不上下挪 */
+.l5-deck .deck-time { min-width: 3.4em; text-align: right; }
+.l5-deck .deck-beat, .l5-deck .deck-tempo, .l5-deck .deck-time { font-variant-numeric: tabular-nums; }
+.l5-deck .deck-bpm { font-size: 17px; display: inline-block; min-width: 3.1em; text-align: right; } /* 变速时 132 → 132.5：后面的字不挪 */
 .l5-deck .deck-title { font-size: 14px; max-width: 30vw; }
 .l5-dstate { font-size: 12px; color: var(--dim); white-space: nowrap; }
 .l5-dstate.st-play, .l5-dstate.st-loop { color: var(--ok); }
@@ -423,20 +428,39 @@ canvas.live-wave.l5-wave { height: 68px; }
 .l5-dstate.st-error { color: var(--err); font-weight: 700; }
 .l5-deck .dots i.on:first-child { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 
-/* 调音台（四路）+ 现在的 EQ 操作 + 接下来 ｜ 曲线 + 策略。调音台做得紧凑（左边一列固定 440px，和两 Deck 时一样宽），宽度留给曲线 */
-.live-bottom.l5-bottom { grid-template-columns: 440px minmax(0, 1fr); }
-.l5-mixer { padding: 8px 8px 10px; }
+/* 最下面一排：调音台｜现在的 EQ 操作｜接下来｜策略。四块一样高、定高——里面的字多了自己滚，不把整页顶高（画面不跳） */
+.l5-bottom4 { display: grid; grid-template-columns: max-content minmax(220px, .9fr) minmax(320px, 1.5fr) minmax(240px, 1fr); gap: 10px; align-items: stretch; }
+.l5-bottom4 > * { height: 428px; box-sizing: border-box; min-width: 0; margin: 0; }
+.l5-bottom4 > .l5-eqops, .l5-bottom4 > .l5-strategy { overflow: auto; }
+.l5-bottom4 > .l5-next { display: flex; flex-direction: column; }
+.l5-bottom4 > .l5-next > .l5-h { min-height: 24px; flex-wrap: nowrap; align-items: center; white-space: nowrap; } /* 「回看更早的」出现时这一行不变高 */
+.l5-bottom4 .l5-acts { max-height: none; flex: 1 1 0; min-height: 0; }
+/* 窄一点的窗口：调音台｜EQ 操作｜接下来 一排，策略（不常变的字）单独一行、有多少字多高 */
+@media (max-width: 1280px) {
+  .l5-bottom4 { grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1.5fr); }
+  .l5-bottom4 > .l5-strategy { grid-column: 1 / -1; height: auto; }
+}
+@media (max-width: 760px) { .l5-bottom4 { grid-template-columns: 1fr; } .l5-bottom4 > * { height: auto; } }
+.l5-mixer { padding: 8px 8px 10px; position: relative; overflow: hidden; }
 .l5-chs { column-gap: 4px; align-items: start; }
+.l5-ch { min-width: 0; overflow: hidden; }
+/* 调音台底下空着的那一块（有手动接管时放「回谱」的地方）：平时写一句怎么接管 */
+.l5-mixhint { position: absolute; left: 8px; right: 8px; bottom: 12px; text-align: center; font-size: 11px; line-height: 1.6; color: var(--dim); pointer-events: none; }
+.l5-mixhint.hidden { display: none; }
 .l5-ch .ch-name { display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
 .l5-ch .ch-gain { min-height: 12px; }
 .l5-ch .ch-body { gap: 5px; align-items: flex-start; }
-.l5-ch .ch-knobs { gap: 1px; }
+.l5-ch .ch-knobs { gap: 1px; width: 40px; flex: none; } /* 定宽：读数从「12点」变成「7点(切)」时这一列不变宽，推子不跟着挪 */
+.l5-ch .ch-knobs .knob { width: 40px; }
+.l5-ch .ch-knobs .kv { white-space: nowrap; }
 .l5-ch .knob-svg { width: 34px; height: 34px; }
 .l5-ch .knob.small .knob-svg { width: 26px; height: 26px; }
 .l5-ch .kl { font-size: 9px; letter-spacing: 0; margin-top: 0; }
 .l5-ch .kv { font-size: 10px; min-height: 12px; }
 .l5-ch .ks { display: none; } /* dB 那一行省掉：钟点位已经说了（7 点 = 切） */
-.l5-ch .fader-row { gap: 4px; margin-top: 2px; }
+.l5-ch .fader-row { gap: 4px; margin-top: 2px; flex: none; }
+.l5-ch .fader { width: 14px; flex: none; } /* 定宽：底下的读数从「10」变成「7.5」时推子不左右挪（字宽出去的部分两边匀着露） */
+.l5-ch .fader .kv { white-space: nowrap; }
 .l5-ch .fader-track, .l5-ch .vu, .l5-mixer .master .vu, .l5-mixer .vu-scale { height: 200px; }
 .l5-ch .vu span, .l5-mixer .master .vu span { width: 9px; }
 .l5-ch .fader-cap { width: 22px; left: -7px; }
@@ -457,16 +481,19 @@ canvas.live-wave.l5-wave { height: 68px; }
 .knob.manual .kv { color: var(--warn); font-weight: 700; }
 .fader.manual .fader-cap { box-shadow: 0 0 0 2px var(--warn); }
 .fader.manual .kv { color: var(--warn); font-weight: 700; }
-.l5-chfx { display: flex; gap: 3px; flex-wrap: wrap; justify-content: center; min-height: 16px; }
-.l5-fxon { font-size: 10px; line-height: 14px; padding: 0 5px; border-radius: 7px; background: #f0c050; color: #1a1300; font-weight: 700; white-space: nowrap; }
-.l5-back { display: flex; flex-direction: column; align-items: stretch; gap: 3px; margin-top: 2px; }
-.l5-back.hidden { display: none; }
-.l5-backlab { font-size: 11px; color: var(--warn); text-align: center; }
-.l5-back button { padding: 1px 6px; font-size: 11px; }
+.l5-chfx { display: flex; flex-direction: column; align-items: center; gap: 2px; height: 30px; width: 100%; min-width: 0; overflow: hidden; } /* 定高两行：效果亮起来调音台不变高、不变宽 */
+.l5-fxon { font-size: 10px; line-height: 14px; padding: 0 5px; border-radius: 7px; background: #f0c050; color: #1a1300; font-weight: 700; white-space: nowrap;
+  max-width: 100%; box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; flex: none; }
+.l5-back { display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 2px; }
+.l5-back.off { visibility: hidden; } /* 占着位置：出现「回谱」时调音台不变高（不能用 .hidden：那个是 display: none） */
+.l5-backlab { font-size: 11px; line-height: 14px; min-height: 14px; color: var(--warn); text-align: center; }
+.l5-back button { padding: 0; height: 19px; line-height: 17px; font-size: 11px; white-space: nowrap; }
+.l5-backlab { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .l5-over { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 3px; border: 1px solid var(--line); color: var(--dim); }
 .l5-over.was { border-color: var(--err); color: var(--err); }
 .l5-over.on { background: var(--err); border-color: var(--err); color: #fff; box-shadow: 0 0 10px var(--err); }
 .l5-overn { font-size: 10px; color: var(--err); white-space: nowrap; }
+.l5-overn.off { visibility: hidden; } /* 占着位置：第一次过载时主输出的电平表不往下挪 */
 .l5-lanes { min-height: 0; }
 .l5-lanes .tl-head { margin-bottom: 6px; }
 .l5-lanes .tl-head .dim { font-size: 12px; }
@@ -490,7 +517,6 @@ canvas.live-wave.l5-wave { height: 68px; }
 .l5-note { font-size: 11px; border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; margin-right: 3px; color: var(--dim); }
 .l5-nowline { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--warn); border-top: 1px solid var(--warn); margin: 4px 0 2px; padding-top: 2px; }
 .l5-nowpos { font-family: var(--mono); }
-@media (max-width: 1100px) { .live-bottom.l5-bottom { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .live5 { --l5-gutter: 150px; } .l5-ov .ho-legend { display: none; } }
 
 /* 首页的 v5：演出画面顶上一行、谱里的提示 / 错误、可以演出那一屏的链接 */

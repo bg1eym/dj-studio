@@ -11,7 +11,7 @@
 // - 旋钮、推子、电平表就是 live.js 里那几个部件；这里只管四 Deck 的排法和全场小节轴。
 
 import { drawTriBand, WAVE_COLORS } from "./wavedraw.js";
-import { Knob, MiniKnob, Fader, Meter, meterScale, BAND_HEX, FX_HEX, drawSeekHover, drawHotCues, clockText } from "./live.js";
+import { Knob, Fader, Meter, meterScale, BAND_HEX, FX_HEX, drawSeekHover, drawHotCues, clockText } from "./live.js";
 import {
   PARAM_ZH, BEATS, posText, posTextFine, barOf, durText, sceneAt, tempoAt, fmtBpm, clipAt, clipById, srcAt, laneAt, lanePoints,
   sceneRoles, EQ_CUT,
@@ -21,14 +21,14 @@ const DECK_HEX = { 1: "#3d8bea", 2: "#dc7526", 3: "#27ae60", 4: "#9c7cec" };
 const ZOOMS = [8, 16, 32, "scene"];
 const ZOOM_ZH = { 8: "8 小节", 16: "16 小节", 32: "32 小节", scene: "整个场景" };
 const MIN_BAR_PX = 18; // 再长的场景也不把一小节压到比这更窄：滚动，不缩
-const PLAYHEAD_AT = 0.3; // 跟随时游标停在画面的 30% 处，右边 70% 是接下来的
 const LEAD_IN = 8; // 开演前留两小节（装载、摆旋钮）
 const SPAN_S = 7; // 每台 Deck 的滚动波形：播放头两侧各 7 秒（音乐里的时间），四台同一比例
 const STRATEGY = ["作用", "保留", "前景", "LOW", "MID/HIGH"];
 const TRACK_H = 62; // 整首曲子那一行的高（左边要写三行字：片段、第几小节 / 选用哪一段、要它的哪些元素）
 const ARR = { left: 30, scene: 20, ho: 17, row: 18, gap: 2 }; // 整套 set 的安排：场景一行 + 主要的交接一行 + 每台 Deck 一行
 const HO_HEX = "#f2b84b"; // 主要的交接（主线上一首接一首）
-const LN = { scene: 20, ruler: 20, head: 22, row: 24, gap: 3, group: 8, band: 15 }; // 曲线每一行的高
+const LN = { ruler: 22, head: 20, row: 22, gap: 2, group: 7, band: 15 }; // 曲线每一行的高
+const PAGE_AHEAD = 0.25; // 一页的最后四分之一是「下一页的开头」：游标走到那里就翻页，所以后面至少四分之一页要做的事一直看得到
 const LANE_PARAMS = ["hi", "mid", "lo", "filter", "vol"]; // 和调音台上从上到下一样
 const LANE_ZH = { hi: "HIGH", mid: "MID", lo: "LOW", filter: "FILTER", vol: "推子" };
 const BG = "#0b0d11";
@@ -216,6 +216,24 @@ export function clipPick(clip) {
   return { a: Math.min(...sp.map((x) => x.a)), b: Math.max(...sp.map((x) => x.b)) };
 }
 
+// 曲线一页一页地看：第 beat 拍落在哪一页（返回这一页左边是第几拍）。一页 span 拍，游标只在前 (1 - PAGE_AHEAD) 里走，
+// 走到最后那一截就翻页，新的一页从游标这里开始——所以一页里的线不动，后面至少 PAGE_AHEAD 页要做的事一直看得到。
+// base = 从哪一拍开始数页（全场 = 0；按场景看而场景比一页长 = 场景的开头）
+export function pageStart(beat, span, base = 0) {
+  const step = span * (1 - PAGE_AHEAD);
+  return base + Math.floor(Math.max(0, beat - base) / step + 1e-9) * step;
+}
+
+// 游标匀着走：上一帧画在 shown，过了 dt 毫秒，引擎说现在该在 target（拍），速度 rate 拍 / 毫秒 → 这一帧画在哪。
+// 引擎的拍是一块一块音频报上来的，每次和游标差几十毫秒：按速度往前走，再把差的慢慢补上（不一顿一跳）；
+// 差得多了（卡住了）才直接过去。永远不往回走
+export function glide(shown, target, dt, rate) {
+  const b = shown + Math.max(0, Math.min(250, dt)) * rate;
+  const err = target - b;
+  if (Math.abs(err) > Math.max(1, 300 * rate)) return Math.max(shown, target);
+  return Math.max(shown, b + err * (1 - Math.exp(-Math.max(0, dt) / 400)));
+}
+
 function fitText(g, text, maxW) {
   if (maxW <= 6) return "";
   if (g.measureText(text).width <= maxW) return text;
@@ -256,11 +274,11 @@ export class Live5View {
     this.chart = null;
     this.engine = null;
     this.progress = null;
-    this.zoom = 16;
+    this.zoom = "scene"; // 默认一页 = 一个场景：这一页整段不动，换场景才翻
     this.follow = true;
     try {
       const z = localStorage.getItem("djs.l5.zoom");
-      if (z) this.zoom = z === "scene" ? z : ZOOMS.includes(+z) ? +z : 16;
+      if (z) this.zoom = z === "scene" ? z : ZOOMS.includes(+z) ? +z : "scene";
     } catch { /* 无痕窗口 */ }
     this.b0 = -LEAD_IN;
     this.ppb = 20;
@@ -303,77 +321,73 @@ export class Live5View {
       const v = el("b", { class: cls });
       return [el("span", { class: "l5-stat" }, el("span", { class: "l5-lab" }, label), v), v];
     };
+    // 头：现在在哪（全场第几小节、第几分钟、多快、哪个场景的第几小节）+ 暂停 / 跳转
     const [posBox, pos] = stat("全场位置", "l5-pos");
     const [timeBox, time] = stat("Set 时间", "l5-time");
     this.timeEl = time;
-    this.leftEl = el("span", { class: "l5-speed dim" });
+    this.leftEl = el("span", { class: "l5-speed dim l5-left" });
     put(timeBox, this.leftEl);
     timeBox.title = "这套 set 放到第几分几秒 / 一共多长（音乐里的时间：倍速时走得比墙上的钟快）";
     const [bpmBox, bpm] = stat("主速", "l5-bpm");
-    const [sceneBox, scene] = stat("当前场景", "l5-scene-name");
+    const [sceneBox, scene] = stat("场景", "l5-scene-name");
     this.posEl = pos; this.bpmEl = bpm; this.sceneEl = scene;
     this.speedEl = el("span", { class: "l5-speed dim hidden" });
     put(bpmBox, this.speedEl);
+    this.sceneProg = el("span", { class: "l5-speed dim l5-sceneprog" });
     this.draftEl = el("span", { class: "badge warn hidden" }, "草稿");
-    put(sceneBox, this.draftEl);
+    put(sceneBox, this.sceneProg, this.draftEl);
     sceneBox.classList.add("grow");
     this.stageEl = el("span", { class: "l5-stage" });
     this.pauseBtn = el("button", { class: "l5-pause", onclick: () => this._pauseResume() }, "⏸ 暂停");
     this.jumpBtn = el("button", { class: "l5-jump", onclick: () => this._askSeek(null, this.jumpBtn, true) }, "跳转…");
     this.lateEl = el("span", { class: "l5-late hidden" });
-    this.nextEl = el("span", { class: "l5-nextline" });
+    // 整套 set 的安排（一张小图）+ 主要的交接（一行字，定高、不换行：字变长变短画面不跟着跳）
     put(R, el("div", { class: "panel l5-head" },
-      el("div", { class: "l5-row" }, posBox, timeBox, bpmBox, sceneBox, this.stageEl, this.lateEl, this.pauseBtn, this.jumpBtn),
-      this.arrEl = el("div", { class: "l5-arr", title: "整套 set 的安排：最上面是场景，下面每台 Deck 一行，色块 = 片段。点场景 = 从那个场景的开头放；点色块 = 从那一小节放" },
-        this.arr = el("canvas", { class: "l5-arrc", role: "img", "aria-label": "整套 set 的安排：场景和每台 Deck 的片段" })),
-      el("div", { class: "l5-row l5-horow" }, el("span", { class: "l5-kind main" }, "主要的交接"), this.hoEl = el("span", { class: "l5-ho" }),
-        el("span", { class: "grow" }),
-        el("span", { class: "l5-arrleg dim" }, "安排图：粗的色块 = 主线（主曲）· 细的 = 工具（循环、人声…）· 橙色 = 交接 · 蓝线 = 换低频")),
-      el("div", { class: "l5-row l5-rolerow" }, this.rolesEl = el("span", { class: "l5-row l5-roles" }),
-        el("span", { class: "l5-nextrow" }, el("span", { class: "l5-lab" }, "下一步"), this.nextEl))));
+      el("div", { class: "l5-row l5-toprow" }, posBox, timeBox, bpmBox, sceneBox, this.stageEl, this.lateEl, this.pauseBtn, this.jumpBtn),
+      this.arrEl = el("div", { class: "l5-arr", title: "整套 set 的安排：场景、主要的交接（橙色的一段，蓝线 = 换低频）、每台 Deck 放什么——粗的色块 = 主线（这一首歌），细的 = 工具（循环、人声…），浅一点的是 loop，底下的黄条是效果。点哪从哪放" },
+        this.arr = el("canvas", { class: "l5-arrc", role: "img", "aria-label": "整套 set 的安排：场景、主要的交接和每台 Deck 的片段" })),
+      el("div", { class: "l5-horow" }, el("span", { class: "l5-kind main" }, "主要的交接"), this.hoEl = el("span", { class: "l5-ho" }))));
 
     // 整首曲子：每台 Deck 一行——它现在放的（或者下一段要放的）那首原曲的整首波形
-    this.ovTitle = el("b", {}, "整首曲子");
-    this.ovWhere = el("span", { class: "ho-where mono" });
     const legend = el("span", { class: "ho-legend", title: "Denon（Engine DJ）三频段波形：三段各自的音量叠在一起" }, "波形：",
       [["lo", "低频 LOW"], ["mid", "中频 MID"], ["hi", "高频 HIGH"]].map(([b, name]) => el("span", {}, el("i", { style: `background:${WAVE_COLORS[b]}` }), name)));
     this.tracksEl = el("div", { class: "l5-tracks" });
     put(R, el("div", { class: "handoff l5-ov" },
-      el("div", { class: "ho-head" }, this.ovTitle,
-        el("span", { class: "dim l5-ovhint" }, "亮的一段 = 这套谱要放的；小旗 = hot cue（打击垫 1–8）；点波形 = 从那里放"),
-        el("span", { class: "grow" }), legend, this.ovWhere),
+      el("div", { class: "ho-head" }, el("b", {}, "整首曲子"),
+        el("span", { class: "dim l5-ovhint" }, "框 = 选用的那一段 · 小旗 = hot cue · 点波形 = 从那里放"),
+        el("span", { class: "grow" }), legend),
       this.tracksEl));
-    this.zoomBtns = {};
-    const tools = el("span", { class: "l5-tools" }, el("span", { class: "l5-lab" }, "一屏看"),
-      ZOOMS.map((z) => (this.zoomBtns[z] = el("button", { class: "small", onclick: () => this._setZoom(z) }, ZOOM_ZH[z]))),
-      this.followBtn = el("button", { class: "small", title: "游标停在画面左边三成的位置，谱往左走。拖动 / 横向滚动会关掉跟随",
-        onclick: () => { this.follow = !this.follow; this._syncTools(); this._kick(true); } }, "跟随播放"));
 
-    // 每台 Deck 的滚动波形
+    // 每台 Deck 的滚动波形：现在读到原曲哪里
     this.decksEl = el("div", { class: "live-decks" });
     put(R, this.decksEl);
 
-    // 调音台 + 接下来 ｜ 曲线 + 策略
+    // EQ / Filter / 推子的曲线（谱）：整行宽。一页一页地看——这一页不动，游标从左走到右，走到头翻下一页
+    this.zoomBtns = {};
+    const tools = el("span", { class: "l5-tools" }, el("span", { class: "l5-lab" }, "一页"),
+      ZOOMS.map((z) => (this.zoomBtns[z] = el("button", { class: "small", onclick: () => this._setZoom(z) }, ZOOM_ZH[z]))),
+      this.followBtn = el("button", { class: "small", title: "这一页不动，游标从左往右走；走到最后四分之一页（整个场景：走完这个场景）自动翻到下一页。拖动 / 横向滚动会关掉",
+        onclick: () => { this.follow = !this.follow; this._syncTools(); this._kick(true); } }, "跟着翻页"));
+    this.lnWhere = el("span", { class: "tl-where mono l5-lnwhere" });
+    this.lgutter = el("div", { class: "l5-gutter l5-lgutter" });
+    this.lcanvas = el("canvas", { class: "l5-canvas l5-lcanvas", role: "img", "aria-label": "每台 Deck 的 EQ、Filter、推子曲线（谱上写的）。拖动前后看，点一下从那一小节放" });
+    this.ltip = el("div", { class: "l5-tip hidden" });
+    this.lplot = el("div", { class: "l5-plot" }, this.lcanvas, this.ltip);
+    put(R, el("div", { class: "timeline-live l5-lanes" },
+      el("div", { class: "tl-head" }, el("b", {}, "EQ / Filter / 推子"), el("span", { class: "dim l5-lnhint" }, "线 = 谱 · 游标上的点 = 实际（和谱不一样时两个都画）"),
+        el("span", { class: "grow" }), tools, this.lnWhere),
+      el("div", { class: "l5-grid l5-lgrid" }, this.lgutter, this.lplot)));
+
+    // 最下面一排：调音台（实际的旋钮、推子、电平，拖动 = 接管）｜现在的 EQ 操作｜接下来的动作和回执｜这个场景的策略
     this.mixerEl = el("div", { class: "mixer l5-mixer", title: "旋钮 / 推子 / 电平都是从引擎读回的实际值。拖旋钮 / 推子 = 手动接管（只有它不再跟谱）；双击 = 下一拍回谱" });
     this.actsEl = el("div", { class: "l5-acts" });
     this.nowEl = el("span", { class: "l5-nowpos" });
     this.pastBtn = el("button", { class: "small", onclick: () => { this.showPast = !this.showPast; this._actSig = ""; this._renderActions(); } }, "回看更早的");
-    this.lnTitle = el("b", {}, "EQ / Filter / 推子");
-    this.lnWhere = el("span", { class: "tl-where mono" });
-    this.lgutter = el("div", { class: "l5-gutter l5-lgutter" });
-    this.lcanvas = el("canvas", { class: "l5-canvas l5-lcanvas", role: "img", "aria-label": "每台 Deck 的 EQ、Filter、推子曲线（谱上写的）" });
-    this.ltip = el("div", { class: "l5-tip hidden" });
-    this.lplot = el("div", { class: "l5-plot" }, this.lcanvas, this.ltip);
     this.stratEl = el("div", { class: "panel l5-strategy" });
-    put(R, el("div", { class: "live-bottom l5-bottom" },
-      el("div", { class: "live-left" }, this.mixerEl, this.eqEl = el("div", { class: "tl-next l5-eqops" }),
-        el("div", { class: "panel l5-next" }, el("div", { class: "l5-h" }, "接下来", el("span", { class: "dim" }, "未来 4 小节的动作；做完没有按引擎的回执"), el("span", { class: "grow" }), this.pastBtn), this.actsEl)),
-      el("div", { class: "live-left" },
-        el("div", { class: "timeline-live l5-lanes" },
-          el("div", { class: "tl-head" }, this.lnTitle, tools, el("span", { class: "grow" }), this.lnWhere),
-          el("div", { class: "dim l5-lnhint" }, "线 = 谱；小旋钮和白边的点 = 引擎读回的实际值。拖动 = 前后看，点一下 = 从那一小节放"),
-          el("div", { class: "l5-grid l5-lgrid" }, this.lgutter, this.lplot)),
-        this.stratEl)));
+    put(R, el("div", { class: "l5-bottom4" }, this.mixerEl,
+      this.eqEl = el("div", { class: "tl-next l5-eqops" }),
+      el("div", { class: "panel l5-next" }, el("div", { class: "l5-h" }, "接下来", el("span", { class: "dim" }, "做完没有按引擎的回执"), el("span", { class: "grow" }), this.pastBtn), this.actsEl),
+      this.stratEl));
 
     this._bindPlot(this.lcanvas);
     this.arr.addEventListener("mousemove", (ev) => { const r = this.arr.getBoundingClientRect(); this.arrHover = { x: ev.clientX - r.left, y: ev.clientY - r.top }; this._kick(true); });
@@ -399,7 +413,7 @@ export class Live5View {
     this.ov = {};
     for (const d of this.decks) {
       const r = { d, hoverX: null, clip: null, kind: el("span", { class: "l5-kind" }), name: el("span", { class: "ho-name" }), role: el("span", { class: "l5-role" }),
-        bar: el("span", {}), pick: el("span", { class: "l5-pick" }), need: el("div", { class: "l5-need" }), canvas: el("canvas", { class: "ho-wave l5-twave" }) };
+        bar: el("span", {}), need: el("div", { class: "l5-need" }), canvas: el("canvas", { class: "ho-wave l5-twave" }) };
       r.canvas.addEventListener("mousemove", (ev) => { r.hoverX = ev.clientX - r.canvas.getBoundingClientRect().left; this._kick(true); });
       r.canvas.addEventListener("mouseleave", () => { r.hoverX = null; this._kick(true); });
       r.canvas.addEventListener("click", (ev) => {
@@ -409,7 +423,7 @@ export class Live5View {
       });
       r.root = el("div", { class: "ho-row l5-track" },
         el("div", { class: "ho-label" }, el("div", { class: "ho-title" }, el("span", { class: "deck-no", style: `background:${DECK_HEX[d]}` }, String(d)), r.kind, r.name, r.role),
-          el("div", { class: "ho-bar mono" }, r.bar, r.pick), r.need),
+          el("div", { class: "ho-bar mono" }, r.bar), r.need),
         r.canvas);
       this.ov[d] = r;
       put(this.tracksEl, r.root);
@@ -420,7 +434,7 @@ export class Live5View {
     this.dp = {};
     for (const d of this.decks) {
       const o = { d, hoverX: null,
-        title: el("span", { class: "deck-title" }, "（空）"), role: el("span", { class: "deck-role" }), state: el("span", { class: "l5-dstate" }),
+        title: el("span", { class: "deck-title" }, "（空）"), state: el("span", { class: "l5-dstate" }),
         quiet: el("span", { class: "l5-quiet hidden", title: "这台 Deck 在放，但现在没出声（推子在底 / 被切掉了）" }, "没出声"),
         barEl: el("span", { class: "deck-bar" }, "–"), dots: [0, 1, 2, 3].map(() => el("i")), phrase: el("span", { class: "deck-phrase" }),
         bpm: el("span", { class: "deck-bpm" }, "–"), pitch: el("span", { class: "deck-pitch" }), time: el("span", { class: "deck-time" }),
@@ -434,9 +448,9 @@ export class Live5View {
       });
       o.root = el("div", { class: `deck-live l5-deck d${d}` },
         el("div", { class: "deck-head" },
-          el("span", { class: "deck-no", style: `background:${DECK_HEX[d]}` }, String(d)), o.title, o.role, o.state, o.quiet, el("span", { class: "grow" }),
+          el("span", { class: "deck-no", style: `background:${DECK_HEX[d]}` }, String(d)), o.title, o.state, o.quiet, el("span", { class: "grow" }),
           el("span", { class: "deck-beat" }, o.barEl, el("span", { class: "dots" }, o.dots), o.phrase),
-          el("span", { class: "deck-tempo" }, o.bpm, o.pitch), o.time),
+          el("span", { class: "deck-tempo", title: "这份素材原曲的 BPM · 现在放得比原曲快 / 慢多少（现在的速度 = 头上的主速）" }, o.bpm, o.pitch), o.time),
         o.canvas);
       this.dp[d] = o;
       put(this.decksEl, o.root);
@@ -450,12 +464,13 @@ export class Live5View {
     for (const d of this.decks) strips.push(this._buildChannel(d));
     this.mvu = new Meter();
     this.overLamp = el("span", { class: "l5-over", title: "主输出过载（削波）" }, "过载");
-    this.overCount = el("div", { class: "l5-overn hidden" });
+    this.overCount = el("div", { class: "l5-overn off" });
     this.masterDb = el("div", { class: "kv" }, "–");
     const master = el("div", { class: "master" }, el("div", { class: "ch-name" }, "MASTER"), el("div", { class: "kl" }, "主输出 dBFS"), this.overLamp, this.overCount,
       el("div", { class: "vu-wrap" }, meterScale(), this.mvu.root), this.masterDb);
     strips.splice(Math.ceil(this.decks.length / 2), 0, master);
-    put(M, el("div", { class: "mixer-chs l5-chs", style: `grid-template-columns:${strips.map((s) => (s === master ? "50px" : "1fr")).join(" ")}` }, strips));
+    this.mixHint = el("div", { class: "l5-mixhint" }, el("div", {}, "拖旋钮 / 推子 = 手动接管"), el("div", {}, "只有拖的那一个不再跟谱 · 双击 = 下一拍回谱"));
+    put(M, el("div", { class: "mixer-chs l5-chs", style: `grid-template-columns:${strips.map((s) => (s === master ? "50px" : "74px")).join(" ")}` }, strips), this.mixHint);
   }
 
   _buildChannel(d) {
@@ -465,8 +480,8 @@ export class Live5View {
         lo: new Knob("LOW", "lo", BAND_HEX.lo, false, BAND_HEX.lo), filter: new Knob("FILTER", "filter", "#c9a6ff") },
       fxA: new Knob("ECHO", "echo", FX_HEX, true), fxB: new Knob("REVERB", "reverb", FX_HEX, true),
       vu: new Meter(), fader: new Fader(col),
-      clip: el("div", { class: "ch-gain" }), kind: el("span", { class: "l5-kind hidden" }), live: el("div", { class: "l5-chfx" }),
-      back: el("div", { class: "l5-back hidden" }) };
+      clip: el("div", { class: "ch-gain" }), live: el("div", { class: "l5-chfx" }),
+      back: el("div", { class: "l5-back off" }) };
     c.fxA.set(0); c.fxB.set(0);
     c.manualEl = el("span", { class: "l5-backlab" });
     put(c.back, c.manualEl,
@@ -475,7 +490,7 @@ export class Live5View {
     for (const p of ["hi", "mid", "lo", "filter"]) this._dragKnob(c.k[p], d, p);
     this._dragFader(c.fader, d);
     c.root = el("div", { class: `channel l5-ch ch${d}` },
-      el("div", { class: "ch-name", style: `color:${col}` }, `CH ${d}`, c.clip, c.kind),
+      el("div", { class: "ch-name", style: `color:${col}` }, `CH ${d}`, c.clip),
       el("div", { class: "ch-body" },
         el("div", { class: "ch-knobs" }, c.k.hi.root, c.k.mid.root, c.k.lo.root, c.k.filter.root),
         el("div", { class: "fader-row" }, c.vu.root, c.fader.root)),
@@ -493,16 +508,15 @@ export class Live5View {
     this.gHead = {};
     for (const r of this.lnRows) {
       const cell = el("div", { class: `l5-g l5-g-${r.kind}`, style: `top:${r.y}px;height:${r.h}px` });
-      if (r.kind === "scene") put(cell, el("span", { class: "dim" }, "场景 / 速度"));
-      else if (r.kind === "ruler") put(cell, el("span", { class: "dim" }, "全场小节"));
+      if (r.kind === "ruler") put(cell, el("span", { class: "dim" }, "全场小节"));
       else if (r.kind === "head") {
         const o = { who: el("span", { class: "l5-lwho" }) };
         put(cell, el("b", { style: r.deck ? `color:${DECK_HEX[r.deck]}` : "" }, r.deck ? `CH ${r.deck}` : "MASTER"), o.who);
         this.gHead[r.deck] = o;
       } else {
         const col = laneColor(r.param, r.deck);
-        const o = { mini: new MiniKnob(r.param, col), val: el("span", { class: "tl-kv mono" }, "–"), man: el("span", { class: "l5-vm hidden", title: "手动接管中" }, "手"), cell };
-        put(cell, o.mini.root, el("span", { class: "tl-pn", style: `color:${col}` }, LANE_ZH[r.param]), o.val, o.man);
+        const o = { man: el("span", { class: "l5-vm hidden", title: "手动接管中" }, "手"), cell };
+        put(cell, el("span", { class: "tl-pn", style: `color:${col}` }, LANE_ZH[r.param]), o.man);
         this.gLane[`${r.deck}.${r.param}`] = o;
       }
       put(L, cell);
@@ -592,10 +606,11 @@ export class Live5View {
     if (!st || st.state === "idle") return this.restBeat;
     let b = st.beat;
     if (st.state === "running") {
-      const dt = Math.max(0, Math.min(1500, Date.now() - this.at)); // 状态断了最多往前推 1.5 秒，不会自己跑下去
-      b += (dt / 60000) * (st.bpm || 0) * (this.engine.speed || 1);
-      if (this.shown !== null && b < this.shown) b = this.shown; // 新状态比外推的略早：停一下，不往回抖
+      const now = Date.now(), rate = ((st.bpm || 0) * (this.engine.speed || 1)) / 60000; // 拍 / 毫秒
+      const target = st.beat + Math.max(0, Math.min(1500, now - this.at)) * rate; // 状态断了最多往前推 1.5 秒，不会自己跑下去
+      b = this.shown === null ? target : glide(this.shown, target, now - this.shownAt, rate); // 跳转 / 刚开始：直接过去；平时匀着走
       this.shown = b;
+      this.shownAt = now;
     }
     return Math.min(b, (this.chart.length || b) + 64);
   }
@@ -634,12 +649,12 @@ export class Live5View {
       }
       return { items: out, n: Math.max(1, ends.length) };
     };
-    let y = LN.scene + LN.ruler + LN.gap;
-    this.lnRows = [{ kind: "scene", y: 0, h: LN.scene }, { kind: "ruler", y: LN.scene, h: LN.ruler }];
+    let y = LN.ruler + LN.gap;
+    this.lnRows = [{ kind: "ruler", y: 0, h: LN.ruler }];
     for (const d of [...this.decks, 0]) {
       const fx = pack(fxOf(d));
       if (!d && !fx.items.length) continue;
-      if (this.lnRows.length > 2) y += LN.group;
+      if (this.lnRows.length > 1) y += LN.group;
       const hh = Math.max(LN.head, 4 + fx.n * LN.band);
       this.lnRows.push({ kind: "head", deck: d, y, h: hh, fx });
       y += hh + LN.gap;
@@ -688,19 +703,19 @@ export class Live5View {
     this._kick(true);
   }
 
+  // 跟着翻页：曲线那一页是不动的，游标从左往右走；走到最后四分之一页时翻到下一页（一页一页地翻，不是一直往左滑），
+  // 新的一页从游标这里开始。「整个场景」而且一屏放得下：这一页就是这个场景，换场景才翻
   _followTo(beat) {
     const [lo, hi, span] = this._viewRange();
-    let b0;
     const s = this.zoom === "scene" ? sceneAt(this.chart, beat) : null;
-    if (s && (s.end - s.start) * this.ppb <= this.W + 1) b0 = s.start; // 整个场景放得下：场景不动，游标走
-    else b0 = beat - span * PLAYHEAD_AT;
-    this.b0 = Math.max(lo, Math.min(hi, b0));
+    if (s && (s.end - s.start) * this.ppb <= this.W + 1) { this.b0 = Math.max(lo, Math.min(hi, s.start)); return; }
+    this.b0 = Math.max(lo, Math.min(hi, pageStart(beat, span, s ? s.start : 0)));
   }
 
   _syncTools() {
     for (const z of ZOOMS) this.zoomBtns[z].classList.toggle("on", z === this.zoom);
     this.followBtn.classList.toggle("on", this.follow);
-    this.followBtn.textContent = this.follow ? "✓ 跟随播放" : "跟随播放";
+    this.followBtn.textContent = this.follow ? "✓ 跟着翻页" : "跟着翻页";
   }
 
   // ---------------------------------------------------------------- 每帧
@@ -959,7 +974,6 @@ export class Live5View {
   }
 
   _drawTracks(beat) {
-    let where = "";
     for (const d of this.decks) {
       const r = this.ov[d];
       if (!r) continue;
@@ -973,7 +987,6 @@ export class Live5View {
       if (!clip || !dur) {
         setText(r.name, clip ? `${clip.id} ${clip.title}` : "");
         setText(r.bar, clip ? "" : "后面没有片段了");
-        setText(r.pick, "");
         setText(r.kind, ""); setClass(r.kind, "l5-kind hidden");
         r.root.classList.remove("main", "tool");
         if (r.need._sig !== "") { r.need._sig = ""; r.need.innerHTML = ""; }
@@ -1011,15 +1024,13 @@ export class Live5View {
         const whole = pick.b - pick.a >= 64 && Math.abs((pick.b - pick.a) / 64 - Math.round((pick.b - pick.a) / 64)) < 1e-6;
         const t = `选用 第 ${span(pick.a, pick.b)} 小节` + (whole ? ` · ${Math.round((pick.b - pick.a) / 64)} 个乐句` : pick.a >= BEATS ? ` · ${durText(pick.b - pick.a)}` : "");
         const tw = g.measureText(t).width;
-        if (xb - xa >= tw + 140) {
-          const lx = xa + (xb - xa - tw) / 2;
-          g.fillStyle = col;
-          g.fillRect(lx - 5, 19, tw + 10, 16);
-          g.fillStyle = "#0b0d11";
-          g.fillText(t, lx, 31);
-        }
+        // 写在框的中间；框太窄就写在框的右边（右边放不下写左边）
+        const lx = xb - xa >= tw + 140 ? xa + (xb - xa - tw) / 2 : xb + tw + 16 <= w ? xb + 10 : Math.max(4, xa - tw - 10);
+        g.fillStyle = col;
+        g.fillRect(lx - 5, 19, tw + 10, 16);
+        g.fillStyle = "#0b0d11";
+        g.fillText(t, lx, 31);
       }
-      setText(r.pick, pick ? `选用 ${span(pick.a, pick.b)}` : "");
       // 起播 / 停 / loop / 跳段（标签写原曲的小节号）
       g.font = "bold 11px sans-serif";
       const mark = (src, label, color, top, right) => {
@@ -1052,9 +1063,8 @@ export class Live5View {
         g.fillRect(0, 0, xp, H);
         g.fillStyle = "#fff";
         g.fillRect(Math.round(xp) - 1, 0, 2, H);
-        setText(r.bar, `第 ${Math.max(1, barNo(src))} / ${total} 小节`);
-        if (!where) where = `D${d} ${clip.id} 还剩 ${Math.max(0, Math.ceil((clip.stop - beat) / BEATS))} 小节`;
-      } else setText(r.bar, `${Math.max(0, Math.ceil((clip.start - beat) / BEATS))} 小节后进 / 共 ${total}`);
+      }
+      setText(r.bar, `整首 ${total} 小节`); // 现在读到第几小节、还有几小节进：看下面的滚动波形，这里不重复
       r.root.classList.toggle("next", !live);
       r.root.classList.toggle("main", !!clip.main);
       r.root.classList.toggle("tool", !clip.main);
@@ -1081,8 +1091,6 @@ export class Live5View {
         }
       }
     }
-    const sc = sceneAt(this.chart, beat);
-    setText(this.ovWhere, sc ? `场景 ${sc.no} 第 ${Math.floor((beat - sc.start) / BEATS) + 1} / ${Math.round((sc.end - sc.start) / BEATS)} 小节` : "");
   }
 
   // 游标：放过去的一侧压暗，白线 + 上面的小三角；悬停的细线
@@ -1108,33 +1116,6 @@ export class Live5View {
     g.clearRect(0, 0, W, H);
     g.textBaseline = "alphabetic";
     for (const r of this.lnRows) {
-      if (r.kind === "scene") {
-        g.fillStyle = BG;
-        g.fillRect(0, r.y, W, r.h);
-        g.font = "bold 11px sans-serif";
-        for (const sc of ch.scenes || []) {
-          const x0 = X(sc.start), x1 = X(sc.end);
-          if (x1 < 0 || x0 > W) continue;
-          g.fillStyle = sc.no % 2 ? "rgba(255,255,255,.07)" : "rgba(255,255,255,.035)";
-          g.fillRect(x0, r.y, x1 - x0 - 1, r.h);
-          const tx = Math.max(x0, 0) + 5;
-          g.fillStyle = "#c8cdd8";
-          g.fillText(fitText(g, `${sc.no} ${sc.name || ""}${sc.draft ? "（草稿）" : ""}`, x1 - tx - 6), tx, r.y + 14);
-        }
-        // 速度：变速的那一段底下画一道，写上从多少到多少
-        g.font = "10px ui-monospace, Menlo, monospace";
-        const t = ch.tempo || [];
-        for (let i = 0; i + 1 < t.length; i++) {
-          if (t[i + 1].bpm === t[i].bpm) continue;
-          const x0 = X(t[i].at), x1 = X(t[i + 1].at);
-          if (x1 < 0 || x0 > W) continue;
-          g.fillStyle = "rgba(242,184,75,.9)";
-          g.fillRect(x0, r.y + r.h - 2, Math.max(2, x1 - x0), 2);
-          const text = `${fmtBpm(t[i].bpm)}→${fmtBpm(t[i + 1].bpm)}`;
-          g.fillText(text, Math.min(W - g.measureText(text).width - 3, Math.max(x0, 0) + 3 + (x0 < 0 ? 0 : 90)), r.y + r.h - 5);
-        }
-        continue;
-      }
       if (r.kind === "ruler") {
         g.fillStyle = BG;
         g.fillRect(0, r.y, W, r.h);
@@ -1148,6 +1129,21 @@ export class Live5View {
           g.strokeStyle = major ? "rgba(255,255,255,.45)" : "rgba(255,255,255,.16)";
           g.beginPath(); g.moveTo(x, r.y + (major ? 0 : r.h - 5)); g.lineTo(x, r.y + r.h); g.stroke();
           if (major) { g.fillStyle = bar % (step * 4) === 0 ? "#e8ecf3" : "#8a92a3"; g.fillText(String(bar + 1), x + 3, r.y + 12); }
+        }
+        // 变速的那一段：标尺底下一道黄线，写上从多少到多少
+        const t = ch.tempo || [];
+        for (let i = 0; i + 1 < t.length; i++) {
+          if (t[i + 1].bpm === t[i].bpm) continue;
+          const x0 = X(t[i].at), x1 = X(t[i + 1].at);
+          if (x1 < 0 || x0 > W) continue;
+          g.fillStyle = "rgba(240,192,80,.9)";
+          g.fillRect(x0, r.y + r.h - 6, Math.max(2, x1 - x0), 2);
+          const text = `${fmtBpm(t[i].bpm)}→${fmtBpm(t[i + 1].bpm)} BPM`, tw = g.measureText(text).width;
+          const tx = Math.min(W - tw - 4, Math.max(x0, 0) + 24); // 让开这一小节的小节号；后面的小节号被它盖住（字有底）
+          g.fillStyle = BG;
+          g.fillRect(tx - 4, r.y + 1, tw + 8, 14);
+          g.fillStyle = "rgba(240,192,80,.95)";
+          g.fillText(text, tx, r.y + 12);
         }
         continue;
       }
@@ -1196,7 +1192,7 @@ export class Live5View {
         g.globalAlpha = 1; g.lineWidth = 1;
       }
     }
-    const top = LN.scene + LN.ruler;
+    const top = LN.ruler;
     this._barLines(g, X, b0, bB, top, H);
     // 主要的交接：标尺底下一道橙色（从下一首进来到上一首交完），换低频的那一拍一条蓝线贯穿下来
     g.font = "bold 10px sans-serif";
@@ -1226,7 +1222,7 @@ export class Live5View {
     }
     const xp = X(beat);
     this._cursor(g, xp, top, W, H, this.hover);
-    setText(this.lnWhere, `全场 ${posText(b0 < 0 ? 0 : b0)} – ${posText(Math.min(bB, ch.length || bB))}`);
+    setText(this.lnWhere, `这一页：全场 ${barOf(Math.max(0, b0))}–${barOf(Math.max(0, Math.min(bB, ch.length || bB) - 1e-6))} 小节`);
     if (this.hover && this.onSeek) { // 点一下从这一小节放
       const hb = b0 + this.hover.x / ppb;
       if (hb >= 0 && hb < (ch.length || 0) && this.hover.y < top) drawSeekHover(g, this.hover.x, top, `▶ 从全场第 ${barOf(hb)} 小节放`);
@@ -1385,10 +1381,9 @@ export class Live5View {
     g.strokeStyle = "#fff"; g.lineWidth = 2;
     g.beginPath(); g.moveTo(cx, 0); g.lineTo(cx, H); g.stroke();
     g.lineWidth = 1;
-    if (!clips.length) {
-      const nx = (this.deckClips[d] || []).find((c) => c.start >= beat);
+    if (!clips.length && !(this.deckClips[d] || []).some((c) => c.start >= beat)) {
       g.fillStyle = "#666e7d"; g.font = "12px sans-serif";
-      g.fillText(nx ? `待命 · 下一段 ${nx.id}「${nx.title}」在全场 ${posText(nx.start)}` : "这台 Deck 后面没有片段了", 10, mid + 4);
+      g.fillText("这台 Deck 后面没有片段了", 10, mid + 4);
     }
     if (o.hoverX !== null && this.onSeek) {
       const hb = arr[clamp(Math.round(o.hoverX), 0, w)];
@@ -1403,17 +1398,17 @@ export class Live5View {
       setText(o.barEl, `原曲 第 ${bi + 1} 小节`);
       o.dots.forEach((dEl, i) => dEl.classList.toggle("on", i === bt));
       setText(o.phrase, `乐句 ${(bi % 16) + 1}/16`);
-      setText(o.bpm, fmtBpm(bpmNow));
+      setText(o.bpm, fmtBpm(cur.bpm)); // 原曲的 BPM（主速在头上，四台都一样，这里不重复）
       const pc = (bpmNow / cur.bpm - 1) * 100;
-      setText(o.pitch, Math.abs(pc) < 0.005 ? " 原速" : ` ${pc > 0 ? "+" : ""}${pc.toFixed(2)}%`);
+      setText(o.pitch, ` 原曲 · ${Math.abs(pc) < 0.005 ? "原速" : `${pc > 0 ? "+" : ""}${pc.toFixed(2)}%`}`);
       const left = Math.max(0, ((cur.stop - beat) * 60) / bpmNow);
       setText(o.time, `-${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`);
     } else {
-      setText(o.barEl, nxt ? `${Math.max(0, Math.ceil((nxt.start - beat) / BEATS))} 小节后进` : "–");
+      setText(o.barEl, nxt ? `${Math.max(0, Math.ceil((nxt.start - beat) / BEATS))} 小节后进（全场 ${posText(nxt.start)}）` : "–");
       o.dots.forEach((dEl) => dEl.classList.remove("on"));
       setText(o.phrase, "");
       setText(o.bpm, nxt ? fmtBpm(nxt.bpm) : "–");
-      setText(o.pitch, nxt ? " 原曲的 BPM" : "");
+      setText(o.pitch, nxt ? " 原曲" : "");
       setText(o.time, "");
     }
   }
@@ -1428,6 +1423,8 @@ export class Live5View {
     setText(this.nowEl, posText(beat));
     if (!this._status()) setText(this.bpmEl, fmtBpm(tempoAt(this.chart, beat)));
     this._renderTime(beat);
+    const scn = this._sceneNow;
+    setText(this.sceneProg, scn ? `第 ${Math.floor((beat - scn.start) / BEATS) + 1} / ${Math.round((scn.end - scn.start) / BEATS)} 小节` : "");
   }
 
   // ---------------------------------------------------------------- 跟引擎状态走的 DOM
@@ -1472,8 +1469,7 @@ export class Live5View {
     if (d.state === "loading" || d.state === "ready") return { k: "ready", text: `准备下一段 ${d.clip_id || d.next_clip || ""}，还没出声` };
     if (tails.length) return { k: "tail", text: `≈ 只剩尾音（${tails.map((f) => f.id).join("、")}）` };
     if (d.state === "stopped") return { k: "stop", text: "■ 已停" };
-    const nx = d.next_clip ? clipById(this.chart, d.next_clip) : null;
-    return { k: "idle", text: nx ? `○ 待命，下一段 ${nx.id}（${posText(nx.start)}）` : "○ 待命" };
+    return { k: "idle", text: "○ 待命" };
   }
 
   // 谱上第 beat 拍这台 Deck 的旋钮在哪（没有片段 = null）
@@ -1526,13 +1522,17 @@ export class Live5View {
       const units = (this.chart.fx || []).filter((f) => f.route !== "send" && (f.decks || []).includes(d));
       const on = st ? units.filter((f) => (st.fx || []).some((x) => x.id === f.id && x.on !== false && !x.tail)) : [];
       const sig = on.map((f) => f.id).join(",");
-      if (c.live._sig !== sig) { c.live._sig = sig; c.live.innerHTML = ""; put(c.live, on.slice(0, 3).map((f) => el("span", { class: "l5-fxon", title: `${f.id} ${f.name}：${f.text || ""}` }, f.name))); }
+      if (c.live._sig !== sig) {
+        c.live._sig = sig; c.live.innerHTML = "";
+        c.live.title = on.map((f) => `${f.id} ${f.name}${f.text ? "：" + f.text : ""}`).join("\n");
+        put(c.live, on.slice(0, 2).map((f) => el("span", { class: "l5-fxon" }, f.name)), on.length > 2 ? el("span", { class: "l5-fxon more" }, `+${on.length - 2}`) : null);
+      }
       if (!ds || !ds.clip_id || !live) c.vu.set(-90, null);
       else c.vu.set(ds.level, null);
       const pc = st ? null : this._deckClipAt(d, rest);
       setText(c.clip, ds && ds.clip_id ? ds.clip_id : st ? "空" : pc ? pc.id : "空");
       c.root.classList.toggle("off", !st);
-      setClass(c.back, "l5-back" + (manual.length ? "" : " hidden"));
+      setClass(c.back, "l5-back" + (manual.length ? "" : " off")); // 不显示时也占着位置：出现时调音台不变高
       setText(c.manualEl, manual.length ? `手动：${manual.map((p) => LANE_ZH[p]).join("、")}` : "");
       const back = manual.map((p) => this.returning[`${d}.${p}`]).find(Boolean);
       c.beatBtn.disabled = c.barBtn.disabled = !!back;
@@ -1540,23 +1540,20 @@ export class Live5View {
       setText(c.barBtn, back === "bar" ? "回谱中…" : "下一小节回谱");
       c.manual = manual;
     }
+    this.mixHint.classList.toggle("hidden", this.decks.some((d) => this.ch[d].manual.length));
     const m = st && st.master;
     this.mvu.set(m ? m.level : -90, m ? m.peak : null);
     setText(this.masterDb, m ? (m.level <= -90 ? "–∞" : m.level.toFixed(0)) : "–");
     setClass(this.overLamp, "l5-over" + (m && m.over_now ? " on" : m && m.over > 0 ? " was" : ""));
-    setText(this.overCount, m && m.over > 0 ? `过载 ${m.over} 次` : "");
-    setClass(this.overCount, "l5-overn" + (m && m.over > 0 ? "" : " hidden"));
+    setText(this.overCount, m && m.over > 0 ? `过载 ${m.over} 次` : "过载 0 次");
+    setClass(this.overCount, "l5-overn" + (m && m.over > 0 ? "" : " off"));
     // 曲线左边的小旋钮和读数：同一个数
     for (const d of this.decks) {
       const ds = st && (st.decks || []).find((x) => x.deck_id === d);
-      const plan = st ? null : this._planAt(d, rest);
       for (const p of LANE_PARAMS) {
         const o = this.gLane && this.gLane[`${d}.${p}`];
         if (!o) continue;
         const on = !!(ds && ds.clip_id && ds.human && ds.human[p] && ds.controls);
-        if (on) o.mini.set(ds.controls[p]);
-        else if (plan) o.mini.set(nativeOf(p, plan[p].v));
-        setText(o.val, on ? ds.human[p].text : plan ? plan[p].text.split(" → ")[0] : "–");
         const man = on && this._isManual(d, p, ds);
         setClass(o.cell, `l5-g l5-g-param${on ? "" : " off"}${man ? " manual" : ""}`);
         setClass(o.man, "l5-vm" + (man ? "" : " hidden"));
@@ -1583,38 +1580,16 @@ export class Live5View {
     const roles = sceneRoles(this.chart, sceneAt(this.chart, beat), beat);
     for (const d of this.decks) {
       const c = this._deckClipAt(d, beat);
-      const role = roles[d] || "待命";
-      const o = this.dp && this.dp[d];
-      const kindZh = c ? (c.main ? "主线" : "工具") : "";
-      if (o) {
-        setText(o.role, c ? `${kindZh} · ${role}` : role);
-        setClass(o.role, "deck-role" + (c ? (c.main ? " main" : " tool") : ""));
-        o.role.style.display = role ? "" : "none";
-        o.root.classList.toggle("tool", !!c && !c.main);
-      }
       const tr = this.ov && this.ov[d];
-      if (tr) { // 整首曲子那一行：片段名和小节数在 _drawTracks 里写，这里只管角色
-        setText(tr.role, role);
-        setClass(tr.role, "l5-role" + (role === "待命" ? " dim" : ""));
+      if (tr) { // 整首曲子那一行：片段名在 _drawTracks 里写，这里管角色（跟着场景变）
+        const role = (tr.clip && beat < tr.clip.start ? tr.clip.role : roles[d]) || "";
+        setText(tr.role, role === "待命" ? "" : role);
+        setClass(tr.role, "l5-role" + (role && role !== "待命" ? "" : " hidden"));
       }
+      const o = this.dp && this.dp[d];
+      if (o) o.root.classList.toggle("tool", !!c && !c.main);
       const gh = this.gHead && this.gHead[d];
-      if (gh) setText(gh.who, `${kindZh ? kindZh + " · " : ""}${role}${c ? " · " + c.id + " " + c.title : ""}`);
-      const mc = this.ch && this.ch[d];
-      if (mc) { setText(mc.kind, kindZh); setClass(mc.kind, `l5-kind ${c ? (c.main ? "main" : "tool") : "hidden"}`); }
-    }
-    // 头上的摘要：主线是谁、工具有哪些、谁在待命
-    const groups = { main: [], tool: [], idle: [] };
-    for (const d of this.decks) {
-      const c = this._deckClipAt(d, beat);
-      groups[c ? (c.main ? "main" : "tool") : "idle"].push([d, c ? roles[d] || "" : "待命", c]);
-    }
-    const sig = JSON.stringify([groups.main, groups.tool, groups.idle].map((gp) => gp.map(([d, r, c]) => [d, r, c && c.id])));
-    if (sig !== this._rolesSig) {
-      this._rolesSig = sig;
-      this.rolesEl.innerHTML = "";
-      const part = (label, cls, list) => (list.length ? [el("span", { class: `l5-kind ${cls}` }, label),
-        list.map(([d, r, c]) => el("span", { class: "l5-rolechip" + (cls === "idle" ? " dim" : "") }, chip(d), el("b", {}, r), c ? el("span", { class: "dim" }, `${c.id} ${c.title}`) : null))] : []);
-      put(this.rolesEl, part("主线", "main", groups.main), part("工具", "tool", groups.tool), part("待命", "idle", groups.idle));
+      if (gh) setText(gh.who, c ? `${c.id} ${c.title}` : "这一拍没有片段");
     }
     const gm = this.gHead && this.gHead[0];
     if (gm) setText(gm.who, "直接进主输出的（采样、总输出上的效果）");
@@ -1622,13 +1597,13 @@ export class Live5View {
 
   _renderScene(sc, beat) {
     setText(this.sceneEl, sc ? `${sc.no}${sc.name ? " " + sc.name : ""}` : "–");
+    this._sceneNow = sc || null;
     this.draftEl.classList.toggle("hidden", !(sc && sc.draft));
-    this._rolesSig = ""; // 角色摘要在 _renderDeckInfo 里写（它跟着片段走）
     // 策略
     const S = this.stratEl;
     S.innerHTML = "";
     if (!sc) { put(S, el("div", { class: "l5-h" }, "策略"), el("div", { class: "dim" }, "这一段不在任何场景里。")); return; }
-    put(S, el("div", { class: "l5-h" }, "策略", el("span", {}, `场景 ${sc.no}${sc.name ? " " + sc.name : ""}`), sc.draft ? el("span", { class: "badge warn" }, "草稿") : null,
+    put(S, el("div", { class: "l5-h" }, `场景 ${sc.no} 的策略`, sc.draft ? el("span", { class: "badge warn" }, "草稿") : null,
       el("span", { class: "dim" }, `${posText(sc.start)} – ${posText(sc.end)} · 谱第 ${sc.line} 行`)));
     const dl = el("dl", {});
     for (const k of STRATEGY) {
@@ -1652,7 +1627,6 @@ export class Live5View {
     if (!this.chart || !this.eqEl) return;
     const isEq = (p) => p === "hi" || p === "mid" || p === "lo";
     const now = [], other = [], held = [];
-    let next = null;
     for (const d of this.decks) {
       const cur = this._deckClipAt(d, beat);
       for (const k of this.deckClips[d] || []) {
@@ -1662,9 +1636,7 @@ export class Live5View {
           for (let i = 0; i + 1 < pts.length; i++) {
             const a = pts[i], b = pts[i + 1];
             if (Math.abs(b.v - a.v) < 1e-6) continue;
-            const at = b.step ? b.at : a.at; // 一下到位的在那一拍；渐变的从上一个点开始拧
             if (k === cur && !b.step && a.at <= beat && beat < b.at) (isEq(p) ? now : other).push({ d, p, a, b });
-            else if (at > beat && isEq(p) && (!next || at < next.at)) next = { d, p, a, b, at, step: !!b.step };
           }
         }
       }
@@ -1676,7 +1648,7 @@ export class Live5View {
     const roles = sceneRoles(this.chart, sceneAt(this.chart, beat), beat);
     const who = (d) => el("b", { style: `color:${DECK_HEX[d]}` }, `D${d}${roles[d] && roles[d] !== "待命" ? " " + roles[d] : ""}`);
     const what = (p) => el("b", { style: isEq(p) ? `color:${BAND_HEX[p]}` : "" }, LANE_ZH[p]);
-    const bars = (n) => (n / BEATS).toFixed(1);
+    const bars = (n) => (n / BEATS >= 4 ? String(Math.ceil(n / BEATS - 1e-6)) : (n / BEATS).toFixed(1)); // 还远的时候按整小节报，快到了才报小数
     const out = [el("div", { class: "tl-sec big" }, "现在的 EQ 操作")];
     for (const m of now) {
       const f = (beat - m.a.at) / (m.b.at - m.a.at), v = m.a.v + (m.b.v - m.a.v) * f;
@@ -1689,11 +1661,6 @@ export class Live5View {
     const still = held.filter((h) => !now.some((m) => m.d === h.d && m.p === h.p));
     if (still.length) out.push(el("div", { class: "eq-held" }, "保持：", still.map((h, i) => [i ? "、" : "", who(h.d), " ", what(h.p), ` ${this._say(h.p, h.v)}`])));
     if (!now.length) out.push(el("div", { class: "eq-op idle" }, "EQ 现在没有在动"));
-    if (next) {
-      out.push(el("div", { class: "eq-next" }, `下一个 EQ 动作：全场 ${posText(next.at)} `, who(next.d), " ", what(next.p),
-        ` ${this._say(next.p, next.a.v)} → ${this._say(next.p, next.b.v)}`, next.step ? "（一下到位）" : `，用 ${durText(next.b.at - next.a.at)}`,
-        `（还有 ${bars(next.at - beat)} 小节）`));
-    } else out.push(el("div", { class: "eq-next" }, "后面没有 EQ 动作了"));
     if (other.length) {
       out.push(el("div", { class: "eq-other" }, "同时：", other.map((m, i) => [i ? "；" : "", who(m.d), " ", what(m.p),
         ` ${this._say(m.p, m.a.v)} → ${this._say(m.p, m.b.v)}，还剩 ${bars(m.b.at - beat)} 小节`])));
@@ -1750,9 +1717,6 @@ export class Live5View {
     });
     const rows = [...rowsOf(pastShown, "past"), ...rowsOf(now, "now"), { divider: true }, ...rowsOf(next, "next"), ...rowsOf(later, "later")];
     const sig = rows.map((r) => (r.divider ? "|" : `${r.a.n}${r.kind}${r.s.k}${r.s.sub || ""}${r.when}`)).join(",") + (this.showPast ? "P" : "") + past.length;
-    // 头上那一行「下一步」
-    const nx = next[0] || later[0];
-    setText(this.nextEl, nx ? `${nx.pos}  ${nx.text}（${rowsOf([nx], "next")[0].when}）` : st ? "后面没有动作了" : "–");
     if (sig === this._actSig) return;
     this._actSig = sig;
     setText(this.pastBtn, this.showPast ? "只看最近的" : `回看更早的（${past.length}）`);
