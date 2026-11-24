@@ -379,7 +379,7 @@ canvas.ho-wave.l5-twave { height: 62px; }
 /* 曲线：左边行头（DOM），右边 canvas */
 .l5-tools { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .l5-grid { display: grid; grid-template-columns: var(--l5-gutter) minmax(0, 1fr); }
-.l5-lgrid { grid-template-columns: 150px minmax(0, 1fr); }
+.l5-lgrid { grid-template-columns: 128px minmax(0, 1fr); }
 .l5-gutter { position: relative; }
 .l5-g { position: absolute; left: 0; right: 0; padding: 0 6px 0 2px; overflow: hidden; font-size: 12px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .l5-g-deck { flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; }
@@ -428,19 +428,29 @@ canvas.live-wave.l5-wave { height: 68px; }
 .l5-dstate.st-error { color: var(--err); font-weight: 700; }
 .l5-deck .dots i.on:first-child { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 
-/* 最下面一排：调音台｜现在的 EQ 操作｜接下来｜策略。四块一样高、定高——里面的字多了自己滚，不把整页顶高（画面不跳） */
-.l5-bottom4 { display: grid; grid-template-columns: max-content minmax(220px, .9fr) minmax(320px, 1.5fr) minmax(240px, 1fr); gap: 10px; align-items: stretch; }
-.l5-bottom4 > * { height: 428px; box-sizing: border-box; min-width: 0; margin: 0; }
-.l5-bottom4 > .l5-eqops, .l5-bottom4 > .l5-strategy { overflow: auto; }
-.l5-bottom4 > .l5-next { display: flex; flex-direction: column; }
-.l5-bottom4 > .l5-next > .l5-h { min-height: 24px; flex-wrap: nowrap; align-items: center; white-space: nowrap; } /* 「回看更早的」出现时这一行不变高 */
-.l5-bottom4 .l5-acts { max-height: none; flex: 1 1 0; min-height: 0; }
-/* 窄一点的窗口：调音台｜EQ 操作｜接下来 一排，策略（不常变的字）单独一行、有多少字多高 */
-@media (max-width: 1280px) {
-  .l5-bottom4 { grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1.5fr); }
-  .l5-bottom4 > .l5-strategy { grid-column: 1 / -1; height: auto; }
+/* 调音台和 EQ 曲线并排：左边一列是调音台、底下是现在的 EQ 操作（补齐到和曲线一样高），右边是曲线。
+   左边一列的宽在 live5.js 里按有几台 Deck 定死——里面的字多字少，曲线不跟着变窄变宽（画面不跳） */
+.l5-mid { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.l5-mid > * { min-width: 0; margin: 0; box-sizing: border-box; }
+.l5-midleft { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.l5-midleft > * { margin: 0; box-sizing: border-box; min-width: 0; }
+.l5-midleft > .l5-mixer { height: 428px; flex: none; }
+.l5-midleft > .l5-eqops { flex: 1 1 0; min-height: 150px; overflow: auto; } /* 定高（= 曲线那么高减去调音台）：字多了自己滚 */
+.l5-mixer .l5-chs { justify-content: center; }
+/* 最下面一排：接下来｜策略。一样高、定高——里面的字多了自己滚，不把整页顶高 */
+.l5-bottom2 { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.l5-bottom2 > * { height: 300px; box-sizing: border-box; min-width: 0; margin: 0; }
+.l5-bottom2 > .l5-strategy { overflow: auto; }
+.l5-bottom2 > .l5-next { display: flex; flex-direction: column; }
+.l5-bottom2 > .l5-next > .l5-h { min-height: 24px; flex-wrap: nowrap; align-items: center; white-space: nowrap; } /* 「回看更早的」出现时这一行不变高 */
+.l5-bottom2 .l5-acts { max-height: none; flex: 1 1 0; min-height: 0; }
+/* 很窄的窗口：一块一块往下排 */
+@media (max-width: 900px) {
+  .l5-mid, .l5-bottom2 { grid-template-columns: minmax(0, 1fr); }
+  .l5-midleft { width: auto !important; }
+  .l5-midleft > .l5-eqops { flex: none; }
+  .l5-bottom2 > * { height: auto; }
 }
-@media (max-width: 760px) { .l5-bottom4 { grid-template-columns: 1fr; } .l5-bottom4 > * { height: auto; } }
 .l5-mixer { padding: 8px 8px 10px; position: relative; overflow: hidden; }
 .l5-chs { column-gap: 4px; align-items: start; }
 .l5-ch { min-width: 0; overflow: hidden; }

@@ -20,7 +20,8 @@ import {
 const DECK_HEX = { 1: "#3d8bea", 2: "#dc7526", 3: "#27ae60", 4: "#9c7cec" };
 const ZOOMS = [8, 16, 32, "scene"];
 const ZOOM_ZH = { 8: "8 小节", 16: "16 小节", 32: "32 小节", scene: "整个场景" };
-const MIN_BAR_PX = 18; // 再长的场景也不把一小节压到比这更窄：滚动，不缩
+const MIN_BAR_PX = 12; // 再长的场景也不把一小节压到比这更窄：翻页，不缩（64 小节的场景在 13 寸屏上还放得进一页）
+const CH_W = 74; // 调音台一个通道的宽（定宽：读数、效果的名字变了不撑开）
 const LEAD_IN = 8; // 开演前留两小节（装载、摆旋钮）
 const SPAN_S = 7; // 每台 Deck 的滚动波形：播放头两侧各 7 秒（音乐里的时间），四台同一比例
 const STRATEGY = ["作用", "保留", "前景", "LOW", "MID/HIGH"];
@@ -362,7 +363,8 @@ export class Live5View {
     this.decksEl = el("div", { class: "live-decks" });
     put(R, this.decksEl);
 
-    // EQ / Filter / 推子的曲线（谱）：整行宽。一页一页地看——这一页不动，游标从左走到右，走到头翻下一页
+    // 调音台和 EQ / Filter / 推子的曲线并排：旋钮在左，它们的线在右（看着线，手边就是那个旋钮）。
+    // 曲线（谱）一页一页地看——这一页不动，游标从左走到右，走到头翻下一页
     this.zoomBtns = {};
     const tools = el("span", { class: "l5-tools" }, el("span", { class: "l5-lab" }, "一页"),
       ZOOMS.map((z) => (this.zoomBtns[z] = el("button", { class: "small", onclick: () => this._setZoom(z) }, ZOOM_ZH[z]))),
@@ -373,19 +375,23 @@ export class Live5View {
     this.lcanvas = el("canvas", { class: "l5-canvas l5-lcanvas", role: "img", "aria-label": "每台 Deck 的 EQ、Filter、推子曲线（谱上写的）。拖动前后看，点一下从那一小节放" });
     this.ltip = el("div", { class: "l5-tip hidden" });
     this.lplot = el("div", { class: "l5-plot" }, this.lcanvas, this.ltip);
-    put(R, el("div", { class: "timeline-live l5-lanes" },
+    const lanes = el("div", { class: "timeline-live l5-lanes" },
       el("div", { class: "tl-head" }, el("b", {}, "EQ / Filter / 推子"), el("span", { class: "dim l5-lnhint" }, "线 = 谱 · 游标上的点 = 实际（和谱不一样时两个都画）"),
         el("span", { class: "grow" }), tools, this.lnWhere),
-      el("div", { class: "l5-grid l5-lgrid" }, this.lgutter, this.lplot)));
-
-    // 最下面一排：调音台（实际的旋钮、推子、电平，拖动 = 接管）｜现在的 EQ 操作｜接下来的动作和回执｜这个场景的策略
+      el("div", { class: "l5-grid l5-lgrid" }, this.lgutter, this.lplot));
+    // 左边一列：调音台（实际的旋钮、推子、电平，拖动 = 接管），底下是现在的 EQ 操作（补齐到和曲线一样高）。
+    // 这一列定宽（跟着有几台 Deck 走，在 _buildDecks 里定）：字多字少不把曲线挤窄
     this.mixerEl = el("div", { class: "mixer l5-mixer", title: "旋钮 / 推子 / 电平都是从引擎读回的实际值。拖旋钮 / 推子 = 手动接管（只有它不再跟谱）；双击 = 下一拍回谱" });
+    this.eqEl = el("div", { class: "tl-next l5-eqops" });
+    this.midLeft = el("div", { class: "l5-midleft" }, this.mixerEl, this.eqEl);
+    put(R, el("div", { class: "l5-mid" }, this.midLeft, lanes));
+
+    // 最下面一排：接下来的动作和回执｜这个场景的策略
     this.actsEl = el("div", { class: "l5-acts" });
     this.nowEl = el("span", { class: "l5-nowpos" });
     this.pastBtn = el("button", { class: "small", onclick: () => { this.showPast = !this.showPast; this._actSig = ""; this._renderActions(); } }, "回看更早的");
     this.stratEl = el("div", { class: "panel l5-strategy" });
-    put(R, el("div", { class: "l5-bottom4" }, this.mixerEl,
-      this.eqEl = el("div", { class: "tl-next l5-eqops" }),
+    put(R, el("div", { class: "l5-bottom2" },
       el("div", { class: "panel l5-next" }, el("div", { class: "l5-h" }, "接下来", el("span", { class: "dim" }, "做完没有按引擎的回执"), el("span", { class: "grow" }), this.pastBtn), this.actsEl),
       this.stratEl));
 
@@ -470,7 +476,9 @@ export class Live5View {
       el("div", { class: "vu-wrap" }, meterScale(), this.mvu.root), this.masterDb);
     strips.splice(Math.ceil(this.decks.length / 2), 0, master);
     this.mixHint = el("div", { class: "l5-mixhint" }, el("div", {}, "拖旋钮 / 推子 = 手动接管"), el("div", {}, "只有拖的那一个不再跟谱 · 双击 = 下一拍回谱"));
-    put(M, el("div", { class: "mixer-chs l5-chs", style: `grid-template-columns:${strips.map((s) => (s === master ? "50px" : "74px")).join(" ")}` }, strips), this.mixHint);
+    put(M, el("div", { class: "mixer-chs l5-chs", style: `grid-template-columns:${strips.map((s) => (s === master ? "50px" : `${CH_W}px`)).join(" ")}` }, strips), this.mixHint);
+    // 左边这一列的宽 = 调音台的宽（每个通道 CH_W、主输出 50、中间的缝、两边的边）；只有两台 Deck 时不窄过 300（底下的字要放得下）
+    this.midLeft.style.width = `${Math.max(300, this.decks.length * (CH_W + 4) + 50 + 18)}px`;
   }
 
   _buildChannel(d) {
@@ -1122,28 +1130,34 @@ export class Live5View {
         g.font = "10px ui-monospace, Menlo, monospace";
         const barPx = ppb * BEATS;
         const step = [1, 2, 4, 8, 16, 32].find((n) => n * barPx >= 34) || 64;
+        // 变速的那一段：标尺底下一道黄线，写上从多少到多少。字让开这一小节的小节号；被它占住的小节号不写（不叠在一起）
+        const t = ch.tempo || [], pills = [];
+        for (let i = 0; i + 1 < t.length; i++) {
+          if (t[i + 1].bpm === t[i].bpm) continue;
+          const x0 = X(t[i].at), x1 = X(t[i + 1].at);
+          if (x1 < 0 || x0 > W) continue;
+          const text = `${fmtBpm(t[i].bpm)}→${fmtBpm(t[i + 1].bpm)} BPM`, tw = g.measureText(text).width;
+          pills.push({ x0, x1, text, tw, tx: Math.min(W - tw - 4, Math.max(x0, 0) + 24) });
+        }
         for (let bar = Math.max(0, Math.floor(b0 / BEATS)); bar * BEATS <= bB; bar++) {
           const x = Math.round(X(bar * BEATS)) + 0.5;
           const major = bar % step === 0;
           if (!major && barPx < 6) continue;
           g.strokeStyle = major ? "rgba(255,255,255,.45)" : "rgba(255,255,255,.16)";
           g.beginPath(); g.moveTo(x, r.y + (major ? 0 : r.h - 5)); g.lineTo(x, r.y + r.h); g.stroke();
-          if (major) { g.fillStyle = bar % (step * 4) === 0 ? "#e8ecf3" : "#8a92a3"; g.fillText(String(bar + 1), x + 3, r.y + 12); }
+          if (!major) continue;
+          const label = String(bar + 1), lw = g.measureText(label).width;
+          if (pills.some((q) => x + 3 + lw > q.tx - 5 && x + 3 < q.tx + q.tw + 5)) continue;
+          g.fillStyle = bar % (step * 4) === 0 ? "#e8ecf3" : "#8a92a3";
+          g.fillText(label, x + 3, r.y + 12);
         }
-        // 变速的那一段：标尺底下一道黄线，写上从多少到多少
-        const t = ch.tempo || [];
-        for (let i = 0; i + 1 < t.length; i++) {
-          if (t[i + 1].bpm === t[i].bpm) continue;
-          const x0 = X(t[i].at), x1 = X(t[i + 1].at);
-          if (x1 < 0 || x0 > W) continue;
+        for (const q of pills) {
           g.fillStyle = "rgba(240,192,80,.9)";
-          g.fillRect(x0, r.y + r.h - 6, Math.max(2, x1 - x0), 2);
-          const text = `${fmtBpm(t[i].bpm)}→${fmtBpm(t[i + 1].bpm)} BPM`, tw = g.measureText(text).width;
-          const tx = Math.min(W - tw - 4, Math.max(x0, 0) + 24); // 让开这一小节的小节号；后面的小节号被它盖住（字有底）
+          g.fillRect(q.x0, r.y + r.h - 6, Math.max(2, q.x1 - q.x0), 2);
           g.fillStyle = BG;
-          g.fillRect(tx - 4, r.y + 1, tw + 8, 14);
+          g.fillRect(q.tx - 4, r.y + 1, q.tw + 8, 14);
           g.fillStyle = "rgba(240,192,80,.95)";
-          g.fillText(text, tx, r.y + 12);
+          g.fillText(q.text, q.tx, r.y + 12);
         }
         continue;
       }
