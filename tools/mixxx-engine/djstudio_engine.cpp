@@ -1473,10 +1473,22 @@ class Engine : public djs5::Backend {
         }
         TrackPointer track = deckN(1)->getLoadedTrack();
         const double sr = track->getSampleRate().toDouble();
-        ControlObject::set(ConfigKey("[Channel1]", "playposition"), startSec * sr / (co(1, "track_samples") / 2));
-        idle(100); // 定位 + 让读盘线程把开头几块读进缓存
+        // track_loaded 变成 1 的时候装载还没收尾：读盘线程在 EngineBuffer::slotTrackLoaded 里先置 track_loaded（enginebuffer.cpp:549），
+        // 后面才清掉排着队的定位（:560）、再让 CueControl 定位到曲首（notifyTrackLoaded → CueControl::trackLoaded → seekOnLoad，
+        // cuecontrol.cpp:468-593）。一看到 track_loaded 就定位，这一次定位可能被后面那两步盖掉——CI 上出过一次：
+        // 要从 10 秒起播，实际从第 0 帧放的。所以先让装载走完，定位以后再看位置对不对，不对就重新定位。
+        idle(20);
         EngineBuffer* eb = deckN(1)->getEngineDeck()->getEngineBuffer();
-        const double start = eb->getExactPlayPos().value();
+        double start = 0.0;
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            ControlObject::set(ConfigKey("[Channel1]", "playposition"), startSec * sr / (co(1, "track_samples") / 2));
+            idle(100); // 定位 + 让读盘线程把开头几块读进缓存
+            start = eb->getExactPlayPos().value();
+            if (std::abs(start - startSec * sr) < 0.05 * sr) {
+                break;
+            }
+            std::fprintf(stderr, "定位到 %.3f 秒没成（现在在第 %.0f 帧），再来一次\n", startSec, start);
+        }
         ControlObject::set(ConfigKey("[Channel1]", "play"), 1.0);
         QFile f(outPath);
         if (!f.open(QIODevice::WriteOnly)) {

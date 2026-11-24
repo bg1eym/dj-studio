@@ -30,6 +30,7 @@
 | ✅ | `beatsync_phase` 走同一个相位同步。 | `bpmcontrol.cpp` |
 | ✅ | 写 `bpm` → `rate_ratio = bpm / local_bpm`；速率滑块允许越界，不受 rateRange 限制。 | `bpmcontrol.cpp:185-197, 1105-1119`；`ratecontrol.cpp:30-60, 291` |
 | ✅ | `duration` 是曲目元数据时长（秒）；`file_bpm` 是网格 BPM；`track_loaded` 只读。 | `mixer/basetrackplayer.cpp:94-97, 466, 582-602`；`enginebuffer.cpp:180, 549, 618` |
+| ✅ | `track_loaded` 变成 1 **不等于装载走完了**：读盘线程在 `EngineBuffer::slotTrackLoaded` 里先置 `track_samples`、`track_loaded`，后面才清掉排着队的定位（`m_queuedSeek = kNoQueuedSeek`）、再通知各个控件——`CueControl::trackLoaded` 在这里按「装载后定位到哪」定位一次（`seekOnLoad`）。所以一看到 `track_loaded` 就定位，可能被这两步盖掉（0.4.6 的 CI 上出过：引擎自检要从 10 秒起播，实际从第 0 帧放）。定位以后要核对位置，或者等到下一块音频以后再定位（v5 的调度器是在起播前按位置反复校的，不受影响）。 | `engine/enginebuffer.cpp:535-565, 644-681`；`engine/controls/cuecontrol.cpp:466-593` |
 
 ## 控件名与取值
 
