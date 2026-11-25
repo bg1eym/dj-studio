@@ -30,9 +30,14 @@ const TRACK_TOP = 16; // 整首波形上面留给字的一条（起播 / 停 / �
 const TRACK_STRIP = 13; // 波形底边下面的一条（和 Prime 4 的概览一样）：hot cue 的小旗、最底下是播放进度的白线
 const ARR = { left: 30, scene: 20, ho: 17, row: 13, gap: 2 }; // 整套 set 的安排：场景一行 + 主要的交接一行 + 每台 Deck 一行
 const HO_HEX = "#f2b84b"; // 主要的交接（主线上一首接一首）
-const LN = { ruler: 22, head: 20, row: 22, gap: 2, group: 7, band: 15 }; // 曲线每一行的高
+const LN = { ruler: 22, head: 20, row: 24, gap: 2, group: 7, band: 17 }; // 曲线每一行的高
 const GRID_FADER = "#d3d8e2"; // 格子图上推子的线：浅灰的虚线（不用 Deck 的颜色——D1 的蓝和 LOW 的蓝分不开）
-const GR = { src: 11, row: 13, max: 30 }; // 元素格子图：最上面一条写原曲的小节号，下面一行一个声部（13–30 像素高：这一页上台数少就高一点）
+const GR = { src: 11, row: 13, max: 30, key: 15, filter: 22 }; // 元素格子图：最上面一条写原曲的小节号，下面一行一个声部（13–30 像素高：这一页上台数少就高一点）；key = 左边图例一行的高；filter = 底下 Filter 那一行的高
+const LINE = { w: 3, edge: 6.5, thin: 2.6, dash: [9, 5] }; // 旋钮线的粗细：叠在格子上的（w，下面垫一道深色的边 edge）、一行一条的（thin）；推子是虚线
+const KEY_PARAMS = ["hi", "mid", "lo", "vol"]; // 叠在格子上的四条线（左边图例从上到下的顺序）
+// 效果的带子按怎么接进去分三种颜色（左边组头里有图例）：发送（Echo / Delay / Reverb）、处理（插在通道 / 组 / 总输出上的）、采样
+const FXC = { send: { rgb: "240,192,80", ink: "#f6dfa2", zh: "发送" }, proc: { rgb: "238,134,198", ink: "#f8cfe8", zh: "处理" }, sample: { rgb: "79,209,197", ink: "#c2f1ec", zh: "采样" } };
+export const fxCat = (f) => (f.kind === "sample" ? "sample" : f.route === "send" ? "send" : "proc");
 const PAGE_AHEAD = 0.25; // 一页的最后四分之一是「下一页的开头」：游标走到那里就翻页，所以后面至少四分之一页要做的事一直看得到
 const LANE_PARAMS = ["hi", "mid", "lo", "filter", "vol"]; // 和调音台上从上到下一样
 const LANE_ZH = { hi: "HIGH", mid: "MID", lo: "LOW", filter: "FILTER", vol: "推子" };
@@ -220,6 +225,15 @@ export function overlayFrac(param, v) {
   return h <= 0 ? GRID_NOON * (1 + h / 5) : GRID_NOON + (1 - GRID_NOON) * (h / 5);
 }
 
+// 格子图里一条线画在多高：r = 那一行（y、h），f = overlayFrac 的 0..1。四条线上下各错开一点（HIGH 最上、推子最下，
+// 和左边图例的顺序一样），上下各留出错开的余量；param = null 取不错开的位置（右边的刻度用）
+const GRID_SHIFT = { hi: -1.5, mid: -0.5, lo: 0.5, vol: 1.5 };
+export function gridY(r, param, f) {
+  const step = LINE.w + 0.5, pad = 1.5 * step + LINE.w / 2;
+  const top = r.y + GR.src + pad, h = r.h - GR.src - 2 - 2 * pad;
+  return top + (1 - f) * h + (param ? GRID_SHIFT[param] * step : 0);
+}
+
 // 原曲第 bar 小节（从 0 数）这个声部有多满（没有 = 0）。spans = [[从, 到（不含）, 0–1], …]
 export function elemLevel(spans, bar) {
   for (const [a, b, lv] of spans || []) if (bar >= a && bar < b) return lv;
@@ -234,13 +248,25 @@ export function filterPass(f) {
   return f > 0 ? [first, second, 1] : [1, second, first];
 }
 
-// 过完旋钮还剩多少（0..1）= 有多满 ×（三个频段的份额 × 那个频段放过去多少，加起来）× 推子。
-// w = [LOW, MID, HIGH] 的份额；g = { lo, mid, hi：dB；filter：-1..1；vol：推子位置 0..1 }
-export function audible(level, w, g) {
+// 旋钮放过去多少（0..1，不管这个声部本来有多满）= 三个频段的份额 × 那个频段过 EQ、Filter 以后剩多少，加起来，再乘推子。
+// w = [LOW, MID, HIGH] 的份额；g = { lo, mid, hi：dB；filter：-1..1；vol：推子位置 0..1 }。
+// 推子按位置算（推到一半 = 一半），不按它的增益曲线（一半 ≈ −12 dB，照增益画的话推到一半就快灭了，和听到的不像）
+export function passThrough(w, g) {
   const pass = (db) => (db <= EQ_CUT ? 0 : Math.min(1, Math.pow(10, db / 20))); // 12 点以上 = 全放过去
   const fp = filterPass(g.filter || 0);
   const through = w[0] * pass(g.lo) * fp[0] + w[1] * pass(g.mid) * fp[1] + w[2] * pass(g.hi) * fp[2];
-  return clamp(level * through * nativeOf("vol", g.vol), 0, 1);
+  return clamp(through * clamp(g.vol, 0, 1), 0, 1);
+}
+
+// 一个格子画成什么样：高 = 这个声部在原曲里有多满（满 / 中 / 弱）；亮 = 旋钮放过去多少——EQ、Filter、推子把它切掉了就灭
+// （只剩一圈暗边：原曲里有，现在听不到），放回来就亮。两样分开画，「原曲里弱」和「被切掉」不会看混。
+// 亮度像一盏带调光的灯，不是照比例：剩不到两成算灭（kick 切掉 LOW 只剩一点「嗒」，算没有了），剩八成以上就全亮，中间渐变。
+// 返回 { h：占这一行的多少（0..1）, a：填色的不透明度, lit：亮着没有 }
+export const LAMP = { off: 0.2, full: 0.8 };
+export function cellLook(level, through) {
+  const x = clamp((clamp(through, 0, 1) - LAMP.off) / (LAMP.full - LAMP.off), 0, 1), s = x * x * (3 - 2 * x);
+  const lit = s > 0.01;
+  return { h: 0.2 + 0.8 * clamp(level, 0, 1), a: lit ? 0.16 + 0.79 * s : 0.05, lit };
 }
 
 // 曲线一页一页地看：第 beat 拍落在哪一页（返回这一页左边是第几拍）。一页 span 拍，游标只在前 (1 - PAGE_AHEAD) 里走，
@@ -407,8 +433,9 @@ export class Live5View {
     this.lplot = el("div", { class: "l5-plot" }, this.lcanvas, this.ltip);
     const lanes = el("div", { class: "timeline-live l5-lanes" },
       el("div", { class: "tl-head" }, el("b", {}, "EQ / Filter / 推子"),
-        this.lnLegend = el("span", { class: "l5-lnlegend hidden" }, [["lo", "LOW"], ["mid", "MID"], ["hi", "HIGH"]].map(([b, n]) => el("span", {}, el("i", { style: `background:${BAND_HEX[b]}` }), n)),
-          el("span", {}, el("i", { class: "dash" }), "推子")),
+        this.lnLegend = el("span", { class: "l5-lnlegend hidden" },
+          el("span", {}, el("i", { class: "cell on" }), "亮 = 听得到"), el("span", {}, el("i", { class: "cell cut" }), "灭 = 被切掉"),
+          el("span", {}, el("i", { class: "cell low" }), "矮 = 原曲里弱")),
         this.lnHint = el("span", { class: "dim l5-lnhint" }, ""),
         el("span", { class: "grow" }), tools, this.lnWhere),
       el("div", { class: "l5-grid l5-lgrid" }, this.lgutter, this.lplot));
@@ -548,27 +575,73 @@ export class Live5View {
     L.innerHTML = "";
     this.gLane = {};
     this.gHead = {};
+    this.gKey = {};  // 图例上的读数：「deck.参数」→ 那个 span
+    this.gLamp = {}; // 声部名旁边的小灯：deck → 每个声部一个
+    const grid = this.elemRows.length > 0;
+    // 图例的一条：一小段线（颜色、粗细、虚实和画在图上的一样）+ 名字 + 游标这一拍的读数
+    const key = (d, p) => {
+      const dash = grid && p === "vol", col = dash ? GRID_FADER : laneColor(p, d);
+      const val = (this.gKey[`${d}.${p}`] = el("span", { class: "l5-kv" }, "–"));
+      return el("span", { class: "l5-key" }, el("i", { class: "l5-kline" + (dash ? " dash" : ""), style: `color:${col}` }), el("span", { class: "l5-kn", style: `color:${col}` }, LANE_ZH[p]), val);
+    };
     for (const r of this.lnRows) {
       const cell = el("div", { class: `l5-g l5-g-${r.kind}`, style: `top:${r.y}px;height:${r.h}px` });
       if (r.kind === "ruler") put(cell, el("span", { class: "dim" }, "全场小节"));
-      else if (r.kind === "grid") { // 格子图：最上面一条是原曲的小节号，下面一行一个声部
-        cell.classList.add("l5-g-grid");
-        put(cell, el("span", { class: "l5-gsrc", style: `top:0;height:${GR.src}px` }, "原曲小节"),
-          this.elemRows.map((e, i) => el("span", { class: "l5-gel", style: `top:${GR.src + i * r.rh}px;height:${r.rh}px` }, e.name)));
+      else if (r.kind === "grid") { // 格子图：左边一列是四条线的图例，右边一列是声部名（最上面一条 = 原曲的小节号），名字后面一盏小灯
+        const lamps = (this.gLamp[r.deck] = []);
+        put(cell, el("div", { class: "l5-gkeys", style: `top:${GR.src}px;height:${r.h - GR.src - 2}px` }, KEY_PARAMS.map((p) => key(r.deck, p))),
+          el("span", { class: "l5-gsrc", style: `top:0;height:${GR.src}px` }, "原曲小节"),
+          this.elemRows.map((e, i) => {
+            const lamp = el("i", { class: "l5-lamp" });
+            lamps.push(lamp);
+            return el("span", { class: "l5-gel", style: `top:${GR.src + i * r.rh}px;height:${r.rh}px` }, e.name, lamp);
+          }));
       }
-      else if (r.kind === "head") {
+      else if (r.kind === "head") { // 组头：这一行画的是效果的带子——用到哪几种，后面各给一个色块
         const o = { who: el("span", { class: "l5-lwho" }) };
-        put(cell, el("b", { style: r.deck ? `color:${DECK_HEX[r.deck]}` : "" }, r.deck ? `CH ${r.deck}` : "MASTER"), o.who);
+        const cats = new Set(r.fx.items.map((i) => fxCat(i.f)));
+        put(cell, el("b", { style: r.deck ? `color:${DECK_HEX[r.deck]}` : "" }, r.deck ? `CH ${r.deck}` : "MASTER"), o.who,
+          el("span", { class: "l5-fxkeys" }, Object.keys(FXC).filter((k) => cats.has(k)).map((k) =>
+            el("span", { class: "l5-fxkey", style: `color:${FXC[k].ink}`, title: `${FXC[k].zh}效果的带子（淡的那一截 = 关掉以后的尾音）` }, el("i", { style: `background:rgb(${FXC[k].rgb})` }), FXC[k].zh))));
         this.gHead[r.deck] = o;
       } else {
-        const col = laneColor(r.param, r.deck);
         const o = { man: el("span", { class: "l5-vm hidden", title: "手动接管中" }, "手"), cell };
-        put(cell, el("span", { class: "tl-pn", style: `color:${col}` }, LANE_ZH[r.param]), o.man);
+        put(cell, key(r.deck, r.param), o.man);
         this.gLane[`${r.deck}.${r.param}`] = o;
       }
       put(L, cell);
     }
     L.style.height = `${this.lnH}px`;
+    this._eqAt = 0; // 读数、小灯下一帧就写
+  }
+
+  // 左边图例上的读数（游标这一拍每条线在哪）和声部名旁边的小灯（这个声部现在过完旋钮还剩多少：亮 = 听得到，
+  // 灭 = 被 EQ / Filter / 推子切掉了，空心 = 原曲这一小节没有它）。引擎在放、报了实际的旋钮（手动接管时和谱不一样）就按实际的
+  _renderKeys(beat) {
+    if (!this.chart || !this.gKey) return;
+    for (const d of this.decks) {
+      const c = this._deckClipAt(d, beat), ds = this._deckSt(d);
+      const act = c && ds && ds.clip_id === c.id && ds.human ? ds.human : null;
+      const g = {};
+      for (const p of LANE_PARAMS) {
+        const pv = c && laneAt(c, p, beat);
+        g[p] = act && act[p] ? act[p].v : pv ? pv.v : null;
+        const o = this.gKey[`${d}.${p}`];
+        if (o) setText(o, g[p] === null ? "–" : this._say(p, g[p]).replace("7点(切)", "切"));
+      }
+      const lamps = this.gLamp[d];
+      if (!lamps) continue;
+      const els = c ? (this.assets[c.asset] || {}).elements || {} : {};
+      const sb = c ? Math.floor(srcAt(c, beat) / BEATS + 1e-6) : -1;
+      const gains = { lo: g.lo || 0, mid: g.mid || 0, hi: g.hi || 0, filter: g.filter || 0, vol: g.vol === null || g.vol === undefined ? 1 : g.vol };
+      this.elemRows.forEach((e, i) => {
+        const lv = sb >= 0 ? elemLevel(els[e.id], sb) : 0;
+        const look = lv ? cellLook(lv, passThrough(e.w, gains)) : null;
+        setClass(lamps[i], "l5-lamp" + (look ? (look.lit ? " on" : " cut") : ""));
+        const a = look && look.lit ? look.a.toFixed(2) : "";
+        if (lamps[i]._a !== a) { lamps[i]._a = a; lamps[i].style.opacity = a; }
+      });
+    }
   }
 
   // ---------------------------------------------------------------- 数据
@@ -699,12 +772,13 @@ export class Live5View {
     };
     // 格子图：这一页上没有片段的 Deck 只留组头那一行，省下来的高分给有片段的 Deck（格子变高，线看得更清楚）。
     // 整块的高不变（按「每台都展开、格子最矮」算好的），所以翻页时下面的东西不动
-    const nEl = this.elemRows.length, FILTER_H = 16;
+    const nEl = this.elemRows.length, FILTER_H = GR.filter;
     const on = this._decksOnPage();
     this._pageKey = [...on].join(",");
-    const body = GR.src + nEl * GR.row + 2 + LN.gap + FILTER_H + LN.gap; // 一台 Deck 展开时组头下面占多高（格子最矮时）
+    const rowMin = nEl ? Math.max(GR.row, Math.ceil((KEY_PARAMS.length * GR.key) / nEl)) : GR.row; // 声部少的谱：格子高一点，左边图例的四行要放得下
+    const body = GR.src + nEl * rowMin + 2 + LN.gap + FILTER_H + LN.gap; // 一台 Deck 展开时组头下面占多高（格子最矮时）
     const nOff = this.decks.filter((d) => !on.has(d)).length;
-    const rh = nEl && on.size ? Math.min(GR.max, GR.row + Math.floor((nOff * body) / (on.size * nEl))) : GR.row;
+    const rh = nEl && on.size ? Math.min(Math.max(GR.max, rowMin), rowMin + Math.floor((nOff * body) / (on.size * nEl))) : rowMin;
     let y = LN.ruler + LN.gap, full = y;
     this.lnRows = [{ kind: "ruler", y: 0, h: LN.ruler }];
     for (const d of [...this.decks, 0]) {
@@ -730,10 +804,10 @@ export class Live5View {
     this.slots = [];
     for (const r of this.lnRows) {
       if (r.kind === "param") this.slots.push({ deck: r.deck, param: r.param, Y: (f) => r.y + 3 + (1 - f) * (r.h - 6), frac: laneFrac });
-      else if (r.kind === "grid") for (const p of ["hi", "mid", "lo", "vol"]) this.slots.push({ deck: r.deck, param: p, Y: (f) => r.y + GR.src + (1 - f) * (r.h - GR.src - 2), frac: overlayFrac, color: p === "vol" ? GRID_FADER : null });
+      else if (r.kind === "grid") for (const p of KEY_PARAMS) this.slots.push({ deck: r.deck, param: p, Y: (f) => gridY(r, p, f), frac: overlayFrac, color: p === "vol" ? GRID_FADER : null });
     }
-    setText(this.lnHint, this.elemRows.length ? "格子越亮 = 这个声部过完旋钮剩得越多 · 线 = 旋钮（7 点在下，12 点在上）" : "线 = 谱 · 游标上的点 = 实际（和谱不一样时两个都画）");
-    this.lnHint.title = this.elemRows.length ? "一行一个声部、一格一小节（谱上的元素表）。格子越亮 = 这个声部过完旋钮以后剩得越多；格子上面的小字是原曲的小节号；竖的点线 = 打 loop / 跳段的地方。线 = 旋钮：7 点在最下面，12 点和推子 10 在同一条线上。游标上的点 = 实际（和谱不一样时两个都画）" : "";
+    setText(this.lnHint, this.elemRows.length ? "" : "线 = 谱 · 游标上的点 = 实际（和谱不一样时两个都画）"); // 格子图：标题栏只留格子的图例（线的图例在左边一列；全的说明鼠标放到图例上看）
+    this.lnLegend.title = this.lnHint.title = this.elemRows.length ? "一行一个声部、一格一小节（谱上的元素表）。格子的高 = 这个声部在原曲里有多满；亮 = 过完 EQ / Filter / 推子还听得到多少——被切掉的灭成一圈暗边，放回来就亮。格子上面的小字是原曲的小节号；竖的点线 = 打 loop / 跳段的地方。线 = 旋钮：7 点在最下面，12 点和推子 10 在同一个高度（四条线上下错开一点，叠在一起时也分得出来）；哪条线是什么颜色看左边那一列，后面的字是游标这一拍的位置。声部名后面的小灯 = 现在这一拍。游标上的点 = 实际（和谱不一样时两个都画）" : "";
     this.lnLegend.classList.toggle("hidden", !this.elemRows.length);
     this._buildGutters();
     this._renderState();
@@ -831,7 +905,7 @@ export class Live5View {
     const whole = Math.floor(beat);
     if (whole !== this._tickBeat) { this._tickBeat = whole; this._tick(beat); }
     const t = performance.now();
-    if (!this._eqAt || t - this._eqAt > 250) { this._eqAt = t; this._renderDoing(beat); this._renderTime(beat); this._renderHandover(beat); }
+    if (!this._eqAt || t - this._eqAt > 250) { this._eqAt = t; this._renderDoing(beat); this._renderTime(beat); this._renderHandover(beat); this._renderKeys(beat); }
   }
 
   // Set 时间：放到第几分几秒 / 一共多长，还剩多久
@@ -937,7 +1011,7 @@ export class Live5View {
       }
       for (const f of ch.fx || []) {
         if (!(f.decks || []).includes(d)) continue;
-        g.fillStyle = "#f0c050";
+        g.fillStyle = `rgb(${FXC[fxCat(f)].rgb})`;
         g.fillRect(X(f.start), y + h - 3, Math.max(2, X(f.end) - X(f.start)), 3);
       }
     });
@@ -1372,19 +1446,22 @@ export class Live5View {
       }
       if (r.kind === "head") {
         // 落在这台 Deck 上的效果：一条带子，淡色的那一截是关掉以后的尾音
-        g.font = "bold 10px sans-serif";
+        g.font = "bold 11px sans-serif";
         for (const { f, lane } of r.fx.items) {
           const x0 = X(f.start), x1 = X(f.end), x2 = X(f.end + (f.tail || 0));
           if (x2 < 0 || x0 > W) continue;
-          const y = r.y + 3 + lane * LN.band, hh = LN.band - 3;
+          const y = r.y + 3 + lane * LN.band, hh = LN.band - 3, k = FXC[fxCat(f)];
           const on = st && (st.fx || []).some((x) => x.id === f.id && !x.tail && x.on !== false);
-          g.fillStyle = "rgba(240,192,80,.14)";
+          g.fillStyle = `rgba(${k.rgb},.16)`;
           g.fillRect(x1, y, x2 - x1, hh);
-          g.fillStyle = on ? "rgba(240,192,80,.55)" : "rgba(240,192,80,.3)";
+          g.fillStyle = `rgba(${k.rgb},${on ? 0.66 : 0.38})`;
           g.fillRect(x0, y, Math.max(2, x1 - x0), hh);
-          g.fillStyle = "#f6dfa2";
+          g.fillStyle = `rgb(${k.rgb})`; // 上沿一道实线：开着的那一段粗，尾音细
+          g.fillRect(x0, y, Math.max(2, x1 - x0), 3);
+          g.fillRect(x1, y, Math.max(0, x2 - x1), 1);
+          g.fillStyle = k.ink;
           const tx = Math.max(x0, 0) + 4;
-          g.fillText(fitText(g, `${f.id} ${f.name}`, Math.max(x2, x1) - tx - 4), tx, y + hh - 3);
+          g.fillText(fitText(g, `${f.id} ${f.name}`, Math.max(x2, x1) - tx - 4), tx, y + hh - 2);
         }
         continue;
       }
@@ -1408,10 +1485,10 @@ export class Live5View {
         pts.forEach(([b, v], i) => { const x = X(b), y = Y(laneFrac(param, v)); if (i) path.lineTo(x, y); else path.moveTo(x, y); });
         const fill = new Path2D(path);
         fill.lineTo(X(pts[pts.length - 1][0]), r.y + r.h); fill.lineTo(X(pts[0][0]), r.y + r.h); fill.closePath();
-        g.fillStyle = col; g.globalAlpha = moving ? 0.16 : 0.07;
+        g.fillStyle = col; g.globalAlpha = moving ? 0.2 : 0.08;
         g.fill(fill);
-        g.globalAlpha = moving ? 1 : 0.5;
-        g.strokeStyle = col; g.lineWidth = moving ? 1.8 : 1.2;
+        g.globalAlpha = moving ? 1 : 0.6;
+        g.strokeStyle = col; g.lineWidth = moving ? LINE.thin : 1.8; g.lineJoin = "round";
         g.stroke(path);
         g.globalAlpha = 1; g.lineWidth = 1;
       }
@@ -1490,7 +1567,7 @@ export class Live5View {
   // 格子上面那一条小字是原曲的小节号（loop 里一圈一圈地重来）；竖的点线 = 打 loop / 跳段的地方
   _drawGrid(g, r, X, b0, bB, W) {
     const d = r.deck, rows = this.elemRows, top = r.y + GR.src, gh = r.h - GR.src - 2, RH = r.rh;
-    const Y = (f) => top + (1 - f) * gh;
+    const Y = (f) => gridY(r, null, f);
     g.fillStyle = "#12151b";
     g.fillRect(0, r.y, W, r.h);
     g.fillStyle = "rgba(255,255,255,.035)";
@@ -1511,12 +1588,16 @@ export class Live5View {
         if (sb >= 0 && sb % every === 0 && src - sb * BEATS < 1e-3) { g.fillStyle = DECK_HEX[d]; g.fillText(String(sb + 1), x0 + 2, r.y + 9); }
         if (!has || sb < 0) continue;
         const gains = this._gainAt(c, (g0 + g1) / 2);
+        const cx = Math.round(x0), cw = Math.max(1, Math.round(x1) - cx - 1);
         for (let i = 0; i < rows.length; i++) {
           const lv = elemLevel(els[rows[i].id], sb);
           if (!lv) continue;
-          const a = audible(lv, rows[i].w, gains);
-          g.fillStyle = `rgba(226,231,240,${(0.07 + 0.83 * Math.pow(a, 0.6)).toFixed(3)})`;
-          g.fillRect(x0, top + i * RH + 1, Math.max(1, x1 - x0 - 1), RH - 2);
+          // 高 = 原曲里有多满；亮 = 旋钮放过去多少（切掉的灭成一圈暗边）
+          const look = cellLook(lv, passThrough(rows[i].w, gains));
+          const hh = Math.max(3, Math.round((RH - 2) * look.h)), cy = top + (i + 1) * RH - 1 - hh;
+          g.fillStyle = `rgba(226,231,240,${look.a.toFixed(3)})`;
+          g.fillRect(cx, cy, cw, hh);
+          if (!look.lit && cw >= 4) { g.strokeStyle = "rgba(226,231,240,.24)"; g.lineWidth = 1; g.strokeRect(cx + 0.5, cy + 0.5, cw - 1, hh - 1); }
         }
       }
       if (!has) { g.fillStyle = "#666e7d"; g.font = "11px sans-serif"; g.fillText(`${c.id} 的素材没写元素表`, Math.max(X(c.start), 0) + 6, top + gh / 2 + 4); }
@@ -1528,17 +1609,25 @@ export class Live5View {
         g.beginPath(); g.moveTo(x, r.y); g.lineTo(x, r.y + r.h); g.stroke();
       }
       g.setLineDash([]);
-      // 旋钮的线：先垫一道深色的边（压在亮格子上也看得清），再画颜色；推子是虚线
-      for (const p of ["lo", "mid", "hi", "vol"]) {
+      // 旋钮的线：四条上下错开一点（都在 12 点时并排着，不会只看见最上面那条）。先给每条垫一道深色的边
+      // （压在亮格子上也看得清），再画颜色；推子是虚线
+      const paths = KEY_PARAMS.map((p) => {
         const pts = lanePoints(c, p);
-        if (!pts.length) continue;
+        if (!pts.length) return null;
         const path = new Path2D();
-        pts.forEach(([b, v], i) => { const x = X(b), y = Y(overlayFrac(p, v)); if (i) path.lineTo(x, y); else path.moveTo(x, y); });
-        if (p === "vol") g.setLineDash([6, 4]);
-        g.strokeStyle = "rgba(11,13,17,.75)"; g.lineWidth = 4; g.stroke(path);
-        g.strokeStyle = p === "vol" ? GRID_FADER : laneColor(p, d); g.lineWidth = 1.8; g.stroke(path);
-        g.setLineDash([]); g.lineWidth = 1;
+        pts.forEach(([b, v], i) => { const x = X(b), y = gridY(r, p, overlayFrac(p, v)); if (i) path.lineTo(x, y); else path.moveTo(x, y); });
+        return [p, path];
+      }).filter(Boolean);
+      g.lineJoin = "round";
+      g.strokeStyle = "rgba(11,13,17,.8)"; g.lineWidth = LINE.edge;
+      for (const [, path] of paths) g.stroke(path);
+      g.lineWidth = LINE.w;
+      for (const [p, path] of paths) {
+        g.setLineDash(p === "vol" ? LINE.dash : []);
+        g.strokeStyle = p === "vol" ? GRID_FADER : laneColor(p, d);
+        g.stroke(path);
       }
+      g.setLineDash([]); g.lineWidth = 1;
     }
     // 右边的刻度：12 点 / 9 点 / 7 点（旋钮线看这个）
     g.font = "9px ui-monospace, Menlo, monospace";
@@ -1894,7 +1983,9 @@ export class Live5View {
       const gh = this.gHead && this.gHead[d];
       if (gh) {
         const nx = c ? null : (this.deckClips[d] || []).find((x) => x.start >= beat);
-        setText(gh.who, c ? `${c.id} ${c.title}` : nx ? `下一段 ${nx.id}，全场第 ${barOf(nx.start)} 小节进` : "后面没有片段了");
+        const who = c ? `${c.id} ${c.title}` : nx ? `下一段 ${nx.id} · 第 ${barOf(nx.start)} 小节进` : "后面没有片段了";
+        setText(gh.who, who);
+        if (gh.who.title !== who) gh.who.title = who; // 写不下的（后面还有效果的色块）鼠标放上去看全的
       }
     }
     const gm = this.gHead && this.gHead[0];
@@ -2191,13 +2282,14 @@ export class Live5View {
       const gains = this._gainAt(c, beat);
       const say = (lv) => (lv >= 0.99 ? "满" : lv >= 0.5 ? "中" : "弱");
       const out = [head(`D${row.deck} ${c.id} · 全场 ${pos} · 原曲第 ${Math.max(1, sb + 1)} 小节`),
-        el("div", { class: "l5-tip-v" }, ["hi", "mid", "lo", "vol"].map((p) => { const v = laneAt(c, p, beat); return [el("b", { style: `color:${p === "vol" ? GRID_FADER : laneColor(p, row.deck)}` }, LANE_ZH[p]), ` ${v ? v.text : "–"}`, "　"]; }))];
+        el("div", { class: "l5-tip-v" }, KEY_PARAMS.map((p) => { const v = laneAt(c, p, beat); return [el("b", { style: `color:${p === "vol" ? GRID_FADER : laneColor(p, row.deck)}` }, LANE_ZH[p]), ` ${v ? v.text : "–"}`, "　"]; }))];
       const here = this.elemRows.map((e) => [e, elemLevel(els[e.id], sb)]).filter(([, lv]) => lv > 0);
       if (!Object.keys(els).length) out.push(el("div", { class: "dim" }, "这份素材没写元素表"));
       else if (!here.length) out.push(el("div", { class: "dim" }, "这一小节没有写着的声部"));
       for (const [e, lv] of here) {
-        const a = audible(lv, e.w, gains);
-        out.push(el("div", { class: "l5-tip-r" }, el("span", { class: "l5-tip-k" }, e.name), el("span", {}, `${say(lv)} → 过完旋钮还剩 ${Math.round(a * 100)}%`)));
+        const pass = passThrough(e.w, gains);
+        out.push(el("div", { class: "l5-tip-r" }, el("span", { class: "l5-tip-k" }, e.name),
+          el("span", {}, `原曲里${say(lv)} · 旋钮放过去 ${Math.round(pass * 100)}%${cellLook(lv, pass).lit ? "" : "（灭）"}`)));
       }
       return out;
     }

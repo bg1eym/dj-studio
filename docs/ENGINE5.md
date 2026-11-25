@@ -27,7 +27,10 @@ loop 转 100 圈不偏、效果各有各的实例，这些在 tick 里做不到�
 - **起 / 停落在采样上**：Deck 提前 4 个块起播（预卷），主输出前面一道门在起播那一帧已经全开、在停止那一帧已经关完（门的沿 1 ms / 3 ms）。
   Deck 自己的控件（loop 开关、跳段、EQ、Filter）落在块边界；loop 的回绕由 Mixxx 在采样上做。
 - 跳段的目标提前告诉读盘线程（预读），跳的那一块不会出现一块静音。
-- 不出声（没接声卡、倍速：测试、录音）时引擎按自己的时钟出块，落后了会连着补：连着的块之间让读盘线程 150 µs。不让的话它会跑到读盘前面（Mixxx 只往前预读两块），某台 Deck 掉一块（[MIXXX_NOTES.md](MIXXX_NOTES.md)）。接着声卡时一次回调一块，不涉及。
+- 不出声（没接声卡、倍速：测试、录音）时引擎按自己的时钟出块，落后了会连着补，会跑到 Mixxx 的读盘线程前面（它只往前预读两块），那台 Deck 这一块就是静音。
+  所以这时每处理一块之前、每次定位之后，引擎先确认每台在放的 Deck 接下来要读的那一段（4096 帧）已经在缓存里，不在就等读盘读好（最多 2 秒，等不到记一次没跟上）；
+  连着的块之间另外让读盘线程 150 µs（少等几回）。接着声卡时一次回调一块，不等（[MIXXX_NOTES.md](MIXXX_NOTES.md)）。
+- 「装好了」认 Mixxx 的 deck 发的 `newTrackLoaded`，不看 `track_loaded`：一台 Deck 换另一首时后者一直是 1（[MIXXX_NOTES.md](MIXXX_NOTES.md)）。
 
 ## 3 混音链路
 
@@ -98,7 +101,8 @@ Deck（Mixxx：解码 → 变速 → 增益 → EQ → Filter，推子前）
 **状态 `st5`**：`exec, seq, state, frame, beat, bpm, late, latency, misses, decks[], fx[], master{}`。
 
 - `misses`（只有声音引擎报）：这次开始以来读盘没跟上的次数——每一次是某台 Deck 一小段静音（一块约 12 ms）。正常是 0；Runner5 看到它涨会写进日志，演出页也显示。
-  数到的是下限：一台 Deck 每次定位后的头一回 Mixxx 不报（[MIXXX_NOTES.md](MIXXX_NOTES.md)）。`v5.perf` 的 `cache_misses` 是同一个数，按「上次问到现在」算
+  接着声卡时数到的是下限：一台 Deck 每次定位后的头一回 Mixxx 不报（[MIXXX_NOTES.md](MIXXX_NOTES.md)）；不出声时引擎自己先等读盘，等不到的也记在这里。
+  `v5.perf` 的 `cache_misses` 是同一个数，按「上次问到现在」算；`reader_waits` 是不出声时等过读盘几回（等到了的，不算没跟上）
 
 - `decks[]`：`deck_id, clip_id, next_clip, load_generation, state (idle / loading / ready / playing / looping / stopped / error), source_sec, global_beat, phase_ms, seg, loop_lap, controls{lo, mid, hi, filter, vol}, manual[], gate, level, out, audible`
 - `fx[]`：在响的发送效果 `{id, kind, clip, slot, send, wet, tail, level}` 和处理组里的件 `{id, kind, bus, route, on, tail, muted}`
