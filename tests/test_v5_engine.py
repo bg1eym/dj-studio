@@ -116,6 +116,40 @@ def test_catching_up_at_high_speed_does_not_outrun_the_reader(wavs, tmp_path):
             assert peak_at(x, r.frame_of(b)) == pytest.approx(3.2 * g, rel=0.09), b
 
 
+@pytest.mark.skipif(not HAVE_ENGINE, reason="要声音引擎（装载是 Mixxx 的）")
+@pytest.mark.parametrize("speed", [4, 100])
+def test_a_deck_that_gets_another_track_waits_for_the_real_load(speed, wavs, tmp_path):
+    """同一台 Deck 放完一首、换另一首：要等新曲真的装完才算装好。以前只看 track_loaded 和 deck 上挂的曲目——换曲的那一刻
+    前者还是旧曲留下的 1、后者一交给 deck 就是新的，于是「0 毫秒就装好了」，预备点的定位被随后真正的装载清掉；倍速录音时
+    连起播的定位也可能被清掉，那一段先从错的地方放、过几块再跳回来。
+    这里量两样：起播之前 deck 停在预备点上（起播点往前 4 块）；起播以后不用重新定位，每个小节第 1 拍两个脉冲叠在同一帧。"""
+    p = project([
+        {"id": "C1", "asset": "A1", "deck": 1, "start": "1.1", "stop": "17.1", "init": {"vol": 0.25}},
+        {"id": "C2", "asset": "A2", "deck": 2, "start": "1.1", "stop": "5.1", "init": {"vol": 0.25}},
+        {"id": "C3", "asset": "A3", "deck": 2, "src": "9.1", "start": "9.1", "stop": "17.1", "init": {"vol": 0.25}},
+    ])
+    g = fader_gain(0.25)  # 录成 16 位：两个脉冲叠起来不能超过 1
+    c = compiled(p, dur=150.0, paths=wavs)
+    cue = SPECS["A3"][1] + 32 * 60.0 / SPECS["A3"][0] - 4 * 512 / 44100
+    with Run(c, speed=speed, sim=False, record=tmp_path / "out.wav") as r:
+        r.start()
+        if speed <= 4:
+            assert r.e.wait(lambda: r.state() == "running" and r.deck(2)["clip_id"] == "C3" and r.deck(2)["state"] == "ready", 30)
+            time.sleep(0.4)  # 真正的装载这时早完了（几十毫秒）：位置要还在预备点
+            d = r.deck(2)
+            assert d["state"] == "ready" and d["source_sec"] == pytest.approx(cue, abs=0.002), d
+        r.wait_state("done", 120)
+        assert not r.rc("C3.resync"), r.rc("C3.resync")
+        start = r.rc("C3.start")[0]
+        assert start["st"] in ("ok", "late"), start
+        perf = r.e.call({"cmd": "v5.perf"})
+        assert perf["cache_misses"] == 0, perf
+        x = r.audio()
+        first = 32 if start["st"] == "ok" else 36  # 倍速下装得晚就晚进，位置照样在计划上
+        for b in range(first, 64, 4):
+            assert peak_at(x, r.frame_of(b)) == pytest.approx(1.6 * g, rel=0.09), (b, start)
+
+
 def test_runner_reports_reader_misses_once_in_a_while():
     """引擎报的 misses 涨了，Runner5 记一行日志（最多两秒一行）；没在放、或者引擎不报（模拟器）就不记；重新开始后从 0 数。"""
     from djstudio.v5.runner import Runner5

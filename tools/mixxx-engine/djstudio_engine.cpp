@@ -81,7 +81,10 @@
 #include "encoder/encodercallback.h"
 #include "encoder/encodermp3.h"
 #include "encoder/encodermp3settings.h"
+#include "engine/cachingreader/cachingreader.h"
+#include "engine/cachingreader/cachingreaderworker.h"
 #include "engine/enginebuffer.h"
+#include "engine/readaheadmanager.h"
 #include "engine/filters/enginefilterbessel4.h"
 #include "engine/enginemixer.h"
 #include "mixer/deck.h"
@@ -444,6 +447,31 @@ const QString kMainGroup = QStringLiteral("[Master]");
 // 要看得到这条日志，起引擎的一方要给 QT_LOGGING_RULES="*.debug=false;default.debug=true"（只放开 default 分类，
 // 即 Mixxx 的 qDebug()）：Qt 在第一次建日志分类时读这个环境变量，Mixxx 的静态 Logger 在 main 之前就建了，在这里改来不及
 std::atomic<int> g_cacheMisses{0};
+
+// 拿 Mixxx 的三个私有成员（EngineBuffer 里读盘的 CachingReader、管读到哪的 ReadAheadManager；CachingReader 里的读盘线程），
+// 不改 Mixxx 的源码：显式实例化模板时编译器不做访问检查（C++ 标准 [temp.spec]），所以成员指针可以这样带出来。
+// 只用它们的公开接口（CachingReader::read / hintAndMaybeWake、ReadAheadManager::getPlaypos、EngineWorker::workReady / wakeIfReady）。
+template <typename Tag, typename Tag::type M>
+struct PrivateAccess {
+    friend typename Tag::type privateMember(Tag) {
+        return M;
+    }
+};
+struct EngineBufferReader {
+    typedef CachingReader* EngineBuffer::*type;
+    friend type privateMember(EngineBufferReader);
+};
+struct EngineBufferReadAhead {
+    typedef ReadAheadManager* EngineBuffer::*type;
+    friend type privateMember(EngineBufferReadAhead);
+};
+struct CachingReaderWorkerOf {
+    typedef CachingReaderWorker CachingReader::*type;
+    friend type privateMember(CachingReaderWorkerOf);
+};
+template struct PrivateAccess<EngineBufferReader, &EngineBuffer::m_pReader>;
+template struct PrivateAccess<EngineBufferReadAhead, &EngineBuffer::m_pReadAheadManager>;
+template struct PrivateAccess<CachingReaderWorkerOf, &CachingReader::m_worker>;
 QtMessageHandler g_prevMessageHandler = nullptr;
 void countingMessageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
     if (msg.contains(QLatin1String("cache misses"))) {
@@ -1097,7 +1125,7 @@ class Engine : public djs5::Backend {
     // - 每个 deck 的 main_mix 关掉：Mixxx 自己的主输出里没有它们（通道缓冲区保持推子前的样子——只有进了主混音的通道
     //   才会被就地乘上推子、过效果单元，channelmixer.cpp:56-96），调度器从通道缓冲区取声音，自己算门、推子、发送效果；
     // - quantize 关掉：起播 / 定位不做相位同步（enginebuffer.cpp:776-791），位置完全由调度器按全场速度图给；
-    // - 装载直接走 Deck::slotLoadTrack（主线程），不用 AutoDJ；装好没有看 track_loaded 和 deck 上的曲目。
+    // - 装载直接走 Deck::slotLoadTrack（主线程），不用 AutoDJ；装好没有看 deck 发的 newTrackLoaded（见 Deck5::loadSeq）。
     // 「控制步」和「处理一块音频」用调度器的 gate 互斥：同一步里对 deck 的改动在同一块音频之前一起生效。
 
   public:
@@ -1124,6 +1152,73 @@ class Engine : public djs5::Backend {
         // 下一块开头生效（processSeek）；SEEK_EXACT = 不吸附到拍上。曲首之前也可以（那一段读出来是静音）
         deckN(d)->getEngineDeck()->getEngineBuffer()->queueNewPlaypos(
                 mixxx::audio::FramePos(sec * m_d5[d].sr), EngineBuffer::SEEK_EXACT);
+        m_d5[d].warmGaveUp = false;
+        if (!m_audio.active()) {
+            warm5(d, sec * m_d5[d].sr); // 不出声（倍速、录音）：目标那一段读进缓存了再往下走
+        }
+    }
+    // 不出声（倍速预演、录音）的时候引擎不等墙钟，会跑到读盘线程前面去：deck 要读的那一段还没进缓存，Mixxx 就给那一块放静音
+    // （readaheadmanager.cpp:91-98），等读到了再淡入。定位以后的头一回它还不打日志（notifySeek 把 m_cacheMissExpected 置真，
+    // readaheadmanager.cpp:216-221；日志只在 :108 不「意料之中」时打）——也就是每个片段起播、每次跳段的头上可能被吃掉一截，
+    // 而上面按日志数的 g_cacheMisses 数不到。出声时没有这个问题：预卷 kPrerollBuffers 块 = 46 毫秒，读盘来得及。
+    // 所以不出声时不靠「让一下」碰运气：每处理一块之前、每次定位之后，先问读盘这台 deck 接下来要读的那一段在不在缓存里
+    // （CachingReader::read 读到一块临时缓冲区里，全在 = AVAILABLE，cachingreader.h:90-103），不在就提示它去读、等它读好。
+    // 这样录出来的东西和电脑多快、文件解码多慢无关。等了 2 秒还没有（文件坏了 / 曲尾比报的短）就不等了，记一次没跟上。
+    void warm5(int n, double fromFrame) {
+        Deck5& x = m_d5[n];
+        if (m_noWarm || x.warmGaveUp || x.gen.load() <= 0 || x.inFlight || !(co(n, "track_loaded") > 0)) {
+            return;
+        }
+        const SINT total = static_cast<SINT>(co(n, "track_samples") / 2) - kWarmFrames; // 曲尾那一点不等（可读的范围可能比报的短）
+        const SINT a = std::max<SINT>(0, static_cast<SINT>(std::floor(fromFrame)));
+        const SINT b = std::min<SINT>(total, static_cast<SINT>(std::floor(fromFrame)) + kWarmFrames);
+        if (b <= a) {
+            return;
+        }
+        CachingReader* reader = deckN(n)->getEngineDeck()->getEngineBuffer()->*privateMember(EngineBufferReader());
+        for (int i = 0; i < 10000 && !m_quit; ++i) {
+            // 读盘线程交回来的东西（「装好了」、读好的块）要有人收：平时是 EngineBuffer::process 开头收（enginebuffer.cpp:1170），
+            // read 自己只在「已经装好」的状态下才收（cachingreader.cpp:320-343）。刚装好的那一下状态还是「在装」，这里又没有在
+            // 处理音频——不收的话 read 永远是「没有」
+            reader->process();
+            if (reader->read(a * 2, (b - a) * 2, false, m_warm.data()) == CachingReader::ReadResult::AVAILABLE) {
+                if (i > 0) {
+                    m_warmWaits++;
+                }
+                return;
+            }
+            Hint h;
+            h.frame = a;
+            h.frameCount = b - a;
+            h.type = Hint::Type::CurrentPosition;
+            HintVector hints;
+            hints.append(h);
+            reader->hintAndMaybeWake(hints);
+            // 读盘线程不是提示一下就醒的：hintAndMaybeWake 里的 workReady 只记一笔，要等 EngineMixer::process 末尾的 runWorkers
+            // 去叫调度线程、调度线程再叫它（engineworker.cpp:24-36、engineworkerscheduler.cpp:25-65、enginemixer.cpp:833）；
+            // 而且 runWorkers 的那一下 wakeAll 不拿锁，调度线程正好不在等的话就丢了——那一块已经在「等着读」，后面的提示不会再记，
+            // 没人再叫它，要到 deck 读到下一个 8192 帧的块才连带着醒。这里没有在处理音频，等不来那一下：每一轮直接叫醒读盘线程
+            CachingReaderWorker& worker = reader->*privateMember(CachingReaderWorkerOf());
+            worker.workReady();
+            worker.wakeIfReady();
+            QThread::usleep(200);
+        }
+        x.warmGaveUp = true; // 到下一次定位之前不再等这台 deck
+        g_cacheMisses.fetch_add(1);
+        std::fprintf(stderr, "v5：deck %d 第 %lld 帧起的那一段等了 2 秒读盘还没读出来，不等了\n", n, static_cast<long long>(a));
+    }
+    // 每处理一块之前：在放的 deck 接下来要读的那一段（从 ReadAheadManager 读到的地方起）
+    void warmDecks5() {
+        if (m_audio.active() || m_noWarm) {
+            return;
+        }
+        for (int n = 1; n <= kNumDecks; ++n) {
+            if (m_d5[n].gen.load() <= 0 || !(co(n, "play") > 0)) {
+                continue;
+            }
+            ReadAheadManager* ram = deckN(n)->getEngineDeck()->getEngineBuffer()->*privateMember(EngineBufferReadAhead());
+            warm5(n, ram->getPlaypos() / 2.0);
+        }
     }
     // 控件一律用「没有发送者」的写法（同 ControlObject::set(key, value)，controlobject.cpp）：拿着控件自己的 ControlObject
     // 指针写的话，它不给自己发 valueChanged（controlobject.cpp privateValueChanged：pSender == this 不发），
@@ -1197,6 +1292,9 @@ class Engine : public djs5::Backend {
             x.eq[2] = ControlDoublePrivate::getControl(ConfigKey(eq, "parameter3"));
             x.filter = ControlDoublePrivate::getControl(ConfigKey(QString("[QuickEffectRack1_[Channel%1]]").arg(n), "super1"));
             x.buffer = m_pEngineMixer->getChannelBuffer(g);
+            QObject::connect(deckN(n), &BaseTrackPlayer::newTrackLoaded, deckN(n), [this, n](TrackPointer) {
+                m_d5[n].loadSeq++; // 主线程（deckN(n) 所在的线程）
+            });
             for (int h = 0; h < djs5::kHints; ++h) {
                 x.hot[h] = co5(QString("hotcue_%1_position").arg(h + 1).toLatin1().constData());
                 if (!x.hot[h]) {
@@ -1282,8 +1380,10 @@ class Engine : public djs5::Backend {
                             // 一口气连着补块（倍速不出声；原速卡了一下之后）会跑到读盘线程前面去：它只往前预读两块
                             // （cachingreader.cpp kDefaultHintFrames = 1024），没读到的那一块 Mixxx 给那台 deck 放静音
                             // （Mac 的构建机上四个脉冲里少过一个）。和静音预跑一样，连着的块之间让一下。
-                            // 一次只出一块时（原速的常态）不等
-                            QThread::usleep(150);
+                            // 一次只出一块时（原速的常态）不等。（现在每块之前还会等读盘读好——warm5；这一下只是让它少等）
+                            if (!m_starve) {
+                                QThread::usleep(150);
+                            }
                         }
                         std::lock_guard<std::recursive_mutex> lock(m_e5->gate());
                         process5(false);
@@ -1325,11 +1425,20 @@ class Engine : public djs5::Backend {
         int loadingGen = 0;
         TrackPointer loadingTrack;
         qint64 loadingSince = 0;
+        // 装好没有不能只看 track_loaded：deck 上本来有曲子的话它一直是 1（要等读盘线程真的开始装才会动），
+        // Deck::getLoadedTrack 又是一交给 deck 就换成新的（basetrackplayer.cpp:316、521-536）——两样都对上了，新曲其实还没开始装。
+        // 装完的记号是 BaseTrackPlayer::newTrackLoaded（basetrackplayer.cpp:666）：读盘线程把装载的收尾全做完
+        // （清掉排着的定位、CueControl 定位到 cue，enginebuffer.cpp:536-577）以后才发到主线程
+        int loadSeq = 0;      // newTrackLoaded 来过几回（主线程）
+        int loadSeqAsked = 0; // 交给 deck 那一刻的 loadSeq
+        bool inFlight = false; // 交给 deck 了、还没装完
+        bool warmGaveUp = false; // 等读盘等不到（warm5）：到下一次定位之前不再等
     };
 
     // 处理一块音频（拿着 gate）：控制步没来得及跑就先补上，然后 Mixxx 的 deck，再是 v5 的混音
     void process5(bool countLate) {
         m_e5->preProcess(countLate);
+        warmDecks5(); // 不出声时：等读盘把这一块要读的读进缓存（见 warm5）
         const auto t0 = std::chrono::steady_clock::now();
         m_pEngineMixer->process(kBufferSamples);
         m_e5->render(m_out5.data());
@@ -1356,7 +1465,9 @@ class Engine : public djs5::Backend {
                 serviceLoads5();
                 QCoreApplication::processEvents();
             }
-            QThread::usleep(150);
+            if (!m_starve) {
+                QThread::usleep(150);
+            }
         }
     }
     // 主线程：调度器要装的曲目交给 deck，装好了（或者装不上）记下代数
@@ -1378,33 +1489,42 @@ class Engine : public djs5::Backend {
             }
             if (want) {
                 x.loadingGen = 0;
-                x.loadingTrack.reset();
                 auto it = m_lib.find(asset);
                 if (it == m_lib.end() || !QFileInfo(it->second.track->getLocation()).isReadable()) {
                     std::fprintf(stderr, "v5：deck %d 装不上 %s（曲库里没有 / 文件读不了）\n", n, asset.toUtf8().constData());
                     x.gen = -gen;
-                } else if (co(n, "track_loaded") > 0 && deckN(n)->getLoadedTrack() == it->second.track && !playing(n)) {
+                } else if (x.inFlight && x.loadingTrack == it->second.track) {
+                    x.loadingGen = gen; // 这一首正在装：等它装完，记成新的代数
+                } else if (!x.inFlight && co(n, "track_loaded") > 0 && deckN(n)->getLoadedTrack() == it->second.track && !playing(n)) {
                     x.gen = gen; // 这个 deck 上已经是这首：不重装
                 } else {
                     ControlObject::set(ConfigKey(QString("[Channel%1]").arg(n), "play"), 0.0);
+                    x.loadSeqAsked = x.loadSeq;
                     deckN(n)->slotLoadTrack(it->second.track, false);
                     x.loadingGen = gen;
                     x.loadingTrack = it->second.track;
                     x.loadingSince = now;
+                    x.inFlight = true;
                 }
             }
-            if (x.loadingGen) {
-                if (co(n, "track_loaded") > 0 && co(n, "track_samples") > 0 && deckN(n)->getLoadedTrack() == x.loadingTrack) {
+            if (x.inFlight) {
+                const bool done = x.loadSeq != x.loadSeqAsked && co(n, "track_loaded") > 0 && co(n, "track_samples") > 0 &&
+                        deckN(n)->getLoadedTrack() == x.loadingTrack;
+                // 装不上的话 deck 会把曲子退出来（basetrackplayer.cpp:540-548、573-590）：不用等到超时
+                const bool failed = !done && (!deckN(n)->getLoadedTrack() || now - x.loadingSince > 15000);
+                if (done) {
                     const auto sr = x.loadingTrack->getSampleRate();
                     x.sr = sr.isValid() ? sr.toDouble() : static_cast<double>(kSampleRate);
-                    x.gen = x.loadingGen;
+                } else if (failed) {
+                    std::fprintf(stderr, "v5：deck %d 没装上（%s）\n", n, deckN(n)->getLoadedTrack() ? "等了 15 秒" : "文件打不开");
+                }
+                if (done || failed) {
+                    if (x.loadingGen) {
+                        x.gen = done ? x.loadingGen : -x.loadingGen;
+                    }
                     x.loadingGen = 0;
                     x.loadingTrack.reset();
-                } else if (now - x.loadingSince > 15000) {
-                    std::fprintf(stderr, "v5：deck %d 装载超时\n", n);
-                    x.gen = -x.loadingGen;
-                    x.loadingGen = 0;
-                    x.loadingTrack.reset();
+                    x.inFlight = false;
                 }
             }
         }
@@ -1430,6 +1550,7 @@ class Engine : public djs5::Backend {
             r.set("budget_us", kBufferFrames * 1e6 / kSampleRate).set("late", m_e5->lateSteps());
             r.set("over", static_cast<long long>(m_perfOver)).set("over_half", static_cast<long long>(m_perfHalf));
             r.set("cache_misses", g_cacheMisses.load() - m_perfMisses0); // 这一段里读盘没跟上几次
+            r.set("reader_waits", static_cast<double>(m_warmWaits)); // 不出声时等过读盘几回（等到了，不算没跟上）
             m_perfMisses0 = g_cacheMisses.load();
             r.set("underruns", static_cast<long long>(m_audio.info()["underruns"].toDouble()));
             m_perfN = m_perfOver = m_perfHalf = 0;
@@ -1694,6 +1815,13 @@ class Engine : public djs5::Backend {
     Deck5 m_d5[kNumDecks + 1];
     QMutex m_loadLock;
     std::vector<float> m_out5;
+    static constexpr SINT kWarmFrames = 4096; // 每块之前保证读盘已经读好的那一段（4 块；变速、Key Lock 的拉伸器会多读一点）
+    std::vector<CSAMPLE> m_warm = std::vector<CSAMPLE>(static_cast<size_t>(kWarmFrames) * 2);
+    long m_warmWaits = 0; // 等过读盘几回（v5.perf 里报）
+    // 只给测试用的两个开关：DJSTUDIO_TEST_STARVE_READER=1 连着处理时不让读盘线程（最坏的情况）；
+    // DJSTUDIO_TEST_NO_WARM=1 不等读盘（0.4.6 之前的做法）。量出来的数在 docs/V5_G0.md「录成 MP3」
+    const bool m_starve = qEnvironmentVariableIntValue("DJSTUDIO_TEST_STARVE_READER") != 0;
+    const bool m_noWarm = qEnvironmentVariableIntValue("DJSTUDIO_TEST_NO_WARM") != 0;
     double m_eqDelay5 = 0.0;
     long long m_perfN = 0, m_perfOver = 0, m_perfHalf = 0;
     double m_perfSumUs = 0.0, m_perfMaxUs = 0.0;
