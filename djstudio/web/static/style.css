@@ -401,8 +401,8 @@ canvas.ho-wave.l5-twave { height: 72px; }
 /* 格子图左边两列：图例（四条线的颜色 / 虚实 + 游标这一拍的读数，定宽）| 声部名 + 小灯 */
 .l5-gkeys { position: absolute; left: 2px; width: 108px; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
 .l5-key { display: flex; align-items: center; gap: 5px; height: 15px; flex: none; font-size: 11px; line-height: 1; white-space: nowrap; min-width: 0; }
-.l5-kline { flex: none; width: 18px; height: 0; border-top: 3px solid currentColor; border-radius: 2px; }
-.l5-kline.dash { border-top-style: dashed; }
+.l5-kline { flex: none; width: 18px; height: 0; border-top: 4px solid currentColor; border-radius: 2px; }
+.l5-kline.dash { border-top: 0; height: 4px; border-radius: 0; background: repeating-linear-gradient(90deg, currentColor 0 5px, transparent 5px 8px); } /* 虚线：一小段里也看得出是断开的 */
 .l5-kn { flex: none; width: 38px; font-weight: 700; }
 .l5-kv { flex: 1 1 0; min-width: 0; text-align: right; font: 11px var(--mono); color: #c8cdd8; overflow: hidden; }
 .l5-g-param .l5-key { width: 108px; }
@@ -411,8 +411,8 @@ canvas.ho-wave.l5-twave { height: 72px; }
 .l5-gel { color: #c8cdd8; }
 /* 小灯：亮 = 这个声部现在听得到（越亮剩得越多）；cut = 被 EQ / Filter / 推子切掉了；什么都不带 = 原曲这一小节没有它 */
 .l5-lamp { flex: none; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; border: 1px solid #2c323d; transition: opacity .2s linear; }
-.l5-lamp.on { background: #e2e7f0; border-color: #e2e7f0; box-shadow: 0 0 5px rgba(226, 231, 240, .7); }
-.l5-lamp.cut { border-color: #7d8696; }
+.l5-lamp.on { background: rgb(224, 160, 44); border-color: rgb(224, 160, 44); box-shadow: 0 0 5px rgba(224, 160, 44, .8); }
+.l5-lamp.cut { border: 1px dotted #aab2c0; }
 .l5-fxkeys { flex: none; display: inline-flex; gap: 6px; margin-left: auto; }
 .l5-fxkey { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; line-height: 1; }
 .l5-fxkey i { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }
@@ -421,9 +421,9 @@ canvas.ho-wave.l5-twave { height: 72px; }
 .l5-lnlegend.hidden { display: none; }
 .l5-lnlegend > span { display: inline-flex; align-items: center; gap: 4px; }
 .l5-lnlegend i.cell { display: inline-block; box-sizing: border-box; width: 12px; height: 11px; border-radius: 1px; vertical-align: -1px; }
-.l5-lnlegend i.cell.on { background: rgba(226, 231, 240, .95); }
-.l5-lnlegend i.cell.cut { background: rgba(226, 231, 240, .05); border: 1px solid rgba(226, 231, 240, .3); }
-.l5-lnlegend i.cell.low { background: linear-gradient(to top, rgba(226, 231, 240, .95) 45%, transparent 45%); }
+.l5-lnlegend i.cell.on { background: rgb(224, 160, 44); }
+.l5-lnlegend i.cell.cut { background: radial-gradient(rgba(226, 231, 240, .75) .7px, transparent .9px) 0 0 / 3px 3px; }
+.l5-lnlegend i.cell.low { background: linear-gradient(to top, rgb(224, 160, 44) 45%, transparent 45%); }
 .l5-g-param.off { opacity: .5; }
 .l5-g-param.manual .tl-kv { color: var(--warn); font-weight: 700; }
 .l5-vm { font-size: 11px; line-height: 13px; color: #1a1300; background: var(--warn); border-radius: 3px; padding: 0 2px; font-weight: 700; font-family: inherit; }
