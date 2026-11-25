@@ -22,6 +22,8 @@
   规范里第 8 节的效果表由 `tests/test_v5_score.py` 和代码（`livefx.PARAMS`、`compile.FX_PARAMS`）比对：改一边要同时改另一边。
 - 元素表（SCORE_SPEC_V5.md 第 14 节：每份素材的各个声部在原曲哪几小节有）由 `djstudio/v5/elements.py` 读，只给演出画面画元素格子图用，不影响声音；
   规范里的声部表和 `elements.ELEMENTS` 由 `tests/test_v5_elements.py` 比对。程序不分析声部：这张表由谱提供（运行时零 AI）。
+- 演出画面（`live5.js`）上用户定过的几件事，别改回去：EQ 那张图只显示正在放的那一页，鼠标不能拖、不能滚（点一下跳转可以）；
+  元素格子亮 = 实心（琥珀色，别用白 / 灰：和 HIGH、推子的线混），EQ 切掉的 = 麻点；安排图的色块上不写字（写不全），要大、看得清进度和交接。
 - 主线 / 工具、主要的交接由 `djstudio/v5/mainline.py` 按角色分（SCORE_SPEC_V5.md 第 13 节）：只给界面、hot cue、交接说明分类用，不影响声音。
 - v5 的 hot cue 不写在谱里，由 `djstudio/v5/hotcue.py` 按谱算（名字、颜色、取舍 = docs/SET_SPEC.md 第 7 节的那一套，点从片段来）；
   SCORE_SPEC_V5.md 第 12 节的效果名字表由 `tests/test_v5_hotcue.py` 和代码（`hotcue.FX_NAME`）比对。

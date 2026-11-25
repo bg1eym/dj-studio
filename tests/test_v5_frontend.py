@@ -21,7 +21,7 @@ BEATS = [0.0, 100.0, 384.0, 400.5, 448.0, 600.0, 704.0, 730.0, 768.0, 960.0]
 
 SCRIPT = r"""
 import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide,
-  overlayFrac, elemLevel, filterPass, GRID_NOON, passThrough, cellLook, LAMP, gridY, fxCat } from "./live5.js";
+  overlayFrac, elemLevel, filterPass, GRID_NOON, passThrough, cellLook, LAMP, gridY, fxCat, faderGate, FADER_GATE, timeTicks } from "./live5.js";
 import { eqHours as v4Hours, faderPos } from "./live.js";
 import { overviewColumns, stackColumn } from "./wavedraw.js";
 const out = {};
@@ -113,7 +113,8 @@ out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // �
     full: look(1, KICK, flat), weak: look(0.3, KICK, flat), mid: look(0.6, KICK, flat),
     kickLowCut: look(1, KICK, { ...flat, lo: -25 }), bassLowCut: look(1, BASS, { ...flat, lo: -25 }), hatLowCut: look(1, HAT, { ...flat, lo: -25 }),
     hatHighCut: look(1, HAT, { ...flat, hi: -25 }), kickLow9: look(1, KICK, { ...flat, lo: eqDb(-3) }), kickLow11: look(1, KICK, { ...flat, lo: eqDb(-1) }),
-    fader0: look(1, KICK, { ...flat, vol: 0 }), fader2: look(1, KICK, { ...flat, vol: 0.2 }), fader5: look(1, KICK, { ...flat, vol: 0.5 }), fader8: look(1, KICK, { ...flat, vol: 0.8 }),
+    fader0: look(1, KICK, { ...flat, vol: 0 }), fader05: look(1, KICK, { ...flat, vol: 0.05 }), fader2: look(1, KICK, { ...flat, vol: 0.2 }),
+    fader3: look(1, KICK, { ...flat, vol: 0.3 }), fader4: look(1, KICK, { ...flat, vol: 0.4 }), fader6: look(1, KICK, { ...flat, vol: 0.6 }), fader10: look(1, KICK, flat),
     bassHpf: look(1, BASS, { ...flat, filter: 0.5 }), hatLpf: look(1, HAT, { ...flat, filter: -0.5 }),
   };
   out.ramp = [0, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 1].map((t) => cellLook(1, t).a);
@@ -122,6 +123,13 @@ out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // �
   out.gy = { hi: gridY(row, "hi", 0.5), mid: gridY(row, "mid", 0.5), lo: gridY(row, "lo", 0.5), vol: gridY(row, "vol", 0.5), mid0: gridY(row, null, 0.5),
     top: gridY(row, "hi", 1), bottom: gridY(row, "vol", 0), box: [100 + 11, 100 + 110 - 2] };
   out.cat = [fxCat({ kind: "echo", route: "send" }), fxCat({ kind: "roll", route: "insert" }), fxCat({ kind: "trans", route: "group" }), fxCat({ kind: "sample", route: "master" })];
+  out.gate = { k: FADER_GATE, v: [0, 0.05, 0.2, 0.4, 0.6, 1].map(faderGate) };
+  // 整套 set 的时间刻度：120 BPM、600 拍 = 5 分钟 → 每分钟一个；变速的照速度图；长的 set 隔两分钟
+  out.ticks = timeTicks({ tempo: [{ at: 0, bpm: 120 }, { at: 600, bpm: 120 }], length: 600 });
+  out.ticksLong = timeTicks({ tempo: [{ at: 0, bpm: 120 }, { at: 3600, bpm: 120 }], length: 3600 }).map((t) => t.text);
+  const ramp = { tempo: tempo, length: 768 };
+  out.ticksRamp = timeTicks(ramp).map((t) => [t.text, +secAt(ramp.tempo, t.beat).toFixed(3)]);
+  out.ticksNone = timeTicks({ tempo: [{ at: 0, bpm: 120 }], length: 0 });
 }
 console.log(JSON.stringify(out));
 """
@@ -232,33 +240,38 @@ def test_element_grid_axis_and_what_is_left_after_the_knobs(out):
     assert a["hatLowCut"] == pytest.approx(1)  # 镲不在低频：切 LOW 对它没影响
     assert a["hatHighDown"] == pytest.approx(0.1 + 0.9 * 10 ** (-6 / 20))  # HIGH 退 6 dB：高频那九成剩一半
     assert a["boost"] == pytest.approx(1)  # 12 点以上按全放过去算
-    assert a["faderDown"] == 0 and a["faderHalf"] == pytest.approx(0.5)  # 推子在底 = 没有；按位置算，推到一半 = 一半
+    assert a["faderDown"] == 0 and a["faderHalf"] == pytest.approx(1)  # 推子在底 = 没有；推到一半不影响（推子只是一道门，见下一个测试）
     assert a["bassHpf"] == pytest.approx(0.15) and a["hatLpf"] == pytest.approx(0.1) and a["hatHpf"] == pytest.approx(1)  # Filter 往右先吃低频，往左先吃高频
     assert out["fpass"] == [[1, 1, 1], [0.5, 1, 1], [0, pytest.approx(0.2), 1], [1, pytest.approx(0.2), 0]]
 
 
 def test_cells_light_up_and_go_dark_with_the_knobs(out):
-    """格子的亮灭只看旋钮放过去多少（EQ、Filter、推子），高矮只看原曲里有多满——两样不混。
-    切掉 LOW：kick、bass 灭，闭镲照样全亮；切掉 HIGH 反过来。亮度是调光灯式的：剩不到两成算灭，八成以上全亮，中间一路变亮。"""
+    """格子的亮灭只看旋钮放过去多少，高矮只看原曲里有多满——两样不混。EQ 全开 = 全亮；LOW 没开：kick、bass 灭（画面上只剩麻点），
+    闭镲照样全亮；切掉 HIGH 反过来。亮度是调光灯式的：剩不到两成算灭，八成以上全亮，中间一路变亮。
+    推子只是一道门：3 以上不影响（EQ 全开的格子就是亮的），2 是半亮，1 以下才灭。"""
     k = out["look"]
     assert out["lamp"] == {"off": 0.2, "full": 0.8}
     # 高矮：满 / 中 / 弱，和旋钮无关
     assert [k[n]["h"] for n in ("full", "mid", "weak")] == pytest.approx([1.0, 0.68, 0.44])
     assert k["kickLowCut"]["h"] == k["full"]["h"] == 1.0
     # 亮灭：原曲里弱不弱不影响亮度
-    assert k["full"]["a"] == k["weak"]["a"] == pytest.approx(0.95) and k["full"]["lit"]
-    assert not k["kickLowCut"]["lit"] and not k["bassLowCut"]["lit"] and k["kickLowCut"]["a"] == 0.05
-    assert k["hatLowCut"]["lit"] and k["hatLowCut"]["a"] == pytest.approx(0.95)  # 切 LOW 碰不到镲
+    assert k["full"]["a"] == k["weak"]["a"] == pytest.approx(1.0) and k["full"]["lit"]
+    assert not k["kickLowCut"]["lit"] and not k["bassLowCut"]["lit"] and k["kickLowCut"]["a"] == 0
+    assert k["hatLowCut"]["lit"] and k["hatLowCut"]["a"] == pytest.approx(1.0)  # 切 LOW 碰不到镲
     assert not k["hatHighCut"]["lit"]
     assert k["kickLowCut"]["a"] < k["kickLow9"]["a"] < k["kickLow11"]["a"] <= k["full"]["a"]  # LOW 一点一点放回来：一路变亮
-    assert k["kickLow9"]["lit"] and 0.3 < k["kickLow9"]["a"] < 0.8
-    assert not k["fader0"]["lit"] and not k["fader2"]["lit"]
-    assert k["fader2"]["a"] < k["fader5"]["a"] < k["fader8"]["a"] == pytest.approx(0.95)  # 推子按位置：2 以下灭，5 半亮，8 以上全亮
-    assert k["fader5"]["a"] == pytest.approx(0.16 + 0.79 * 0.5)
+    assert k["kickLow9"]["lit"] and 0.3 < k["kickLow9"]["a"] < 0.9  # 亮着的最暗也有三成：和麻点分得开
     assert not k["bassHpf"]["lit"] and not k["hatLpf"]["lit"]  # Filter 拧到一半：高通吃掉 bass，低通吃掉镲
     r = out["ramp"]
-    assert r[0] == r[1] == r[2] == 0.05 and r[-1] == r[-2] == pytest.approx(0.95)
+    assert r[0] == r[1] == r[2] == 0 and r[-1] == r[-2] == pytest.approx(1.0)
     assert all(a < b for a, b in zip(r[2:6], r[3:7]))  # 两成到八成之间一路变亮
+    # 推子这道门
+    assert out["gate"]["k"] == {"off": 0.05, "full": 0.4}
+    gv = out["gate"]["v"]
+    assert gv[0] == gv[1] == 0 and gv[3] == gv[4] == gv[5] == 1 and 0 < gv[2] < 1
+    assert not k["fader0"]["lit"] and not k["fader05"]["lit"]
+    assert k["fader2"]["lit"] and 0.3 < k["fader2"]["a"] < 0.7  # 推子 2：半亮
+    assert k["fader3"]["a"] == k["fader4"]["a"] == k["fader6"]["a"] == k["fader10"]["a"] == pytest.approx(1.0)  # 推子 3 以上：EQ 全开都是全亮
 
 
 def test_the_four_knob_lines_on_the_grid_sit_side_by_side(out):
@@ -267,7 +280,17 @@ def test_the_four_knob_lines_on_the_grid_sit_side_by_side(out):
     g = out["gy"]
     ys = [g["hi"], g["mid"], g["lo"], g["vol"]]
     steps = [b - a for a, b in zip(ys, ys[1:])]
-    assert steps == pytest.approx([3.5, 3.5, 3.5])
+    assert steps == pytest.approx([5.5, 5.5, 5.5])  # 线宽 4.5 + 1
     assert g["mid0"] == pytest.approx((g["mid"] + g["lo"]) / 2)
-    assert g["top"] - 1.5 >= g["box"][0] and g["bottom"] + 1.5 <= g["box"][1]
+    assert g["top"] - 2.25 >= g["box"][0] and g["bottom"] + 2.25 <= g["box"][1]
     assert out["cat"] == ["send", "proc", "proc", "sample"]
+
+
+def test_time_ticks_of_the_whole_set(out):
+    """整套 set 的安排图底下的时间刻度：一分钟一个（长的 set 隔两分钟、五分钟），落在速度图算出来的那一拍上；不含开头和结尾。"""
+    assert [(t["text"], round(t["beat"], 3)) for t in out["ticks"]] == [("1:00", 120), ("2:00", 240), ("3:00", 360), ("4:00", 480)]
+    assert out["ticksLong"][:3] == ["2:00", "4:00", "6:00"] and len(out["ticksLong"]) == 14  # 30 分钟：两分钟一个
+    for text, sec in out["ticksRamp"]:  # 变速的 set：刻度那一拍正好是那个时间
+        m, sc = text.split(":")
+        assert sec == pytest.approx(int(m) * 60 + int(sc), abs=0.01)
+    assert len(out["ticksRamp"]) >= 4 and out["ticksNone"] == []
