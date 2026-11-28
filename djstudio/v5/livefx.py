@@ -352,8 +352,12 @@ def compile_live(c: "Compiled5", p: "Project", err: Callable[..., None], hint: C
                     beats = dur("拍长", get("拍长", "1/2拍") or "", 1 / 16, 4.0)
                     if beats * spb > ECHO_MAX_SECONDS:
                         raise ParamError(f"拍长 {dtext(beats)} 在这个速度下超过 {ECHO_MAX_SECONDS:g} 秒")
-                    pr = {"beats": beats, "feedback": within("反馈", amount(get("反馈", "0.6") or ""), 0.0, 0.95)}
-                    text = f"Echo {dtext(beats)}，反馈 {pr['feedback']:g}，最多响 {dtext(s1 - s0)}"
+                    if get("反馈"):
+                        fb = within("反馈", amount(get("反馈") or ""), 0.0, 0.95)
+                    else:
+                        fb = release_feedback(s1 - s0, beats)  # 不写：按时长算，回声正好响过声明的这一段
+                    pr = {"beats": beats, "feedback": fb}
+                    text = f"Echo {dtext(beats)}，反馈 {fb:g}，最多响 {dtext(s1 - s0)}"
                 else:
                     for k in ("拍长", "反馈"):
                         if get(k):
@@ -382,7 +386,7 @@ def compile_live(c: "Compiled5", p: "Project", err: Callable[..., None], hint: C
                        "tail": max(u["tail"] for u in units), "text": text, "line": f.line, "rc": f.id, "note": f.note,
                        "back": back, "restore": {"roll": "capture", "release": "release", "noise": "start",
                                                  "spiral": "tail", "filter_echo": "tail"}.get(f.kind, "none"),
-                       "pre": units[0]["p"].get("beats", 0.0) if f.kind == "release" else 0.0})
+                       "pre": release_lead(units[0], s0, s1) if f.kind == "release" else 0.0})
 
     # ---- 组里：同一种效果一次开一个；Release 开始时收掉还开着的
     order = sorted(buses.items(), key=lambda kv: min(u["start"] for u in kv[1]["units"]))
@@ -458,6 +462,28 @@ def compile_live(c: "Compiled5", p: "Project", err: Callable[..., None], hint: C
                 "units": [{k: v for k, v in u.items() if k in ("id", "kind", "start", "end", "tail", "bands", "p", "c", "ev",
                                                                  "back", "until")} for u in b["units"]]} for b in blist]
     c.live.sort(key=lambda lv: (lv["start"], lv["id"]))
+
+
+REL_ECHO_PRE_PERIODS = 4.0  # bus.hpp kRelEchoPrePeriods
+REL_ECHO_PRE_MAX_BEATS = 8.0  # bus.hpp kRelEchoPreMaxBeats
+SPIN_MAX_SPEED = 3.0  # dsp.hpp kSpinMaxSpeed
+
+
+def release_feedback(span: float, beats: float) -> float:
+    """Release Echo 没写反馈时用多少：让回声在声明的时长里衰减约 20 dB——时长里转 n 遍，每遍减 20 / n dB。
+    太小（两三遍就没了）、太大（收不住）都不好听，夹在 0.4–0.85 之间。"""
+    n = max(1.0, span / max(beats, 1e-6))
+    return round(min(0.85, max(0.4, 10 ** (-20.0 / (20.0 * n)))), 2)
+
+
+def release_lead(unit: dict[str, Any], s0: float, s1: float) -> float:
+    """Release 开始之前引擎要先喂多久（拍），和 bus.hpp 的 unitLead 一样：Echo 带着反馈预卷的那几个周期；
+    回转要倒着读回去的那一段；刹车不用。从中间开始时静音预跑要从这之前起（restore_need）。"""
+    if unit["kind"] == "rel_echo":
+        return min(REL_ECHO_PRE_MAX_BEATS, max(1.0, REL_ECHO_PRE_PERIODS * unit["p"].get("beats", 0.5)))
+    if unit["kind"] == "spin":
+        return 0.5 * (SPIN_MAX_SPEED - 1.0) * (s1 - s0) + 0.25
+    return 0.0
 
 
 def restore_need(lv: dict[str, Any], beat: float) -> tuple[float, bool] | None:

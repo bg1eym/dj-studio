@@ -150,6 +150,44 @@ def test_a_deck_that_gets_another_track_waits_for_the_real_load(speed, wavs, tmp
             assert peak_at(x, r.frame_of(b)) == pytest.approx(1.6 * g, rel=0.09), (b, start)
 
 
+def test_master_limiter_keeps_the_output_under_full_scale(tmp_path):
+    """主输出的限幅器（dsp.hpp MasterLimiter）。四台 Deck 满推子叠在同一拍上是 3.2 倍满刻度：不压，声卡和录音就把它削平。
+    开着限幅器：输出绝不超过 0.985；状态里报压了多少；过载计数照旧数的是进限幅器之前超的采样（看得出排得太满）。
+    小电平时开不开都一样（逐位相同）。模拟器默认关（别的测试量的是没压过的电平），声音引擎默认开。"""
+    def run(vol, limiter, name):
+        with Run(compiled(four(vol)), record=tmp_path / f"{name}.f32") as r:
+            got = r.e.call({"cmd": "v5.limiter", "on": limiter})
+            assert got["on"] is limiter
+            r.start()
+            r.wait_beat(30.0)
+            st = r.e.status["master"]
+            r.wait_state("done", 60)
+            f0 = int(round(r.frame_of(0.0)))  # 从第 0 拍起取一样长的一段（录音头尾的静音每遍不一样长）
+            return r.audio()[f0:f0 + int(56 * 44100 * 60 / 132)], st
+
+    loud, st = run(1.0, True, "loud")
+    raw, st0 = run(1.0, False, "raw")
+    assert np.abs(raw).max() == pytest.approx(3.2, rel=0.09) and st0["limiter"] is False and st0["limit_db"] == 0
+    assert np.abs(loud).max() <= 0.985 + 1e-6
+    assert st["limiter"] is True and st["limit_db"] < -0.5 and st["over"] > 0  # 脉冲很稀：读状态的那一刻正在放开，压得没有峰上那么深
+    quiet_on, st2 = run(0.25, True, "quiet_on")
+    quiet_off, _ = run(0.25, False, "quiet_off")
+    assert np.array_equal(quiet_on, quiet_off) and st2["limit_db"] == 0 and st2["over"] == 0
+
+
+@pytest.mark.skipif(not HAVE_ENGINE, reason="要声音引擎（默认开着限幅器的是它）")
+def test_the_sound_engine_limits_by_default(wavs, tmp_path):
+    """声音引擎默认开着限幅器：四台满推子叠着放，录下来的峰值不到满刻度（16 位的录音里没有削平的采样）。"""
+    c = compiled(four(1.0), dur=150.0, paths=wavs)
+    with Run(c, speed=20, sim=False, record=tmp_path / "out.wav") as r:
+        r.start()
+        r.wait_beat(30.0)
+        assert r.e.status["master"]["limiter"] is True
+        r.wait_state("done", 120)
+        x = r.audio()
+    assert 0.9 < np.abs(x).max() <= 0.986 and int((np.abs(x) >= 0.999).sum()) == 0
+
+
 def test_runner_reports_reader_misses_once_in_a_while():
     """引擎报的 misses 涨了，Runner5 记一行日志（最多两秒一行）；没在放、或者引擎不报（模拟器）就不记；重新开始后从 0 数。"""
     from djstudio.v5.runner import Runner5

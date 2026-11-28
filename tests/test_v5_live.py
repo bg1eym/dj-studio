@@ -260,6 +260,59 @@ def test_release_echo_repeats_the_last_beats_and_ends_by_its_limit(tmp_path):
     assert max(p[24:]) < 0.004  # 到时长就没有了；退场：片段的干声也不回来
 
 
+def half_beat_peaks(x: np.ndarray, a: float, b: float) -> np.ndarray:
+    """从第 a 拍到第 b 拍，每半拍开头 6 ms 里的峰值。"""
+    w = int(0.006 * SR)
+    return np.array([float(np.abs(x[max(0, i - 4):i + w]).max()) for i in (int(round(k * SPB)) for k in np.arange(a, b, 0.5))])
+
+
+def test_release_echo_on_a_beat_line_is_not_a_hole(tmp_path):
+    """用户听到的「中断」：Release Echo 写在小节线上、拍长半拍时，0.4.9 之前只抓开始前最后半拍——那半拍里没有鼓头
+    （鼓头在拍子上），于是回声是空的，整段成了一个洞。现在像一台一直开着的回声那样带着反馈预卷，开始那一拍把输入断掉：
+    前面那一拍的鼓头在回声里，每半拍一下、一路变小，响过声明的这一段；反馈不写时按时长算（一小节、半拍 = 0.75）；
+    结束那一拍回到原声。"""
+    x, _, rc = render(tmp_path, [clip("C1", "A1", 1)],
+                      [fx("F1", "release", "insert", ["C1"], "5.1", "6.1", 方式="Echo", 收尾="回原声", 拍长="1/2拍")], beats=32)
+    assert [m["st"] for m in rc if m["id"] == "F1"] == ["ok"]
+    p = half_beat_peaks(x, 15.0, 21.5)
+    assert p[0] == pytest.approx(0.4, rel=0.05) and p[1] < 0.004  # 之前：第 15 拍的鼓头，后半拍是空的
+    echo = p[2:9]  # 第 16–19 拍：每半拍一下
+    assert 0.2 < echo[0] < 0.4  # 第一遍和音乐差不多响（按最后一拍的音量归一：半拍一下，所以每一下小 3 dB 左右）
+    assert np.allclose(echo[1:] / echo[:-1], 0.75, rtol=0.06), echo  # 每一遍 × 0.75
+    assert echo[-1] > 0.04  # 第 19 拍还听得到：没有洞
+    assert p[10] == pytest.approx(0.8, rel=0.05) and p[12] == pytest.approx(0.4, rel=0.05)  # 第 20 拍起回原声
+
+
+def test_release_feedback_follows_the_declared_length():
+    """Release Echo 不写反馈：按「这一段里转几遍、转完小 20 dB」算，夹在 0.4–0.85；写了就用写的。"""
+    from djstudio.v5.livefx import release_feedback, release_lead
+
+    assert release_feedback(4.0, 0.5) == 0.75 and release_feedback(2.0, 0.5) == 0.56 and release_feedback(4.0, 1.0) == 0.56
+    assert release_feedback(16.0, 0.25) == 0.85 and release_feedback(1.0, 1.0) == 0.4  # 两头夹住
+    c = compiled(project([clip("C1", "A1", 1)], tempo=[{"at": "1.1", "bpm": BPM}], fx=[
+        fx("F1", "release", "insert", ["C1"], "5.1", "6.1", 方式="Echo", 收尾="回原声", 拍长="1/2拍", 反馈=0.3)]))
+    unit = c.plan["buses"][0]["units"][0]
+    assert unit["p"]["feedback"] == 0.3
+    # 引擎要提前喂多久（从中间开始时静音预跑从这之前起）：Echo = 4 个周期（1–8 拍），回转 = 要倒着读回去的那一段，刹车不用
+    assert release_lead({"kind": "rel_echo", "p": {"beats": 0.5}}, 16.0, 20.0) == 2.0
+    assert release_lead({"kind": "rel_echo", "p": {"beats": 0.125}}, 16.0, 20.0) == 1.0
+    assert release_lead({"kind": "rel_echo", "p": {"beats": 4.0}}, 16.0, 20.0) == 8.0
+    assert release_lead({"kind": "spin", "p": {}}, 18.0, 20.0) == 2.25 and release_lead({"kind": "brake", "p": {}}, 18.0, 20.0) == 0.0
+
+
+def test_backspin_fills_its_whole_span(tmp_path):
+    """回转要倒着读回开始之前的声音。0.4.9 之前处理组只提前几个缓冲才开始录，倒到那之前就是静音——回转只响前一小半，
+    后面空着。现在提前把要倒放的那一段录下来：两拍的回转，后一拍里还有倒放出来的鼓头；结束那一拍回到原声。"""
+    x, _, rc = render(tmp_path, [clip("C1", "A1", 1)],
+                      [fx("F1", "release", "insert", ["C1"], "5.3", "6.1", 方式="回转", 收尾="回原声")], beats=32)
+    assert [m["st"] for m in rc if m["id"] == "F1"] == ["ok"]
+    quarter = [float(np.abs(x[int((18 + k / 4) * SPB):int((18 + (k + 1) / 4) * SPB)]).max()) for k in range(8)]
+    assert max(quarter[4:]) > 0.3, quarter  # 后一拍（第 19–20 拍）里有声音
+    assert sum(q > 0.3 for q in quarter) >= 3, quarter
+    p = half_beat_peaks(x, 20.0, 21.5)
+    assert p[0] == pytest.approx(0.8, rel=0.05) and p[2] == pytest.approx(0.4, rel=0.05)
+
+
 # ---------------------------------------------------------------- A16 Roll 和采样
 
 def test_roll_captures_on_the_beat_and_repeats_on_the_grid(tmp_path):

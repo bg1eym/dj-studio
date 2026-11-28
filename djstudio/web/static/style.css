@@ -413,6 +413,7 @@ canvas.ho-wave.l5-twave { height: 72px; }
 .l5-lamp { flex: none; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; border: 1px solid #2c323d; transition: opacity .2s linear; }
 .l5-lamp.on { background: rgb(224, 160, 44); border-color: rgb(224, 160, 44); box-shadow: 0 0 5px rgba(224, 160, 44, .8); }
 .l5-lamp.cut { border: 1px dotted #aab2c0; }
+.l5-tip-t { font: 700 12px var(--mono); color: #ffd98a; margin-bottom: 3px; white-space: nowrap; min-width: 15em; }
 .l5-fxkeys { flex: none; display: inline-flex; gap: 6px; margin-left: auto; }
 .l5-fxkey { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; line-height: 1; }
 .l5-fxkey i { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }

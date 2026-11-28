@@ -21,7 +21,7 @@ BEATS = [0.0, 100.0, 384.0, 400.5, 448.0, 600.0, 704.0, 730.0, 768.0, 960.0]
 
 SCRIPT = r"""
 import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide,
-  overlayFrac, elemLevel, filterPass, GRID_NOON, passThrough, cellLook, LAMP, gridY, fxCat, faderGate, FADER_GATE, timeTicks, sectionAt } from "./live5.js";
+  overlayFrac, elemLevel, filterPass, GRID_NOON, passThrough, cellLook, LAMP, gridY, fxCat, faderGate, FADER_GATE, timeTicks, sectionAt, pageSection, sectionLead } from "./live5.js";
 import { eqHours as v4Hours, faderPos } from "./live.js";
 import { overviewColumns, stackColumn } from "./wavedraw.js";
 const out = {};
@@ -140,6 +140,12 @@ out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // �
     h10: sec(10, "ho"), h400: sec(400, "ho"), h650: sec(650, "ho"), h720: sec(720, "ho"), h780: sec(780, "ho"), h900: sec(900, "ho"), hEnd: sec(5000, "ho") };
   const bare = sectionAt({ length: 640 }, 100, "scene");
   out.secBare = [bare.start, bare.end, bare.kind];
+  // 一页 = 这一段 + 前面带的几小节；快到下一段了提前翻
+  const ch2 = { length: 960, scenes: [{ no: 1, start: 0, end: 128 }, { no: 2, start: 128, end: 320 }, { no: 3, start: 320, end: 368 }, { no: 4, start: 368, end: 960 }], handovers: [] };
+  const pg = (b, m = "scene") => { const x = pageSection(ch2, b, m); return [x.start, x.end, x.lead]; };
+  out.lead = [sectionLead({ start: 0, end: 48 }), sectionLead({ start: 0, end: 96 }), sectionLead({ start: 0, end: 128 }), sectionLead({ start: 0, end: 384 }), sectionLead({ start: 0, end: 592 })];
+  out.page = { p0: pg(0), p50: pg(50), p95: pg(95.9), p96: pg(96), p127: pg(127), p128: pg(128), p300: pg(300), p304: pg(304), p319: pg(319), p330: pg(330),
+    p336: pg(336), p900: pg(900), neg: pg(-8) };
 }
 console.log(JSON.stringify(out));
 """
@@ -309,6 +315,19 @@ def test_eq_view_pages_by_scene_or_by_handover(out):
     assert s["h650"] == s["h720"] == [600, 760, "ho"]  # 交接 2、3 叠着：并成一段
     assert s["h780"] == [760, 800, "gap"] and s["h900"] == s["hEnd"] == [800, 960, "gap"]  # 零长度的交接只当分界
     assert out["secBare"] == [0, 640, "gap"]  # 没有场景也没有交接：整场一段（太长的由画面自己分页）
+
+
+def test_eq_view_turns_the_page_before_the_next_section_starts(out):
+    """EQ 图提前翻页（用户要的：新曲子进来之前画面已经换过去，交接在画面中间，不是走到最右边才跳）。
+    一页 = 游标所在的那一段，往前多带几小节（24 小节以下带 4 小节，96 小节以上带 16 小节，中间带 8 小节）；
+    游标走到「下一段开头前这么多小节」就换成下一段的页，所以翻页以后游标在最左边、下一段的开头在它右边。"""
+    assert out["lead"] == [16, 32, 32, 64, 64]  # 12、24、32、96、148 小节的段：带 4 / 8 / 8 / 16 / 16 小节（拍）
+    p = out["page"]
+    assert p["p0"] == p["neg"] == p["p50"] == [0, 128, 0]  # 第一段前面没有东西可带
+    assert p["p95"] == [0, 128, 0]  # 下一段（48 小节 → 带 8 小节 = 32 拍）在 128：到 96 拍才翻
+    assert p["p96"] == p["p127"] == p["p128"] == p["p300"] == [96, 320, 32]  # 提前 8 小节翻过去，页从游标这里开始，下一段的开头在第 128 拍
+    # 第 320–368 拍那一段只有 12 小节，后面紧跟 148 小节的一段（提前 16 小节 = 从第 304 拍起）：一步翻到长的那一页，短的整个带在里面
+    assert p["p304"] == p["p319"] == p["p330"] == p["p336"] == p["p900"] == [304, 960, 64]
 
 
 def test_time_ticks_of_the_whole_set(out):

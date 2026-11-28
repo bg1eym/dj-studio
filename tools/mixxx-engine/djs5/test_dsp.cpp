@@ -259,7 +259,7 @@ double sineGainDb(int sr, double hz, int frames, int settle, F&& proc) {
 
 void testConstants() {
     const std::string p = "constants.";
-    check(p + "kDspVersion", kDspVersion, "==", 1);
+    check(p + "kDspVersion", kDspVersion, "==", 2);
     check(p + "kXfadeMs", kXfadeMs, "==", kExpXfadeMs);
     check(p + "kGateEdgeMs", kGateEdgeMs, "==", kExpGateEdgeMs);
     check(p + "kParamSmoothMs", kParamSmoothMs, "==", kExpParamSmoothMs);
@@ -280,6 +280,9 @@ void testConstants() {
     check(p + "kSpiralMaxFeedback", kSpiralMaxFeedback, "==", static_cast<double>(0.98f));
     check(p + "kSpinMaxSpeed", kSpinMaxSpeed, "==", kExpSpinMaxSpeed);
     check(p + "kReleaseFadePart", kReleaseFadePart, "==", kExpReleaseFadePart);
+    check(p + "kLimitCeiling", kLimitCeiling, "==", static_cast<double>(0.985f));
+    check(p + "kLimitHoldMs", kLimitHoldMs, "==", 10.0);
+    check(p + "kLimitReleaseMs", kLimitReleaseMs, "==", 150.0);
     check(p + "Roll.kMaxSeconds", Roll::kMaxSeconds, "==", 4);
     check(p + "BrakeSpin.kSeconds", BrakeSpin::kSeconds, "==", 4);
     check(p + "Sampler.kVoices", Sampler::kVoices, "==", 4);
@@ -2394,6 +2397,75 @@ void testSampler() {
     }
 }
 
+// 主输出的限幅器：不超的时候逐位直通；超了当场压住（输出绝不超过上限）、保持、慢慢放开；放开以后又是逐位直通
+void testLimiter() {
+    const std::string p = "limiter.";
+    const int sr = 44100;
+    const int n = sr * 3;
+    {   // 小电平：一个采样都不动
+        MasterLimiter lim;
+        lim.init(sr);
+        Buf x = sine(n, 100.0, 0.9, sr);
+        const Buf ref = x;
+        float low = 1.0f;
+        for (int pos = 0; pos + 512 <= n; pos += 512) {
+            low = std::min(low, lim.process(&x[static_cast<size_t>(pos) * 2], 512));
+        }
+        double diff = 0.0;
+        for (size_t i = 0; i < x.size(); ++i) {
+            diff = std::max(diff, static_cast<double>(std::fabs(x[i] - ref[i])));
+        }
+        check(p + "below_ceiling_bit_exact", diff, "==", 0.0);
+        check(p + "below_ceiling_gain", low, "==", 1.0);
+    }
+    {   // 前 0.5 秒 0.5 倍、中间 0.5 秒 2 倍（+6 dB 过头）、后 2 秒回到 0.5 倍
+        MasterLimiter lim;
+        lim.init(sr);
+        Buf x = sine(n, 100.0, 1.0, sr);
+        for (int i = 0; i < n; ++i) {
+            const float g = (i >= sr / 2 && i < sr) ? 2.0f : 0.5f;
+            x[static_cast<size_t>(i) * 2] *= g;
+            x[static_cast<size_t>(i) * 2 + 1] *= g;
+        }
+        const Buf ref = x;
+        for (int pos = 0; pos + 512 <= n; pos += 512) {
+            lim.process(&x[static_cast<size_t>(pos) * 2], 512);
+        }
+        double peak = 0.0, early = 0.0, late = 0.0;
+        for (int i = 0; i < n - 512; ++i) {
+            const double v = std::fabs(x[static_cast<size_t>(i) * 2]);
+            peak = std::max(peak, v);
+            if (i < sr / 2) {
+                early = std::max(early, static_cast<double>(std::fabs(x[static_cast<size_t>(i) * 2] - ref[static_cast<size_t>(i) * 2])));
+            }
+            if (i > sr + sr * 5 / 4) { // 不超以后 1.25 秒（保持 10 ms + 回到 0.999 要 6.2 个时间常数 = 0.94 秒）：又是逐位直通
+                late = std::max(late, static_cast<double>(std::fabs(x[static_cast<size_t>(i) * 2] - ref[static_cast<size_t>(i) * 2])));
+            }
+        }
+        check(p + "never_over_ceiling", peak, "<=", static_cast<double>(kLimitCeiling) + 1e-6);
+        check(p + "untouched_before", early, "==", 0.0);
+        check(p + "bit_exact_after_release", late, "==", 0.0);
+        // 压着的时候不是每个周期都削：进入过头的那一段 50 ms 以后，波形就是原来的正弦整体乘一个数（和理想的 0.4925 倍比）
+        double worst = 0.0;
+        const double g = kLimitCeiling / 2.0;
+        for (int i = sr / 2 + sr / 20; i < sr - 8; ++i) {
+            worst = std::max(worst, static_cast<double>(std::fabs(x[static_cast<size_t>(i) * 2] - ref[static_cast<size_t>(i) * 2] * g)));
+        }
+        check(p + "steady_state_is_a_clean_gain", worst, "<", 0.02);
+    }
+    {
+        MasterLimiter lim;
+        lim.init(sr);
+        Buf x = sine(sr, 60.0, 1.4, sr);
+        const double ns = nsPerFrame(sr - 512, [&]() {
+            for (int pos = 0; pos + 512 <= sr - 512; pos += 512) {
+                lim.process(&x[static_cast<size_t>(pos) * 2], 512);
+            }
+        });
+        cpuInfo("MasterLimiter", ns, sr);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -2414,6 +2486,7 @@ int main() {
     testMod<Phaser>("phaser", std::sqrt(200.0 * 4000.0), 20.0, 0.5 + 0.5 / (1.0 - 0.9));
     testBrakeSpin();
     testSampler();
+    testLimiter();
     std::printf("SUMMARY checks=%d failed=%d\n", g_checks, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
