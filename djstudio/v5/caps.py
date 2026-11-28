@@ -15,7 +15,7 @@ from typing import Any
 # 发送效果（各自的实例）是第 1 版；现场效果（处理组里的件、采样）= DSP 版本 × 100 + 组的版本（dsp.hpp 的 kDspVersion、
 # bus.hpp 的 kBusVersion）：算法、组里的顺序、时间常数哪个变了都要加，存下来的谱按版本提示「声音可能不一样」。
 LIVE_FX = ("trans", "roll", "filter", "flanger", "phaser", "spiral", "insert_echo", "noise", "rel_echo", "brake", "spin", "sample")
-FX_VERSIONS: dict[str, int] = {"delay": 1, "echo": 1, "reverb": 1, **{k: 101 for k in LIVE_FX}}
+FX_VERSIONS: dict[str, int] = {"delay": 1, "echo": 1, "reverb": 1, **{k: 202 for k in LIVE_FX}}
 
 
 @dataclass(frozen=True)

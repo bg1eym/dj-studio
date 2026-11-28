@@ -27,7 +27,7 @@
 
 namespace djs5 {
 
-constexpr int kDspVersion = 1;
+constexpr int kDspVersion = 2; // 2：主输出的限幅器（MasterLimiter）
 
 // ---- 版本化的固定参数 ----
 constexpr double kXfadeMs = 2.0;       // 交叉淡化：Roll 的回绕 / 改长度 / 松开，BrakeSpin 的恢复，Sampler 的重触发 / 抢占 / 全停
@@ -58,6 +58,9 @@ constexpr double kSvfMinQ = 0.3;
 constexpr double kSvfMaxQ = 40.0;
 constexpr double kSpinMaxSpeed = 3.0;    // 回转：倒放最快到 3 倍速
 constexpr double kReleaseFadePart = 0.2; // 刹车 / 回转：最后这一段（占时长的比例，最少 kXfadeMs）淡出
+constexpr float kLimitCeiling = 0.985f;  // 主输出限幅器的上限（−0.13 dBFS）
+constexpr double kLimitHoldMs = 10.0;    // 压下去以后先保持这么久
+constexpr double kLimitReleaseMs = 150.0; // 再用这个时间常数回到 1
 
 namespace dspd { // 内部小工具
 
@@ -1399,6 +1402,61 @@ class BrakeSpin {
     int m_resume = -1; // ≥ 0：正在淡回现场，已经走了这么多帧
     Cmd m_cmd[kMaxCmds];
     int m_nCmd = 0;
+};
+
+// 主输出的限幅器。两首歌叠着放、再加上回声 / Spiral / 采样这类「往上加」的效果，主输出会超过满刻度；
+// 不管它，声卡和录音就把超出的部分削平（硬削波，听起来发破）。这里在最后一级把它压住：
+// - 没有延迟（不往前看）：超过上限的那个采样当场把增益压到刚好不超，所以输出绝不超过 kLimitCeiling；
+// - 压下去以后保持 kLimitHoldMs，再按 kLimitReleaseMs 回到 1——同一段响的声音只在第一个峰上被「顶」一下，
+//   后面是整体往下让，不是每个峰都削；
+// - 没超的时候增益恒为 1，输出和输入逐位相同（小电平的测试、单放一首不到满刻度的歌都不受影响）。
+// 这不是用来做响度的：谱排得太满（一直在限幅）还是该把推子 / EQ 让出来，状态里会报压了多少。
+class MasterLimiter {
+  public:
+    void init(int sampleRate) {
+        m_hold = std::max(1, dspd::msToFrames(kLimitHoldMs, sampleRate));
+        m_rel = static_cast<float>(1.0 - std::exp(-1000.0 / (kLimitReleaseMs * sampleRate)));
+        reset();
+    }
+    void reset() {
+        m_g = 1.0f;
+        m_left = 0;
+        m_min = 1.0f;
+    }
+    // 交错立体声，原地处理。返回这一块里最低的增益（1 = 没动）
+    float process(float* x, int frames) {
+        float low = 1.0f;
+        for (int i = 0; i < frames; ++i) {
+            const float pk = std::max(std::fabs(x[2 * i]), std::fabs(x[2 * i + 1]));
+            const float need = pk > kLimitCeiling ? kLimitCeiling / pk : 1.0f;
+            if (need < m_g) {
+                m_g = need;
+                m_left = m_hold;
+            } else if (m_left > 0) {
+                --m_left;
+            } else if (m_g < 1.0f) {
+                m_g += (1.0f - m_g) * m_rel;
+                if (m_g > 0.999f) {
+                    m_g = 1.0f; // 差不到 0.01 dB 就直接回到 1：之后逐位直通
+                }
+            }
+            if (m_g < 1.0f) {
+                x[2 * i] *= m_g;
+                x[2 * i + 1] *= m_g;
+                low = std::min(low, m_g);
+            }
+        }
+        m_min = low;
+        return low;
+    }
+    float gain() const { return m_g; }
+
+  private:
+    int m_hold = 441;
+    float m_rel = 0.0f;
+    float m_g = 1.0f;
+    int m_left = 0;
+    float m_min = 1.0f;
 };
 
 // 采样器：kSlots 个采样位，同时最多 kVoices 个声音。process() 把声音加进 out。

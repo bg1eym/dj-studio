@@ -21,6 +21,10 @@
 - 谱法以 [docs/SCORE_SPEC_V5.md](docs/SCORE_SPEC_V5.md) 为准，示例 docs/score_v5_example.md 必须零错误零提示地编过。
   规范里第 8 节的效果表由 `tests/test_v5_score.py` 和代码（`livefx.PARAMS`、`compile.FX_PARAMS`）比对：改一边要同时改另一边。
   第 8.7 节「常用套路」的每一行都抄自 docs/score_v5_fx_example.md（也要零错误零提示，测试逐行比对）：改套路先改那份谱。
+- **效果对不对不能只看回执**（0.4.9 回执全 ok，实际上有的听不出来、有的留洞、有的削波）：改了效果的 DSP、处理组、套路的参数，
+  有声音引擎时跑 `tests/test_v5_fx_audible.py`（合成的 techno 上带 / 不带效果各录一遍：听得出来、不盖过音乐、没有削波、接进接出干净），
+  数字记进 V5_G0.md「效果听不听得出来」。素材要 44.1 kHz：`djstudio/synth.py` 的 `write_wav` 固定写 22050 Hz 的头，别拿它写别的采样率。
+  主输出最后有限幅器（声音引擎默认开，模拟器默认关：测试里量的是没压过的电平）。
 - 元素表（SCORE_SPEC_V5.md 第 14 节：每份素材的各个声部在原曲哪几小节有）由 `djstudio/v5/elements.py` 读，只给演出画面画元素格子图用，不影响声音；
   规范里的声部表和 `elements.ELEMENTS` 由 `tests/test_v5_elements.py` 比对。程序不分析声部：这张表由谱提供（运行时零 AI）。
 - 演出画面（`live5.js`）上用户定过的几件事，别改回去：EQ 那张图只显示正在放的那一页，鼠标不能拖、不能滚（点一下跳转可以），

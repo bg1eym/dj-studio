@@ -1319,6 +1319,9 @@ class Engine : public djs5::Backend {
         m_out5.assign(kBufferSamples, 0.0f);
         m_e5 = std::make_unique<djs5::Engine5>(*this, kSampleRate, kBufferFrames,
                 [](int sr) { return std::unique_ptr<djs5::Reverb>(new PlateReverb(sr)); });
+        // 主输出的限幅器默认开（两首歌叠着、再加回声这类效果会超过满刻度：不压就是硬削波）。
+        // DJSTUDIO_NO_LIMITER=1 关掉（量没压过的电平时用）
+        m_e5->setLimiter(qEnvironmentVariableIntValue("DJSTUDIO_NO_LIMITER") == 0);
         const QString fake = qEnvironmentVariable("DJSTUDIO_AUDIO_FAKE");
         // 出声时在声卡回调里处理；全场暂停 / 静音预运行 / 冻结时这边放静音，不碰引擎
         const auto render = [this](float* out) {

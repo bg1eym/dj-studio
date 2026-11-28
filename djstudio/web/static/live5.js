@@ -21,8 +21,8 @@ const DECK_HEX = { 1: "#3d8bea", 2: "#dc7526", 3: "#27ae60", 4: "#9c7cec" };
 const ZOOMS = [8, 16, 32, "scene", "ho"];
 const ZOOM_ZH = { 8: "8 小节", 16: "16 小节", 32: "32 小节", scene: "整个场景", ho: "整个交接" };
 const ZOOM_TIP = {
-  scene: "一页 = 游标所在的那个场景，整个压进一页（谱里场景怎么切，这里就怎么翻页；没写场景的那一段按交接分）",
-  ho: "一页 = 一次主要的交接，从下一首进来到上一首走完，整个压进一页（不管谱里场景怎么切）；两次交接之间的那一段自己一页",
+  scene: "一页 = 游标所在的那个场景，整个压进一页，前面带着上一个场景的最后几小节；下一个场景开始前几小节就提前翻过去（谱里场景怎么切，这里就怎么翻页；没写场景的那一段按交接分）",
+  ho: "一页 = 一次主要的交接，从下一首进来到上一首走完，整个压进一页，前面带几小节；下一首进来之前几小节就提前翻过去（不管谱里场景怎么切）；两次交接之间的那一段自己一页",
 };
 // 「整个场景」「整个交接」是把一整段压进一页：一小节最窄压到这么宽（1440 宽的屏放得下 160 小节左右）；再长才分页。
 // 用户要的：交接要一眼看全，小节压一压没关系
@@ -329,6 +329,27 @@ export function sectionAt(chart, beat, mode = "scene") {
   return { start: a, end: Math.max(e, a + BEATS), kind: "gap" };
 }
 
+// 「整个场景」「整个交接」这两档里一页显示什么：游标所在的那一段，往前多带 lead 拍（上一段的最后几小节）。
+// 翻页是提前的：游标走到「下一段开头前 lead 拍」，页面就换成下一段的——新曲子进来之前画面已经换好，
+// 游标从左边走进交接，而不是走到最右边、新曲子进来的那一拍才突然跳（用户要的：给进曲留出空间，交接在画面中间）。
+// lead 跟着那一段的长短走：24 小节以下 4 小节，96 小节以上 16 小节，中间 8 小节。
+// 返回 { start, end, lead, sec }：start 可能在这一段开头之前（最早到第 0 拍）
+export function sectionLead(sec) {
+  const bars = (sec.end - sec.start) / BEATS;
+  return (bars >= 96 ? 16 : bars >= 24 ? 8 : 4) * BEATS;
+}
+export function pageSection(chart, beat, mode = "scene") {
+  const len = chart.length || 0;
+  let sec = sectionAt(chart, beat, mode);
+  for (let i = 0; i < 8 && sec.end < len - 1e-6; i++) { // 很短的一段后面紧跟着长的一段：一步翻到长的那一页，不连翻两次
+    const nx = sectionAt(chart, sec.end + 1e-3, mode);
+    if (!(nx.start >= sec.end - 1e-6 && beat >= nx.start - sectionLead(nx))) break;
+    sec = nx;
+  }
+  const lead = sectionLead(sec);
+  return { start: Math.max(0, sec.start - lead), end: sec.end, lead: Math.min(lead, sec.start), sec };
+}
+
 // 曲线一页一页地看：第 beat 拍落在哪一页（返回这一页左边是第几拍）。一页 span 拍，游标只在前 (1 - PAGE_AHEAD) 里走，
 // 走到最后那一截就翻页，新的一页从游标这里开始——所以一页里的线不动，后面至少 PAGE_AHEAD 页要做的事一直看得到。
 // base = 从哪一拍开始数页（全场 = 0；按场景看而场景比一页长 = 场景的开头）
@@ -588,7 +609,7 @@ export class Live5View {
     const strips = [];
     for (const d of this.decks) strips.push(this._buildChannel(d));
     this.mvu = new Meter();
-    this.overLamp = el("span", { class: "l5-over", title: "主输出过载（削波）" }, "过载");
+    this.overLamp = el("span", { class: "l5-over", title: "主输出超过了满刻度（几首叠着放、再加上回声这类效果）。声音引擎最后有限幅器压着，不会削破；一直亮着说明这一段排得太满，把推子 / EQ 让一让" }, "过载");
     this.overCount = el("div", { class: "l5-overn off" });
     this.masterDb = el("div", { class: "kv" }, "–");
     const master = el("div", { class: "master" }, el("div", { class: "ch-name" }, "MASTER"), el("div", { class: "kl" }, "主输出 dBFS"), this.overLamp, this.overCount,
@@ -803,9 +824,9 @@ export class Live5View {
     if (this.chart) { this._relayout(); this._kick(true); }
   }
 
-  // 「整个场景」「整个交接」：游标所在的那一段（别的档 = null）
+  // 「整个场景」「整个交接」：这一页显示的那一段（游标所在的那一段 + 前面带的几小节；快到下一段了就是下一段的页）。别的档 = null
   _section(beat) {
-    return this.zoom === "scene" || this.zoom === "ho" ? sectionAt(this.chart, beat, this.zoom) : null;
+    return this.zoom === "scene" || this.zoom === "ho" ? pageSection(this.chart, beat, this.zoom) : null;
   }
 
   _span() { // 一屏几拍
@@ -1110,8 +1131,21 @@ export class Live5View {
     g.fillRect(nx, ty + 1, nw, 14);
     g.fillStyle = "#0b0d11";
     g.fillText(now, nx + 4, ty + 12);
-    const hv = this.arrHover; // 悬停：一条细线；鼠标底下那一段是什么写在旁边的说明里（_showArrTip）
-    if (hv && this._arrBeatAt(hv.x) !== null) { g.fillStyle = "rgba(255,255,255,.75)"; g.fillRect(Math.round(hv.x), 0, 1, H); }
+    const hv = this.arrHover; // 悬停：一条细线，底下那一行写鼠标这里是 set 的几分几秒；这一段是什么写在旁边的说明里（_showArrTip）
+    const hb = hv ? this._arrBeatAt(hv.x) : null;
+    if (hb !== null) {
+      const hx = Math.round(hv.x), ht = clock(secAt(ch.tempo, hb));
+      g.fillStyle = "rgba(255,255,255,.75)";
+      g.fillRect(hx, 0, 1, H);
+      g.font = "bold 11px ui-monospace, Menlo, monospace";
+      const hw = g.measureText(ht).width + 8, hx0 = hx + 4 + hw > w ? hx - 3 - hw : hx + 4;
+      g.fillStyle = "#2b3550";
+      g.fillRect(hx0, ty + 1, hw, 14);
+      g.strokeStyle = "rgba(255,255,255,.55)"; g.lineWidth = 1;
+      g.strokeRect(hx0 + 0.5, ty + 1.5, hw - 1, 13);
+      g.fillStyle = "#e8ecf3";
+      g.fillText(ht, hx0 + 4, ty + 12);
+    }
   }
 
   // 安排图上鼠标底下是什么：场景 / 交接 / 哪台 Deck 的哪个片段（那台 Deck 这里没有片段 = deck；别的 = none）
@@ -1135,8 +1169,11 @@ export class Live5View {
     const key = `${t.key}:${Math.floor(t.beat / BEATS)}`;
     if (key !== this._atipKey) {
       this._atipKey = key;
-      T.replaceChildren(...this._arrTipLines(t).filter(Boolean));
+      this._atipTime = el("div", { class: "l5-tip-t" });
+      T.replaceChildren(this._atipTime, ...this._arrTipLines(t).filter(Boolean));
     }
+    // 第一行：鼠标这里是 set 的什么时间、全场第几小节第几拍（跟着鼠标变）
+    setText(this._atipTime, `set 时间 ${clock(secAt(this.chart.tempo, t.beat))} · 全场 ${posText(t.beat)}`);
     T.classList.remove("hidden");
     const w = this.arr.clientWidth, tw = T.offsetWidth;
     T.style.left = `${Math.max(2, Math.min(w - tw - 2, hv.x + 14))}px`;

@@ -37,12 +37,17 @@
 
 namespace djs5 {
 
-constexpr int kBusVersion = 1;
+constexpr int kBusVersion = 2; // 2：Release Echo 带着反馈预卷、第一遍按音乐的音量归一；回转提前把要倒放的那一段录下来
 constexpr int kArmBuffers = 8;         // 提前这么多个缓冲开始往组里喂（延迟线 / 分频器里先要有历史）
 constexpr int kWarmBuffers = 4;        // 喂够这么多个缓冲才能把这一路换到组里
 constexpr double kLiveBuffers = 2.0;   // 第一件开始前 / 最后一件收完后这么多个缓冲，这一路走组里
 constexpr double kUnitXfadeMs = 2.0;   // Filter 的干 / 湿、Release 的干声收 / 放
 constexpr double kTransMaxStepMs = 0.75; // Trans 的门一个采样最多走 1 / 这么多毫秒（正常的沿比这慢，只挡窗口边上的跳变）
+// Release Echo：开始之前先像一台一直开着的回声那样带着反馈转这么多个周期（至少 1 拍、最多 kRelEchoPreMaxBeats 拍）。
+// 只抓最后一个周期的话，写在拍线上的 Release 抓到的是上一拍的后半（kick 早衰减完了）：回声一开始就比音乐低十几 dB，
+// 半小节就听不见，剩下的时间是个洞（0.4.9 之前就是这样，用户听到的「中断」）。
+constexpr double kRelEchoPrePeriods = 4.0;
+constexpr double kRelEchoPreMaxBeats = 8.0;
 
 class BusRt {
   public:
@@ -239,6 +244,9 @@ class BusRt {
         std::unique_ptr<Noise> nz;
         std::unique_ptr<BrakeSpin> bs;
         double gain = 1.0;   // Trans：门现在的增益
+        double eIn = 0.0, eLine = 0.0; // Release Echo：开始前最后一拍音乐的能量 / 最后一个周期写进延迟线的能量
+        long nIn = 0, nLine = 0;
+        float rel = 1.0f;    // Release Echo：回声的增益（第一遍和开始前的音乐一样响，只往下调）
         float mix = 0.0f;    // Filter / Echo：干湿、送出的平滑
         float dry = 1.0f;    // Release：干声（这一组本来的输出）的增益
         bool armed = false;  // Roll / 刹车 / 回转：这一轮的命令排过了
@@ -246,9 +254,17 @@ class BusRt {
         int stage = 0;       // 刹车 / 回转：0 没到，1 在放，2 放完
     };
 
-    // 开始之前要先喂多久（拍）：Release Echo 要把开始前最后一个回声周期写进延迟线
+    // 开始之前要先喂多久（拍）。Release Echo：带着反馈预卷的那几个周期；回转：要倒着读回去的那一段
+    // （速度从 1 线性走到 −kSpinMaxSpeed，时长 T：最远读到开始之前 (kSpinMaxSpeed − 1) / 2 × T）——
+    // 不提前录，倒到「开始喂的那一刻」之前就是静音（0.4.9 之前回转只响前一小半）。
     static double unitLead(const UnitSpec& s) {
-        return s.kind == U_REL_ECHO ? s.param("beats", 0.5) : 0.0;
+        if (s.kind == U_REL_ECHO) {
+            return std::min(kRelEchoPreMaxBeats, std::max(1.0, kRelEchoPrePeriods * s.param("beats", 0.5)));
+        }
+        if (s.kind == U_SPIN) {
+            return 0.5 * (kSpinMaxSpeed - 1.0) * (s.end - s.start) + 0.25;
+        }
+        return 0.0;
     }
     static double unitEnd(const UnitSpec& s) {
         if (isRelease(s.kind)) {
@@ -290,6 +306,9 @@ class BusRt {
             u.bs->reset();
         }
         u.gain = 1.0;
+        u.eIn = u.eLine = 0.0;
+        u.nIn = u.nLine = 0;
+        u.rel = 1.0f;
         u.mix = 0.0f;
         u.dry = 1.0f;
         u.armed = u.begun = false;
@@ -599,24 +618,29 @@ class BusRt {
         const int N = m_n;
         const double g1 = g0 + N * dg;
         const double beats = s.param("beats", 0.5);
-        const double pre = beats + 4.0 * N * std::max(dg, 0.0); // 提前一个回声周期多一点开始往延迟线里写（见 unitLead）
+        const double pre = unitLead(s) + 4.0 * N * std::max(dg, 0.0); // 提前这么久开始往延迟线里写（见 unitLead）
         if (!(g1 > s.start - pre && g0 < unitEnd(s) + 2.0 * N * std::max(dg, 0.0))) {
             idleUnit(u, g0);
             return;
         }
         const double lead = kUnitXfadeMs / 1000.0 * bpm / 60.0;
+        const float fb = static_cast<float>(s.param("feedback", 0.6));
         if (!u.begun) {
             u.dl->reset(1.0f);
+            u.dl->snapFeedback(fb); // 预卷从第一帧起就是满反馈
             u.dry = dryTarget(s, g0, lead);
             u.stage = 0;
+            u.eIn = u.eLine = 0.0;
+            u.nIn = u.nLine = 0;
+            u.rel = 1.0f;
             u.begun = true;
         }
         float* t1 = m_t1.data();
         float* t2 = m_t2.data();
         const int frames = static_cast<int>(beats * 60.0 / bpm * m_sr);
-        const float fb = static_cast<float>(s.param("feedback", 0.6));
         const int ka = frameOf(s.start, g0, dg);
-        // 开始之前：只往延迟线里写（反馈 0）；开始那一帧起：不再写新的，延迟线里最后那一个周期带着反馈转下去
+        // 开始之前：像一台一直开着的回声那样带着反馈往延迟线里写（出来的声音不用）；
+        // 开始那一帧起：不再写新的，延迟线里的东西带着反馈转下去
         const int cut[3] = {0, ka, N};
         for (int seg = 0; seg < 2; ++seg) {
             const int a = cut[seg], b = cut[seg + 1];
@@ -628,12 +652,31 @@ class BusRt {
                 std::memcpy(t1 + 2 * a, x + 2 * a, static_cast<size_t>(b - a) * 2 * sizeof(float));
             } else {
                 std::fill(t1 + 2 * a, t1 + 2 * b, 0.0f);
-                if (u.stage == 0) { // 开始那一帧：反馈直接到位（从 0 爬上去会丢掉那一帧上的鼓头）
-                    u.dl->snapFeedback(fb);
+                if (u.stage == 0) {
+                    // 开始那一帧：定回声的音量——第一遍（= 最后一个周期写进延迟线的东西）和开始前最后一拍的音乐一样响。
+                    // 只往下调：周期正好是一拍时每一遍的 kick 叠在一起（1 / (1 − 反馈) 倍），不调会比音乐响一大截
+                    if (u.nIn > 0 && u.nLine > 0 && u.eLine > 1e-12) {
+                        const double want = u.eIn / static_cast<double>(u.nIn), have = u.eLine / static_cast<double>(u.nLine);
+                        u.rel = static_cast<float>(std::min(1.0, std::sqrt(want / have)));
+                    }
                     u.stage = 1;
                 }
             }
-            u.dl->process(t1 + 2 * a, t2 + 2 * a, b - a, frames, 1.0f, before ? 0.0f : fb, 0.0f);
+            u.dl->process(t1 + 2 * a, t2 + 2 * a, b - a, frames, 1.0f, fb, 0.0f);
+            if (before) { // 量两样：最后一拍的音乐、最后一个周期写进延迟线的（输入 + 反馈 × 延迟线出来的）
+                for (int n = a; n < b; ++n) {
+                    const double g = g0 + n * dg;
+                    if (g >= s.start - 1.0) {
+                        u.eIn += static_cast<double>(t1[2 * n]) * t1[2 * n] + static_cast<double>(t1[2 * n + 1]) * t1[2 * n + 1];
+                        ++u.nIn;
+                    }
+                    if (g >= s.start - beats) {
+                        const double l = t1[2 * n] + fb * t2[2 * n], r = t1[2 * n + 1] + fb * t2[2 * n + 1];
+                        u.eLine += l * l + r * r;
+                        ++u.nLine;
+                    }
+                }
+            }
         }
         const double span = std::max(s.end - s.start, 1e-6);
         for (int n = 0; n < N; ++n) {
@@ -642,7 +685,7 @@ class BusRt {
             float w = 0.0f;
             if (g >= s.start && g < s.end) { // 回声只在声明的时长里响，最后 1/4 淡掉（尾音有上限）
                 const double left = (s.end - g) / span;
-                w = left < 0.25 ? static_cast<float>(left / 0.25) : 1.0f;
+                w = u.rel * (left < 0.25 ? static_cast<float>(left / 0.25) : 1.0f);
             }
             x[2 * n] = x[2 * n] * u.dry + t2[2 * n] * w;
             x[2 * n + 1] = x[2 * n + 1] * u.dry + t2[2 * n + 1] * w;
@@ -653,7 +696,7 @@ class BusRt {
         const int N = m_n;
         const double g1 = g0 + N * dg;
         const double near = 2.0 * N * std::max(dg, 0.0);
-        if (!(g1 > s.start - near && g0 < unitEnd(s) + near)) {
+        if (!(g1 > s.start - unitLead(s) - near && g0 < unitEnd(s) + near)) { // 回转：提前把要倒放的那一段录进来
             idleUnit(u, g0);
             return;
         }

@@ -86,6 +86,7 @@ class Engine5 {
         m_busOut.assign(sz, 0.0f);
         m_zero.assign(sz, 0.0f);
         m_sampler.init(m_sr);
+        m_limiter.init(m_sr);
         BandSplit3 probe;
         probe.init(m_sr);
         m_splitLatency = probe.latency();
@@ -103,6 +104,12 @@ class Engine5 {
     bool prerunning() const { return m_state == Prerun; }
     long long frame() const { return m_frame; }
     int lateSteps() const { return m_lateSteps; }
+    // 主输出的限幅器（dsp.hpp MasterLimiter）：声音引擎默认开；模拟器默认关（测试里量的是没压过的电平），要测它时用 v5.limiter 打开
+    void setLimiter(bool on) {
+        std::lock_guard<std::recursive_mutex> lock(m_gate);
+        m_limit = on;
+        m_limiter.reset();
+    }
 
     // ------------------------------------------------------------ 命令（主线程）
 
@@ -134,6 +141,10 @@ class Engine5 {
                 }
             } else if (cmd == "v5.stop") {
                 stop(c.has("fade_ms") ? c["fade_ms"].num() : 150.0);
+            } else if (cmd == "v5.limiter") {
+                m_limit = c["on"].num(1.0) != 0.0;
+                m_limiter.reset();
+                r.set("on", m_limit);
             } else if (cmd == "v5.takeover") {
                 takeover(static_cast<int>(c["deck"].num()), c["param"].str(""), c["value"].num());
             } else if (cmd == "v5.return") {
@@ -290,6 +301,8 @@ class Engine5 {
         Json master = Json::object();
         master.set("level", dbfs(m_masterMs)).set("peak", m_masterPeak > 1e-5 ? 20.0 * std::log10(m_masterPeak) : -100.0);
         master.set("over", m_over).set("over_now", m_overHold > 0);
+        // 限幅器：开没开、最近压了多少 dB（0 = 没在压）。over 数的是进限幅器之前超过满刻度的采样——开着限幅器时它们被压住了，没有削波
+        master.set("limiter", m_limit).set("limit_db", m_limitLow < 0.9999 ? 20.0 * std::log10(m_limitLow) : 0.0);
         s.set("master", master);
         return s;
     }
@@ -580,6 +593,13 @@ class Engine5 {
         }
         m_masterMs += (sum / (2.0 * N) - m_masterMs) * a300;
         m_masterPeak = std::max(static_cast<double>(peak), m_masterPeak * std::pow(10.0, -static_cast<double>(N) / m_sr));
+        // 最后一级：限幅（电平表、过载计数量的是限幅之前的——看得出这套谱排得满不满）
+        if (m_limit) {
+            const double low = m_limiter.process(out, N);
+            m_limitLow = std::min(low, m_limitLow + (1.0 - m_limitLow) * a300);
+        } else {
+            m_limitLow = 1.0;
+        }
         if (over > 0) {
             m_over += over;
             m_overHold = static_cast<int>(1.5 * m_sr / N); // 过载指示亮 1.5 秒
@@ -816,6 +836,8 @@ class Engine5 {
         m_lateSteps = 0;
         m_over = 0;
         m_overHold = 0;
+        m_limiter.reset();
+        m_limitLow = 1.0;
         m_state = Preparing;
         m_stepped = false;
         event("preparing");
@@ -1313,6 +1335,9 @@ class Engine5 {
     double m_masterMs = 0.0, m_masterPeak = 0.0;
     long long m_over = 0;
     int m_overHold = 0;
+    MasterLimiter m_limiter;
+    bool m_limit = false;
+    double m_limitLow = 1.0; // 最近（约 300 ms）限幅器压到的最低增益
     int m_lateSteps = 0;
     long long m_seq = 0;
     std::vector<std::string> m_out;

@@ -23,6 +23,7 @@
 [docs/SCORE_SPEC_V5.md](docs/SCORE_SPEC_V5.md)《曲谱规范 v5》，示例 [docs/score_v5_example.md](docs/score_v5_example.md)；
 效果器和 RMX-1000 那几手（Trans、Roll、Release、HPF Echo、Noise、Spiral、打击垫采样）怎么写：规范第 8.6 / 8.7 节和
 [docs/score_v5_fx_example.md](docs/score_v5_fx_example.md)（一份编得过的小谱，整行抄走改位置）。
+主输出最后有一个限幅器：几首叠着放、再加上回声这类效果也不会削破（演出页的「过载」亮着 = 这一段排得太满）。
 
 - **素材和片段分开**，四台 Deck（D1–D4）、片段、旋钮、Loop、效果都写在同一条**全场小节轴**上；每个场景写清楚「保留什么、让谁接管、低频在哪一拍换」。
 - **任何时候都能动旋钮**（v4 只能在过渡里动）：参数表写在哪一拍都行；演出时在调音台上拖某一个旋钮 / 推子就是手动接管它，再点「下一拍 / 下一小节回谱」。

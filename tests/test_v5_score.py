@@ -178,7 +178,7 @@ def test_what_the_rmx_table_says_is_missing_is_an_error_not_a_silent_skip():
     assert issues("频率 400Hz → 8kHz", "频率 8kHz → 400Hz") == []  # 往下扫的噪声
     assert issues("模式 高通；截止 40Hz → 2kHz", "模式 低通；截止 16kHz → 300Hz") == []  # LPF Echo
     assert issues("方式 刹车；退场", "方式 回转；退场") == []  # Back Spin
-    assert issues("| snare | 80.1 | 81.1 | 重复 1/4拍；音量 0.5 |", "| hat | 80.1 | 81.1 | 重复 1/8拍；音量 0.5 |") == []  # 打击垫连打
+    assert issues("| snare | 80.1 | 81.1 | 重复 1/4拍；音量 0.8 |", "| hat | 80.1 | 81.1 | 重复 1/8拍；音量 0.5 |") == []  # 打击垫连打
     assert issues("| F11 | Roll |", "| F13 | Filter | 插入 | C2 | 133.1 | 141.1 | 模式 低通；截止 16kHz → 800Hz | 往下沉 |\n| F11 | Roll |") == []  # Reverb Down 的近似
 
 
