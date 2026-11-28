@@ -720,7 +720,7 @@ class _Parser:
         what = f"效果 {fid}"
         kind = FX_KIND.get(_key(r["类型"]))
         if not kind:
-            self.err(no, "fx", f"类型「{r['类型']}」不认识", what, "Delay / Echo / Reverb（发送）；Trans / Roll / Filter Echo / Spiral / Noise / "
+            self.err(no, "fx", f"类型「{r['类型']}」不认识", what, "Delay / Echo / Reverb（发送）；Trans / Roll / Filter / Filter Echo / Spiral / Noise / "
                      "Flanger / Phaser / 采样 / Release（现场效果）")
             return
         if any(f["id"] == fid for f in self.fx):

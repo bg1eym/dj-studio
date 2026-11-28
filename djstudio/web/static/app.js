@@ -525,7 +525,8 @@ async function renderHome(force = false) {
       h("div", {}, "四 Deck 编排：",
         h("a", { href: "/api/score/spec5.md", target: "_blank" }, "曲谱规范 v5"), " · ",
         h("a", { href: "/api/score/example5.md", target: "_blank" }, "示例谱"), " · ",
-        h("a", { href: "/api/score/example5.md?download=1" }, "下载示例谱"),
+        h("a", { href: "/api/score/example5.md?download=1" }, "下载示例谱"), " · ",
+        h("a", { href: "/api/score/fx5.md", target: "_blank", title: "效果器和 RMX-1000 那几手（Trans、Roll、Release、HPF Echo、Noise、Spiral、打击垫采样）怎么写：一份能编过的谱，整行抄走改位置" }, "效果套路示例"),
         "（谱和原曲放进一个文件夹，整个拖进来）"));
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
@@ -759,6 +760,7 @@ function renderReady5(el, r) {
     h("a", { href: `/api/v5/${r.set}/score.md?download=1`, title: "把这个项目写成一份 v5 的谱（.md）" }, "另存为 v5 的谱"),
     h("a", { href: "/api/score/spec5.md", target: "_blank" }, "曲谱规范 v5"),
     h("a", { href: "/api/score/example5.md", target: "_blank" }, "示例谱"),
+    h("a", { href: "/api/score/fx5.md", target: "_blank", title: "效果器和 RMX-1000 那几手怎么写：一份能编过的谱，整行抄走改位置" }, "效果套路"),
     h("span", { class: "grow" }),
     h("a", { href: "#home", onclick: (e) => { e.preventDefault(); S.homeNew = true; renderHome(true); } }, "＋ 新 set")));
 }

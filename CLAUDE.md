@@ -20,9 +20,11 @@
   docs/ENGINE5.md），Python 在 `djstudio/v5/`。v5 只在内置引擎里放。改 v5 不要动 v4 那条路的行为（`state` 这类 v4 命令仍然只报两台 Deck）。
 - 谱法以 [docs/SCORE_SPEC_V5.md](docs/SCORE_SPEC_V5.md) 为准，示例 docs/score_v5_example.md 必须零错误零提示地编过。
   规范里第 8 节的效果表由 `tests/test_v5_score.py` 和代码（`livefx.PARAMS`、`compile.FX_PARAMS`）比对：改一边要同时改另一边。
+  第 8.7 节「常用套路」的每一行都抄自 docs/score_v5_fx_example.md（也要零错误零提示，测试逐行比对）：改套路先改那份谱。
 - 元素表（SCORE_SPEC_V5.md 第 14 节：每份素材的各个声部在原曲哪几小节有）由 `djstudio/v5/elements.py` 读，只给演出画面画元素格子图用，不影响声音；
   规范里的声部表和 `elements.ELEMENTS` 由 `tests/test_v5_elements.py` 比对。程序不分析声部：这张表由谱提供（运行时零 AI）。
-- 演出画面（`live5.js`）上用户定过的几件事，别改回去：EQ 那张图只显示正在放的那一页，鼠标不能拖、不能滚（点一下跳转可以）；
+- 演出画面（`live5.js`）上用户定过的几件事，别改回去：EQ 那张图只显示正在放的那一页，鼠标不能拖、不能滚（点一下跳转可以），
+  一页 = 一个场景 / 一次交接，整段压进一页（用户要一眼看全交接，小节压窄没关系）；
   元素格子亮 = 实心（琥珀色，别用白 / 灰：和 HIGH、推子的线混），EQ 切掉的 = 麻点；安排图的色块上不写字（写不全），要大、看得清进度和交接。
 - 主线 / 工具、主要的交接由 `djstudio/v5/mainline.py` 按角色分（SCORE_SPEC_V5.md 第 13 节）：只给界面、hot cue、交接说明分类用，不影响声音。
 - v5 的 hot cue 不写在谱里，由 `djstudio/v5/hotcue.py` 按谱算（名字、颜色、取舍 = docs/SET_SPEC.md 第 7 节的那一套，点从片段来）；

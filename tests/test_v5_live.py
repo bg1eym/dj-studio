@@ -436,3 +436,26 @@ def test_live_effects_in_a_score_compile_and_write_back():
     assert not again.errors, [str(i) for i in again.errors]
     c2 = compiled(again.project)
     assert c2.plan["buses"] == c.plan["buses"] and c2.plan["hits"] == c.plan["hits"]
+
+
+def test_the_fx_recipe_example_plays_to_the_end():
+    """效果套路示例（docs/score_v5_fx_example.md，规范第 8.7 节的套路都出自它）在调度器里从头放到 done：
+    每一条回执都是 ok——没有晚到、跳过、失效的，十手现场效果各有回执。"""
+    from djstudio.grid import Grid
+    from djstudio.v5.compile import AssetInfo, compile_project
+
+    doc = Path(__file__).resolve().parents[1] / "docs" / "score_v5_fx_example.md"
+    p = score.parse(doc).project
+
+    def resolve(a):
+        return AssetInfo(a.id, Grid(a.bpm, a.bar1_s or 0.0, 0, (a.bars or 64) * 240 / a.bpm + (a.bar1_s or 0) + 2), title=a.title)
+
+    c = compile_project(p, resolve)
+    assert c.ok and not c.issues
+    with Run(c, speed=60) as r:
+        r.start()
+        r.wait_state("done", 120)
+        rc = r.rc()
+        assert rc and all(x["st"] == "ok" for x in rc), [(x["id"], x["st"], x.get("msg")) for x in rc if x["st"] != "ok"]
+        live = {x["id"].split(".")[0] for x in rc if x["id"].startswith("F")}
+        assert live == {"F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F11", "F12"}  # 发送效果（F1、F10）不单发回执
