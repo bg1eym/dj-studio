@@ -13,6 +13,7 @@ from djstudio.v5.writer import knob_write, write
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
 EXAMPLE = DOCS / "score_v5_example.md"
+FX_EXAMPLE = DOCS / "score_v5_fx_example.md"
 
 
 def resolve(a):
@@ -128,6 +129,57 @@ def test_example_parses_and_compiles_clean():
     # 同一份素材用两次 = 两个片段；Deck 3 上一前一后
     assert [k.clip.asset for k in c.clips if k.clip.deck == 3] == ["A3", "A3"]
     assert c.clip("C5").gen > c.clip("C3").gen
+
+
+def test_fx_example_compiles_clean_and_the_spec_recipes_come_from_it():
+    """效果套路示例（docs/score_v5_fx_example.md）：零错误、零提示，RMX-1000 那几手各用了一处。
+    《曲谱规范 v5》第 8.7 节「常用套路」里的每一行都是从它抄的（一字不差），所以规范里建议的写法保证编得过；
+    第 8.6 节对照表里写到的类型解析器都认识。"""
+    import re
+
+    from djstudio.v5.score import FX_KIND, _key
+
+    r = parse(FX_EXAMPLE)
+    assert r.ok and not r.issues, [str(i) for i in r.issues]
+    c = compile_project(r.project, resolve)
+    assert c.ok and not c.issues, [str(i) for i in c.issues]
+    assert {f.kind for f in r.project.fx} == {"echo", "reverb", "trans", "roll", "release", "noise", "sample", "filter_echo", "flanger", "spiral"}
+    assert len(r.project.fx) == 12 and len(r.project.scenes) == 3 and all(not sc.draft and not sc.missing() for sc in r.project.scenes)
+    ch = chart(c)
+    assert [(h["from"], h["to"]) for h in ch["handovers"]] == [("C1", "C2")] and ch["handovers"][0]["swap"] == 320  # 一次交接，第 81 小节换低频
+    spec = (DOCS / "SCORE_SPEC_V5.md").read_text(encoding="utf-8")
+    recipes = spec[spec.index("### 8.7"):spec.index("## 9 ")]
+    rows = [ln for ln in recipes.splitlines() if ln.startswith("| F")]
+    have = set(FX_EXAMPLE.read_text(encoding="utf-8").splitlines())
+    assert len(rows) == 12 and len(set(rows)) == 12 and all(ln in have for ln in rows), [ln for ln in rows if ln not in have]
+    table = spec[spec.index("### 8.6"):spec.index("### 8.7")]
+    names = set(re.findall(r"`([A-Z][A-Za-z]*(?: Echo)?|采样)`", table)) - {"LOW", "MID", "HIGH"}
+    assert names == {"Trans", "Roll", "Echo", "Noise", "Spiral", "Reverb", "Flanger", "Phaser", "Filter Echo", "Filter", "采样", "Release"}, names
+    assert all(FX_KIND.get(_key(n)) for n in names)
+
+
+def test_what_the_rmx_table_says_is_missing_is_an_error_not_a_silent_skip():
+    """对照表里写着「没做」的那几种（Gate、Crush Echo…）：谱里写了是错误（类型不认识，带行号），不会悄悄跳过。
+    表里说「反过来写」「换个模式」的那几种写法都编得过。"""
+    base = FX_EXAMPLE.read_text(encoding="utf-8")
+
+    def issues(old, new):
+        assert base.count(old) == 1, old
+        r = parse_text(base.replace(old, new), "fx")
+        out = [(i.level, i.code) for i in r.issues]
+        if r.ok:
+            out += [(i.level, i.code) for i in compile_project(r.project, resolve).issues]
+        return out
+
+    for kind in ("Crush Echo", "Gate", "Drive"):
+        r = parse_text(base.replace("| F8 | Flanger |", f"| F8 | {kind} |"), "fx")
+        assert not r.ok and [(i.level, i.code) for i in r.issues] == [("error", "fx")] and r.issues[0].line and "不认识" in r.issues[0].msg
+    assert issues("音高 +12", "音高 -12") == []  # Spiral Down
+    assert issues("频率 400Hz → 8kHz", "频率 8kHz → 400Hz") == []  # 往下扫的噪声
+    assert issues("模式 高通；截止 40Hz → 2kHz", "模式 低通；截止 16kHz → 300Hz") == []  # LPF Echo
+    assert issues("方式 刹车；退场", "方式 回转；退场") == []  # Back Spin
+    assert issues("| snare | 80.1 | 81.1 | 重复 1/4拍；音量 0.5 |", "| hat | 80.1 | 81.1 | 重复 1/8拍；音量 0.5 |") == []  # 打击垫连打
+    assert issues("| F11 | Roll |", "| F13 | Filter | 插入 | C2 | 133.1 | 141.1 | 模式 低通；截止 16kHz → 800Hz | 往下沉 |\n| F11 | Roll |") == []  # Reverb Down 的近似
 
 
 def test_example_round_trips_through_the_writer():

@@ -348,7 +348,8 @@ def create_app(studio: Studio) -> FastAPI:
     def api_score_doc(name: str, download: int = 0) -> Response:
         """《打碟谱规范》和打碟谱模板（docs/SCORE_SPEC.md、docs/score_template.md）：写谱时照着用。"""
         files = {"spec.md": ("SCORE_SPEC.md", "打碟谱规范.md"), "template.md": ("score_template.md", "打碟谱模板.md"),
-                 "spec5.md": ("SCORE_SPEC_V5.md", "曲谱规范 v5.md"), "example5.md": ("score_v5_example.md", "四 Deck 场景示例.md")}
+                 "spec5.md": ("SCORE_SPEC_V5.md", "曲谱规范 v5.md"), "example5.md": ("score_v5_example.md", "四 Deck 场景示例.md"),
+                 "fx5.md": ("score_v5_fx_example.md", "效果套路示例.md")}
         if name not in files:
             raise HTTPException(404, name)
         src, save_as = files[name]

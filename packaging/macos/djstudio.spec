@@ -12,7 +12,8 @@ VERSION = os.environ.get("DJSTUDIO_APP_VERSION", "0.0.0")
 datas = collect_data_files("djstudio")  # 网页文件、引擎脚本（DJStudio.js / .midi.xml）
 # 《打碟谱规范》和模板：首页可以下载（djstudio/plan/mdplan.py score_doc）
 datas += [(os.path.join(ROOT, "docs", f), os.path.join("djstudio", "docs"))
-          for f in ("SCORE_SPEC.md", "score_template.md", "SCORE_SPEC_V5.md", "score_v5_example.md")]  # v5：四 Deck 的规范和示例谱
+          for f in ("SCORE_SPEC.md", "score_template.md", "SCORE_SPEC_V5.md", "score_v5_example.md",
+                    "score_v5_fx_example.md")]  # v5：四 Deck 的规范、示例谱、效果套路示例
 datas.append((os.path.join(ENGINE, "res", "controllers", "common-controller-scripts.js"),
               os.path.join("engine", "res", "controllers")))
 binaries = [(os.path.join(ENGINE, "djstudio-engine"), "engine")]

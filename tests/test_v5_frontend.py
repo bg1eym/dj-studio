@@ -21,7 +21,7 @@ BEATS = [0.0, 100.0, 384.0, 400.5, 448.0, 600.0, 704.0, 730.0, 768.0, 960.0]
 
 SCRIPT = r"""
 import { eqHours, eqDb, laneFrac, nativeOf, waveCol, eachSrcBar, globalOfSrc, clipSpans, clipPick, clipBands, secAt, clock, pageStart, glide,
-  overlayFrac, elemLevel, filterPass, GRID_NOON, passThrough, cellLook, LAMP, gridY, fxCat, faderGate, FADER_GATE, timeTicks } from "./live5.js";
+  overlayFrac, elemLevel, filterPass, GRID_NOON, passThrough, cellLook, LAMP, gridY, fxCat, faderGate, FADER_GATE, timeTicks, sectionAt } from "./live5.js";
 import { eqHours as v4Hours, faderPos } from "./live.js";
 import { overviewColumns, stackColumn } from "./wavedraw.js";
 const out = {};
@@ -130,6 +130,16 @@ out.scenePages = [320, 330, 415.9, 416].map((b) => pageStart(b, 128, 320)); // �
   const ramp = { tempo: tempo, length: 768 };
   out.ticksRamp = timeTicks(ramp).map((t) => [t.text, +secAt(ramp.tempo, t.beat).toFixed(3)]);
   out.ticksNone = timeTicks({ tempo: [{ at: 0, bpm: 120 }], length: 0 });
+}
+// EQ 图的「整个场景」「整个交接」两档：全场第几拍落在哪一段（一页显示的就是它）
+{
+  const ch = { length: 960, scenes: [{ no: 1, start: 0, end: 128 }, { no: 2, start: 128, end: 320 }],
+    handovers: [{ n: 1, start: 352, end: 480 }, { n: 2, start: 600, end: 700 }, { n: 3, start: 680, end: 760 }, { n: 4, start: 800, end: 800 }] };
+  const sec = (b, m) => { const x = sectionAt(ch, b, m); return [x.start, x.end, x.kind]; };
+  out.sect = { s10: sec(10, "scene"), sNeg: sec(-8, "scene"), s200: sec(200, "scene"), s330: sec(330, "scene"), s400: sec(400, "scene"), s500: sec(500, "scene"),
+    h10: sec(10, "ho"), h400: sec(400, "ho"), h650: sec(650, "ho"), h720: sec(720, "ho"), h780: sec(780, "ho"), h900: sec(900, "ho"), hEnd: sec(5000, "ho") };
+  const bare = sectionAt({ length: 640 }, 100, "scene");
+  out.secBare = [bare.start, bare.end, bare.kind];
 }
 console.log(JSON.stringify(out));
 """
@@ -284,6 +294,21 @@ def test_the_four_knob_lines_on_the_grid_sit_side_by_side(out):
     assert g["mid0"] == pytest.approx((g["mid"] + g["lo"]) / 2)
     assert g["top"] - 2.25 >= g["box"][0] and g["bottom"] + 2.25 <= g["box"][1]
     assert out["cat"] == ["send", "proc", "proc", "sample"]
+
+
+def test_eq_view_pages_by_scene_or_by_handover(out):
+    """EQ 图一页看多少（曲谱规范 v5 第 5 节）。「整个场景」：一页 = 游标所在的场景；这里没写场景，就按交接分，但不伸进旁边的场景。
+    「整个交接」：一页 = 一次主要的交接，叠着的几次并成一段；不在交接里 = 两次交接之间那一段；直接接上的（零长度）只当分界。"""
+    s = out["sect"]
+    assert s["s10"] == s["sNeg"] == [0, 128, "scene"] and s["s200"] == [128, 320, "scene"]
+    assert s["s330"] == [320, 352, "gap"]  # 场景 2 完了、交接 1 还没开始：不伸回场景里
+    assert s["s400"] == [352, 480, "ho"]  # 没写场景的地方正好在交接里：一页 = 这次交接
+    assert s["s500"] == [480, 600, "gap"]
+    assert s["h10"] == [0, 352, "gap"]  # 「整个交接」不看场景：开头到第一次交接是一段
+    assert s["h400"] == [352, 480, "ho"]
+    assert s["h650"] == s["h720"] == [600, 760, "ho"]  # 交接 2、3 叠着：并成一段
+    assert s["h780"] == [760, 800, "gap"] and s["h900"] == s["hEnd"] == [800, 960, "gap"]  # 零长度的交接只当分界
+    assert out["secBare"] == [0, 640, "gap"]  # 没有场景也没有交接：整场一段（太长的由画面自己分页）
 
 
 def test_time_ticks_of_the_whole_set(out):

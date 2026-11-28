@@ -18,9 +18,15 @@ import {
 } from "./chart5.js";
 
 const DECK_HEX = { 1: "#3d8bea", 2: "#dc7526", 3: "#27ae60", 4: "#9c7cec" };
-const ZOOMS = [8, 16, 32, "scene"];
-const ZOOM_ZH = { 8: "8 小节", 16: "16 小节", 32: "32 小节", scene: "整个场景" };
-const MIN_BAR_PX = 12; // 再长的场景也不把一小节压到比这更窄：翻页，不缩（64 小节的场景在 13 寸屏上还放得进一页）
+const ZOOMS = [8, 16, 32, "scene", "ho"];
+const ZOOM_ZH = { 8: "8 小节", 16: "16 小节", 32: "32 小节", scene: "整个场景", ho: "整个交接" };
+const ZOOM_TIP = {
+  scene: "一页 = 游标所在的那个场景，整个压进一页（谱里场景怎么切，这里就怎么翻页；没写场景的那一段按交接分）",
+  ho: "一页 = 一次主要的交接，从下一首进来到上一首走完，整个压进一页（不管谱里场景怎么切）；两次交接之间的那一段自己一页",
+};
+// 「整个场景」「整个交接」是把一整段压进一页：一小节最窄压到这么宽（1440 宽的屏放得下 160 小节左右）；再长才分页。
+// 用户要的：交接要一眼看全，小节压一压没关系
+const MIN_BAR_PX = 5;
 const CH_W = 74; // 调音台一个通道的宽（定宽：读数、效果的名字变了不撑开）
 const LEAD_IN = 8; // 开演前留两小节（装载、摆旋钮）
 const SPAN_S = 7; // 每台 Deck 的滚动波形：播放头两侧各 7 秒（音乐里的时间），四台同一比例
@@ -296,6 +302,33 @@ export function timeTicks(chart) {
   return out;
 }
 
+// 「整个场景」「整个交接」这两档里，全场第 beat 拍所在的那一段（一页显示的就是它）。返回 { start, end, kind }：
+// - mode "scene"：这一拍所在的场景（kind "scene"）；这里没写场景，就按交接分（同下），但不伸进旁边的场景；
+// - mode "ho"：这一拍所在的主要交接——从下一首进来到上一首走完，几次叠着的并成一段（kind "ho"）；
+//   不在交接里 = 上一次交接完到下一次交接开始的那一段（kind "gap"）。
+// 直接接上的交接（零长度）不算一段，只当分界。
+export function sectionAt(chart, beat, mode = "scene") {
+  const len = chart.length || 0, b = Math.max(0, Math.min(beat, Math.max(0, len - 1e-6)));
+  if (mode === "scene") {
+    const s = sceneAt(chart, b);
+    if (s) return { start: s.start, end: s.end, kind: "scene" };
+  }
+  const all = chart.handovers || [], hos = all.filter((h) => h.end > h.start);
+  const inside = hos.filter((h) => b >= h.start && b < h.end);
+  if (inside.length) {
+    let a = Math.min(...inside.map((h) => h.start)), e = Math.max(...inside.map((h) => h.end));
+    for (let grew = true; grew;) { // 和它叠着的也并进来
+      grew = false;
+      for (const h of hos) if (h.start < e && h.end > a && (h.start < a || h.end > e)) { a = Math.min(a, h.start); e = Math.max(e, h.end); grew = true; }
+    }
+    return { start: a, end: e, kind: "ho" };
+  }
+  let a = 0, e = len;
+  for (const h of all) { if (h.end <= b) a = Math.max(a, h.end); if (h.start > b) e = Math.min(e, h.start); }
+  if (mode === "scene") for (const s of chart.scenes || []) { if (s.end <= b) a = Math.max(a, s.end); if (s.start > b) e = Math.min(e, s.start); }
+  return { start: a, end: Math.max(e, a + BEATS), kind: "gap" };
+}
+
 // 曲线一页一页地看：第 beat 拍落在哪一页（返回这一页左边是第几拍）。一页 span 拍，游标只在前 (1 - PAGE_AHEAD) 里走，
 // 走到最后那一截就翻页，新的一页从游标这里开始——所以一页里的线不动，后面至少 PAGE_AHEAD 页要做的事一直看得到。
 // base = 从哪一拍开始数页（全场 = 0；按场景看而场景比一页长 = 场景的开头）
@@ -357,7 +390,7 @@ export class Live5View {
     this.zoom = "scene"; // 默认一页 = 一个场景：这一页整段不动，换场景才翻
     try {
       const z = localStorage.getItem("djs.l5.zoom");
-      if (z) this.zoom = z === "scene" ? z : ZOOMS.includes(+z) ? +z : "scene";
+      if (z) this.zoom = z === "scene" || z === "ho" ? z : ZOOMS.includes(+z) ? +z : "scene";
     } catch { /* 无痕窗口 */ }
     this.b0 = -LEAD_IN;
     this.ppb = 20;
@@ -450,7 +483,7 @@ export class Live5View {
     this.zoomBtns = {};
     // 曲线只显示正在放的那一页（不能用鼠标挪）：这一页不动，游标从左往右走；走到最后四分之一页（整个场景：走完这个场景）翻到下一页
     const tools = el("span", { class: "l5-tools" }, el("span", { class: "l5-lab", title: "曲线只显示正在放的那一页：这一页不动，游标从左往右走；走到最后四分之一页（「整个场景」：走完这个场景）自动翻到下一页" }, "一页"),
-      ZOOMS.map((z) => (this.zoomBtns[z] = el("button", { class: "small", onclick: () => this._setZoom(z) }, ZOOM_ZH[z]))));
+      ZOOMS.map((z) => (this.zoomBtns[z] = el("button", { class: "small", title: ZOOM_TIP[z] || null, onclick: () => this._setZoom(z) }, ZOOM_ZH[z]))));
     this.lnWhere = el("span", { class: "tl-where mono l5-lnwhere" });
     this.lgutter = el("div", { class: "l5-gutter l5-lgutter" });
     this.lcanvas = el("canvas", { class: "l5-canvas l5-lcanvas", role: "img", "aria-label": "每台 Deck 的 EQ、Filter、推子曲线（谱上写的），只显示正在放的那一页。点一下从那一小节放" });
@@ -770,12 +803,14 @@ export class Live5View {
     if (this.chart) { this._relayout(); this._kick(true); }
   }
 
+  // 「整个场景」「整个交接」：游标所在的那一段（别的档 = null）
+  _section(beat) {
+    return this.zoom === "scene" || this.zoom === "ho" ? sectionAt(this.chart, beat, this.zoom) : null;
+  }
+
   _span() { // 一屏几拍
-    if (this.zoom === "scene") {
-      const s = sceneAt(this.chart, this._beatNow()) || (this.chart.scenes || [])[0];
-      return s ? s.end - s.start : 64;
-    }
-    return this.zoom * BEATS;
+    const s = this._section(this._beatNow());
+    return s ? Math.max(BEATS, s.end - s.start) : this.zoom * BEATS;
   }
 
   _relayout() {
@@ -871,7 +906,7 @@ export class Live5View {
   // 新的一页从游标这里开始。「整个场景」而且一屏放得下：这一页就是这个场景，换场景才翻
   _followTo(beat) {
     const [lo, hi, span] = this._viewRange();
-    const s = this.zoom === "scene" ? sceneAt(this.chart, beat) : null;
+    const s = this._section(beat);
     if (s && (s.end - s.start) * this.ppb <= this.W + 1) { this.b0 = Math.max(lo, Math.min(hi, s.start)); return; }
     this.b0 = Math.max(lo, Math.min(hi, pageStart(beat, span, s ? s.start : 0)));
   }
@@ -896,10 +931,9 @@ export class Live5View {
     if (!this.chart || !this.W || !this.lnRows) return;
     const beat = this._beatNow();
     if (moving || this.dirty) { // 曲线永远停在游标所在的那一页
-      if (this.zoom === "scene") { // 换了场景：一屏的小节数跟着变
-        const s = sceneAt(this.chart, beat);
-        if ((s ? s.no : 0) !== this._zoomScene) { this._zoomScene = s ? s.no : 0; this._relayout(); }
-      }
+      const sec = this._section(beat); // 换了一段（场景 / 交接）：一屏的小节数跟着变
+      const key = sec ? `${sec.start}:${sec.end}` : "";
+      if (key !== this._zoomKey) { this._zoomKey = key; if (sec) this._relayout(); }
       this._followTo(beat);
     }
     if (this.elemRows && this.elemRows.length && this.b0 !== this._drawnB0 && [...this._decksOnPage()].join(",") !== this._pageKey) this._relayout(); // 这一页上有片段的 Deck 变了
